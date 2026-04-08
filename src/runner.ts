@@ -30,7 +30,7 @@ function parseModelId(modelId: string): { provider: string; name: string } {
   return { provider: m[1], name: m[2] };
 }
 
-async function generateText(opts: { model: string; system: string; prompt: string; max_tokens?: number; temperature?: number; }): Promise<string> {
+async function generateText(opts: { model: string; system: string; prompt: string; max_tokens?: number; temperature?: number; jsonSchema?: any; }): Promise<string> {
   const { provider, name } = parseModelId(opts.model);
 
   try {
@@ -60,7 +60,7 @@ async function generateText(opts: { model: string; system: string; prompt: strin
       const baseUrl = process.env.CAMBIUM_OMLX_BASEURL ?? 'http://100.114.183.54:8080';
       const url = `${baseUrl.replace(/\/$/, '')}/v1/chat/completions`;
 
-      const body = {
+      const body: any = {
         model: name,
         temperature: opts.temperature ?? 0.2,
         max_tokens: opts.max_tokens ?? 1200,
@@ -69,6 +69,25 @@ async function generateText(opts: { model: string; system: string; prompt: strin
           { role: 'user', content: opts.prompt }
         ]
       };
+
+      // Structured output (vLLM-compatible) — requires xgrammar enabled on the server.
+      // oMLX release notes mention `structured_outputs` support; vLLM docs widely support `guided_json`.
+      if (opts.jsonSchema && (process.env.CAMBIUM_OMLX_GUIDED_JSON ?? '1') === '1') {
+        body.extra_body = {
+          guided_json: opts.jsonSchema
+        };
+      }
+
+      // Some servers also support OpenAI-style response_format. Enable optionally.
+      if (opts.jsonSchema && (process.env.CAMBIUM_OMLX_RESPONSE_FORMAT ?? '0') === '1') {
+        body.response_format = {
+          type: 'json_schema',
+          json_schema: {
+            name: opts.jsonSchema?.$id ?? 'Schema',
+            schema: opts.jsonSchema
+          }
+        };
+      }
 
       const apiKey = process.env.CAMBIUM_OMLX_API_KEY;
       const headers: Record<string, string> = { 'content-type': 'application/json' };
@@ -190,7 +209,8 @@ async function main() {
     system,
     prompt,
     max_tokens: outMax,
-    temperature: ir.model.temperature
+    temperature: ir.model.temperature,
+    jsonSchema: schema
   });
   trace.steps.push({ id: genStep.id, type: 'Generate', ms: Date.now() - started, raw_preview: raw.slice(0, 400) });
 
@@ -243,7 +263,7 @@ async function main() {
     ].join('\n');
 
     const rStarted = Date.now();
-    raw = await generateText({ model: ir.model.id, system: repairSystem, prompt: repairPrompt, max_tokens: ir.model.max_tokens, temperature: ir.model.temperature });
+    raw = await generateText({ model: ir.model.id, system: repairSystem, prompt: repairPrompt, max_tokens: outMax, temperature: ir.model.temperature, jsonSchema: schema });
     trace.steps.push({ type: 'Repair', attempt: attempt + 1, ms: Date.now() - rStarted, raw_preview: raw.slice(0, 400) });
   }
 
