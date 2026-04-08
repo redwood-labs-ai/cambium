@@ -71,11 +71,9 @@ async function generateText(opts: { model: string; system: string; prompt: strin
       };
 
       // Structured output (vLLM-compatible) — requires xgrammar enabled on the server.
-      // oMLX release notes mention `structured_outputs` support; vLLM docs widely support `guided_json`.
-      if (opts.jsonSchema && (process.env.CAMBIUM_OMLX_GUIDED_JSON ?? '1') === '1') {
-        body.extra_body = {
-          guided_json: opts.jsonSchema
-        };
+      // vLLM docs (newer) use: extra_body: { structured_outputs: { json: <schema> } }
+      if (opts.jsonSchema && (process.env.CAMBIUM_OMLX_STRUCTURED_OUTPUTS ?? '1') === '1') {
+        body.extra_body = { structured_outputs: { json: opts.jsonSchema } };
       }
 
       // Some servers also support OpenAI-style response_format. Enable optionally.
