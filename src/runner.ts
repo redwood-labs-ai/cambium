@@ -154,21 +154,42 @@ async function main() {
   const genStep = ir.steps.find((s: any) => s.type === 'Generate');
   if (!genStep) throw new Error('IR missing Generate step');
 
+  const jsonTemplate = {
+    summary: "",
+    metrics: { latency_ms_samples: [] as number[] },
+    key_facts: [] as any[]
+  };
+
   const system = [
     'You are a professional analyst.',
-    'Return ONLY valid JSON. No markdown. No code fences.',
-    `The JSON MUST validate against schema id: ${schema.$id}.`,
-    'If you are unsure, use empty strings/empty arrays, but still satisfy the schema.'
-  ].join(' ');
+    'CRITICAL OUTPUT RULES:',
+    '- Output MUST be JSON only. No markdown. No code fences.',
+    '- Do NOT include any reasoning, thoughts, or preambles (no "Thinking" / "Thinking Process").',
+    '- Output must start with "{" and end with "}".',
+    `- JSON MUST validate against schema id: ${schema.$id}.`,
+    '- Do not invent extra top-level keys. Use exactly: summary, metrics, key_facts.',
+    '- If unsure, leave fields empty but valid.'
+  ].join('\n');
 
-  const prompt = `${genStep.prompt}\n\nDOCUMENT:\n${doc}`;
+  const prompt = [
+    `${genStep.prompt}`,
+    '',
+    'DOCUMENT:',
+    String(doc ?? ''),
+    '',
+    'OUTPUT_JSON_TEMPLATE (fill this; keep keys the same; no extra keys):',
+    JSON.stringify(jsonTemplate),
+  ].join('\n');
 
   const started = Date.now();
+  // v0.1: cap output tokens to reduce rambling/truncation risk.
+  const outMax = Math.min(Number(ir.model.max_tokens ?? 1200), 500);
+
   let raw = await generateText({
     model: ir.model.id,
     system,
     prompt,
-    max_tokens: ir.model.max_tokens,
+    max_tokens: outMax,
     temperature: ir.model.temperature
   });
   trace.steps.push({ id: genStep.id, type: 'Generate', ms: Date.now() - started, raw_preview: raw.slice(0, 400) });
@@ -199,17 +220,24 @@ async function main() {
     // Repair
     const repairSystem = [
       'You are repairing JSON to satisfy a schema.',
-      'Return ONLY valid JSON. No markdown. No code fences.',
-      'Edit ONLY the fields necessary to fix the validation errors.',
-      `Schema id: ${schema.$id}.`
-    ].join(' ');
+      'CRITICAL OUTPUT RULES:',
+      '- Output MUST be JSON only. No markdown. No code fences.',
+      '- Do NOT include reasoning or preambles.',
+      '- Output must start with "{" and end with "}".',
+      '- Edit ONLY the fields necessary to fix the validation errors.',
+      `- Schema id: ${schema.$id}.`,
+      '- Do not add extra top-level keys. Use exactly: summary, metrics, key_facts.'
+    ].join('\n');
 
     const repairPrompt = [
-      'ORIGINAL_JSON:',
+      'ORIGINAL_OUTPUT (may be invalid):',
       raw,
       '',
       'VALIDATION_ERRORS:',
       JSON.stringify(errors, null, 2),
+      '',
+      'OUTPUT_JSON_TEMPLATE (return this shape; keep keys the same; no extra keys):',
+      JSON.stringify(jsonTemplate),
       '',
       'Return repaired JSON only.'
     ].join('\n');
