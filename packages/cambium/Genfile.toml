@@ -1,0 +1,19 @@
+[package]
+name = "cambium"
+version = "0.1.0"
+kinds = ["app", "tooling"]
+
+[docs]
+root = "docs"
+
+[types]
+contracts = ["src/contracts.ts"]
+
+[exports.gens]
+Analyst = "app/gens/analyst.cmb.rb"
+
+[exports.entrypoints]
+analyze = "Analyst#analyze"
+
+[tests]
+smoke = "tests/smoke.test.ts"

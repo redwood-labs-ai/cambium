@@ -1,0 +1,37 @@
+import { Type } from '@sinclair/typebox'
+
+// NOTE: TypeBox schemas are JSON Schema by construction.
+export const AnalysisReport = Type.Object(
+  {
+    summary: Type.String(),
+    metrics: Type.Object(
+      {
+        latency_ms_samples: Type.Array(Type.Number()),
+        avg_latency_ms: Type.Optional(Type.Number()),
+      },
+      { additionalProperties: false }
+    ),
+    key_facts: Type.Array(
+      Type.Object(
+        {
+          fact: Type.String(),
+          // v0.1: citations optional; we’ll enforce later when grounding lands.
+          citations: Type.Optional(
+            Type.Array(
+              Type.Object(
+                {
+                  doc_id: Type.String(),
+                  chunk_id: Type.String(),
+                  quote: Type.Optional(Type.String()),
+                },
+                { additionalProperties: false }
+              )
+            )
+          ),
+        },
+        { additionalProperties: false }
+      )
+    ),
+  },
+  { additionalProperties: false, $id: 'AnalysisReport' }
+)
