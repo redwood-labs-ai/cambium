@@ -4,7 +4,7 @@
 
 class Analyst < GenModel
   # Local-first by convention
-  model "ollama:llama3:70b"
+  model "omlx:Qwen3.5-27B-4bit"
   temperature 0.2
   max_tokens 1200
 

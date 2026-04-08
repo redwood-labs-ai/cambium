@@ -24,32 +24,77 @@ function nowId() {
   return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
 
-async function ollamaGenerate(opts: { model: string; system: string; prompt: string; max_tokens?: number; temperature?: number; }): Promise<string> {
-  const body = {
-    model: opts.model.replace(/^ollama:/, ''),
-    prompt: `${opts.system}\n\n${opts.prompt}`,
-    stream: false,
-    options: {
-      temperature: opts.temperature ?? 0.2,
-      num_predict: opts.max_tokens ?? 1200,
-    }
-  };
+function parseModelId(modelId: string): { provider: string; name: string } {
+  const m = modelId.match(/^([a-zA-Z0-9_-]+):(.*)$/);
+  if (!m) return { provider: 'ollama', name: modelId };
+  return { provider: m[1], name: m[2] };
+}
+
+async function generateText(opts: { model: string; system: string; prompt: string; max_tokens?: number; temperature?: number; }): Promise<string> {
+  const { provider, name } = parseModelId(opts.model);
 
   try {
-    const res = await fetch('http://localhost:11434/api/generate', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-    if (!res.ok) throw new Error(`Ollama error: HTTP ${res.status}`);
-    const json: any = await res.json();
-    return json.response as string;
+    if (provider === 'ollama') {
+      const body = {
+        model: name,
+        prompt: `${opts.system}\n\n${opts.prompt}`,
+        stream: false,
+        options: {
+          temperature: opts.temperature ?? 0.2,
+          num_predict: opts.max_tokens ?? 1200,
+        }
+      };
+
+      const res = await fetch('http://localhost:11434/api/generate', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) throw new Error(`Ollama error: HTTP ${res.status}`);
+      const json: any = await res.json();
+      return json.response as string;
+    }
+
+    if (provider === 'omlx') {
+      // oMLX server (OpenAI-compatible)
+      const baseUrl = process.env.CAMBIUM_OMLX_BASEURL ?? 'http://100.114.183.54:8080';
+      const url = `${baseUrl.replace(/\/$/, '')}/v1/chat/completions`;
+
+      const body = {
+        model: name,
+        temperature: opts.temperature ?? 0.2,
+        max_tokens: opts.max_tokens ?? 1200,
+        messages: [
+          { role: 'system', content: opts.system },
+          { role: 'user', content: opts.prompt }
+        ]
+      };
+
+      const apiKey = process.env.CAMBIUM_OMLX_API_KEY;
+      const headers: Record<string, string> = { 'content-type': 'application/json' };
+      if (apiKey) headers['authorization'] = `Bearer ${apiKey}`;
+
+      const res = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) throw new Error(`oMLX error: HTTP ${res.status}`);
+      const json: any = await res.json();
+      const content = json?.choices?.[0]?.message?.content;
+      if (!content) throw new Error('oMLX: missing choices[0].message.content');
+      return content as string;
+    }
+
+    throw new Error(`Unknown model provider: ${provider}`);
   } catch (err: any) {
-    // Allow a deterministic mock for local development when Ollama isn't running.
+    // Allow a deterministic mock for local development when the provider isn't reachable.
     if (process.env.CAMBIUM_ALLOW_MOCK === '1') {
       return mockGenerate(opts.prompt);
     }
-    const hint = "Ollama fetch failed. Start Ollama (`ollama serve`) or set CAMBIUM_ALLOW_MOCK=1 for deterministic mock output.";
+    const hint = provider === 'omlx'
+      ? 'oMLX fetch failed. Check CAMBIUM_OMLX_BASEURL (default http://100.114.183.54:8080) and server status.'
+      : 'Ollama fetch failed. Start Ollama (`ollama serve`).';
     throw new Error(`${hint}\nOriginal error: ${err?.message ?? String(err)}`);
   }
 }
@@ -57,7 +102,7 @@ async function ollamaGenerate(opts: { model: string; system: string; prompt: str
 function mockGenerate(prompt: string): string {
   const matches = [...prompt.matchAll(/(\d+(?:\.\d+)?)\s*ms\b/gi)].map(m => Number(m[1]));
   const payload = {
-    summary: 'Mock analysis (Ollama not available).',
+    summary: 'Mock analysis (model provider not available).',
     metrics: {
       latency_ms_samples: matches
     },
@@ -119,7 +164,7 @@ async function main() {
   const prompt = `${genStep.prompt}\n\nDOCUMENT:\n${doc}`;
 
   const started = Date.now();
-  let raw = await ollamaGenerate({
+  let raw = await generateText({
     model: ir.model.id,
     system,
     prompt,
@@ -170,7 +215,7 @@ async function main() {
     ].join('\n');
 
     const rStarted = Date.now();
-    raw = await ollamaGenerate({ model: ir.model.id, system: repairSystem, prompt: repairPrompt, max_tokens: ir.model.max_tokens, temperature: ir.model.temperature });
+    raw = await generateText({ model: ir.model.id, system: repairSystem, prompt: repairPrompt, max_tokens: ir.model.max_tokens, temperature: ir.model.temperature });
     trace.steps.push({ type: 'Repair', attempt: attempt + 1, ms: Date.now() - rStarted, raw_preview: raw.slice(0, 400) });
   }
 
