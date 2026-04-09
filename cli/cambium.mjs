@@ -1,24 +1,63 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { runGenerate } from './generate.mjs';
 
 function usage(msg) {
   if (msg) console.error(`\n${msg}`);
-  console.error(`\nUsage:\n  cambium run <file.cmb.rb> --method <method> --arg <path>|-\n\nExamples:\n  cambium run packages/cambium/app/gens/analyst.cmb.rb --method analyze --arg packages/cambium/examples/fixtures/incident.txt\n`);
+  console.error(`
+Cambium — Rails for generation engineering
+
+Usage:
+  cambium run <file.cmb.rb> --method <method> --arg <path>|-
+  cambium new <type> <Name>
+  cambium test
+
+Commands:
+  run       Compile and execute a GenModel
+  new       Scaffold a new agent, tool, schema, system, or corrector
+  test      Run the test suite
+
+Examples:
+  cambium run packages/cambium/app/gens/analyst.cmb.rb --method analyze --arg document.txt
+  cambium new agent BtcAnalyst
+  cambium new tool price_fetcher
+  cambium new schema TradeSignal
+  cambium test
+`);
   process.exit(2);
 }
 
-const [cmd, file, ...rest] = process.argv.slice(2);
+const [cmd, ...args] = process.argv.slice(2);
 if (!cmd) usage();
+
+// ── cambium new ───────────────────────────────────────────────────────
+if (cmd === 'new') {
+  const [type, name] = args;
+  runGenerate(type, name);
+  process.exit(0);
+}
+
+// ── cambium test ──────────────────────────────────────────────────────
+if (cmd === 'test') {
+  const result = spawnSync('npx', ['vitest', 'run', ...args], {
+    stdio: 'inherit',
+    encoding: 'utf8',
+  });
+  process.exit(result.status ?? 1);
+}
+
+// ── cambium run ───────────────────────────────────────────────────────
 if (cmd !== 'run') usage(`Unknown command: ${cmd}`);
+
+const file = args[0];
 if (!file) usage('Missing .cmb.rb file');
 
 let method = null;
 let arg = null;
-for (let i = 0; i < rest.length; i++) {
-  const a = rest[i];
-  if (a === '--method') method = rest[++i];
-  else if (a === '--arg') arg = rest[++i];
+for (let i = 1; i < args.length; i++) {
+  const a = args[i];
+  if (a === '--method') method = args[++i];
+  else if (a === '--arg') arg = args[++i];
   else usage(`Unknown arg: ${a}`);
 }
 if (!method) usage('Missing --method');
