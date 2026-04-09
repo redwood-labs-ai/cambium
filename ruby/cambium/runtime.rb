@@ -88,6 +88,15 @@ module Cambium
         _cambium_defaults[:constraints][key.to_s] = opts
       end
 
+      # Grounding: declare that outputs must be grounded in a source.
+      #   grounded_in :document, require_citations: true
+      def grounded_in(source, require_citations: false)
+        _cambium_defaults[:grounding] = {
+          'source' => source.to_s,
+          'require_citations' => require_citations
+        }
+      end
+
       # Signals: declare a typed extraction from the output.
       #   extract :latency_ms, type: :number, path: "metrics.latency_ms_samples"
       def extract(name, type: :any, unit: nil, path: nil)

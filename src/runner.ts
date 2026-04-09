@@ -451,7 +451,39 @@ async function main() {
       }
     }
 
-    // 4. Signals + Triggers (general-purpose tool dispatch)
+    // 5. Grounding: citation enforcement (auto-registered when grounded_in is declared)
+    const grounding = ir.policies?.grounding;
+    if (grounding?.require_citations) {
+      const citResult = handleCorrect(parsed, ['citations'], { document: ir.context?.document });
+      trace.steps.push({ ...citResult, type: 'GroundingCheck' });
+
+      const citErrors = citResult.meta?.issues?.filter((i: any) => i.severity === 'error') ?? [];
+      if (citErrors.length > 0) {
+        // Feed citation errors into repair
+        const repairErrors = citErrors.map((i: any) => ({
+          message: `Grounding: ${i.message}`,
+          instancePath: i.path,
+        }));
+        const repair = await handleRepair(
+          JSON.stringify(parsed, null, 2), repairErrors, schema, ir,
+          maxRepairAttempts + 1, generateText, extractJsonObject,
+        );
+        trace.steps.push(repair.result);
+
+        if (repair.parsed) {
+          const revalidate = handleValidate(repair.parsed, validate, 'ValidateAfterGrounding');
+          if (revalidate.ok) {
+            parsed = repair.parsed;
+            trace.steps.push(revalidate);
+          } else {
+            trace.steps.push(revalidate);
+            // Grounding repair failed — continue with original
+          }
+        }
+      }
+    }
+
+    // 6. Signals + Triggers (general-purpose tool dispatch)
     const signalDefs = ir.signals ?? [];
     const triggerDefs = ir.triggers ?? [];
 

@@ -3,22 +3,56 @@
 **Doc ID:** gen-dsl/primitive/grounded-in
 
 ## Purpose
-Enable retrieval grounding from a named source (corpus) and enforce provenance policies (citations/spans).
+Enforce that outputs are grounded in a source document with verifiable citations. When grounding is active, the model must include verbatim quotes from the source, and the runtime verifies them.
 
 ## Semantics (normative)
-- When grounding is enabled, the runner MUST execute retrieval before generation.
-- When `require_citations` is enabled, outputs MUST include citations for configured claim fields.
+- When `require_citations: true`, the runner MUST verify all citation quotes against the source document.
+- Citation verification is fuzzy (case-insensitive, whitespace-normalized) but requires substring match.
+- Fabricated citations (quotes not found in the source) are flagged as errors and fed into the repair loop.
+- Missing citations (items without any citations) are flagged as errors.
+- The runtime auto-registers the `citations` corrector — the author does not need to also declare `corrects :citations`.
+- Grounding rules are injected into the system prompt, instructing the model to use exact verbatim quotes.
 
 ## Example
 ```ruby
-grounded_in :company_docs
+class Analyst < GenModel
+  returns AnalysisReport
+  grounded_in :document, require_citations: true
+
+  def analyze(document)
+    generate "analyze this document" do
+      with context: document
+      returns AnalysisReport
+    end
+  end
+end
+```
+
+## What happens at runtime
+1. System prompt includes GROUNDING RULES telling the model to produce verbatim quotes
+2. Model generates output with citations
+3. Regular correctors run (math, dates, etc.)
+4. **GroundingCheck**: citations corrector verifies every quote exists in the source document
+5. If fabricated quotes found → repair loop with specific error messages
+6. If all quotes verified → grounding passes
+
+## IR output
+```json
+"policies": {
+  "grounding": {
+    "source": "document",
+    "require_citations": true
+  }
+}
 ```
 
 ## Failure modes
-- Source not configured or inaccessible.
-- Required citations missing after repair.
+- Fabricated quote: model invents text not in the document → error, triggers repair
+- Missing citations: item has no citations → error, triggers repair
+- Source not available: context field not found → grounding skipped
 
 ## See also
 - [[D - Grounding Sources]]
-- [[C - IR (Intermediate Representation)]]
-- [[N - Failure Modes & Debugging]]
+- [[C - Repair Loop]]
+- [[C - Schema Description (auto-generated)]]
+- [[P - returns]]

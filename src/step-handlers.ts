@@ -45,7 +45,9 @@ export async function handleGenerate(
   const basePrompt = ir.system
     ?? (constraints.tone?.to ? `You are a ${constraints.tone.to} analyst.` : 'You are an analyst.');
 
-  const system = [
+  const grounding = ir.policies?.grounding;
+
+  const systemParts = [
     basePrompt,
     '',
     schemaPromptBlock(schema),
@@ -54,7 +56,19 @@ export async function handleGenerate(
     '- Output MUST be JSON only. No markdown. No code fences. No reasoning.',
     '- Output must start with "{" and end with "}".',
     '- If unsure, leave fields empty but valid.',
-  ].join('\n');
+  ];
+
+  if (grounding?.require_citations) {
+    systemParts.push(
+      '',
+      'GROUNDING RULES:',
+      '- Every item in arrays with a citations field MUST include citations.',
+      '- Each citation MUST include a quote field with EXACT verbatim text from the document.',
+      '- Do not paraphrase or fabricate quotes. Copy text exactly as it appears.',
+    );
+  }
+
+  const system = systemParts.join('\n');
 
   // Build a JSON template from schema properties
   const jsonTemplate: Record<string, any> = {};
@@ -92,7 +106,7 @@ export async function handleGenerate(
 
   const prompt = promptParts.join('\n');
 
-  const outMax = Math.min(Number(ir.model.max_tokens ?? 1200), 500);
+  const outMax = Number(ir.model.max_tokens ?? 1200);
   const started = Date.now();
 
   const genResult = await generateText({
@@ -190,7 +204,7 @@ export async function handleRepair(
     'Return repaired JSON only.',
   ].join('\n');
 
-  const outMax = Math.min(Number(ir.model.max_tokens ?? 1200), 500);
+  const outMax = Number(ir.model.max_tokens ?? 1200);
   const started = Date.now();
 
   const genResult = await generateText({

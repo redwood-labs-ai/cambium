@@ -18,10 +18,10 @@ class Analyst < GenModel
   corrects :math
 
   constrain :tone, to: :professional
-
-  # Consistency: generate N times, compare outputs, flag disagreements.
-  # Higher cost (+1 LLM call per extra pass) but catches non-deterministic errors.
   constrain :compound, strategy: :review
+
+  # Grounding: enforce citations with verbatim quotes from the source document
+  grounded_in :document, require_citations: true
 
   # Signals: extract typed data from the validated output
   extract :latency_ms, type: :number, path: "metrics.latency_ms_samples"

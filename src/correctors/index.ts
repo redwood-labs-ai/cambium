@@ -2,10 +2,11 @@ import type { CorrectorFn, CorrectorResult } from './types.js';
 import { math } from './math.js';
 import { dates } from './dates.js';
 import { currency } from './currency.js';
+import { citations } from './citations.js';
 
 export type { CorrectorFn, CorrectorResult, CorrectorIssue } from './types.js';
 
-export const correctors: Record<string, CorrectorFn> = { math, dates, currency };
+export const correctors: Record<string, CorrectorFn> = { math, dates, currency, citations };
 
 export function runCorrectorPipeline(
   names: string[],
