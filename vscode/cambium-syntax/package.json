@@ -1,13 +1,17 @@
 {
   "name": "cambium-syntax",
   "displayName": "Cambium DSL",
-  "description": "Syntax highlighting for Cambium generation engineering DSL (.cmb.rb)",
-  "version": "0.1.0",
+  "description": "Syntax highlighting, hover docs, go-to-definition, and completions for Cambium (.cmb.rb)",
+  "version": "0.2.0",
   "publisher": "cambium",
   "engines": {
     "vscode": "^1.75.0"
   },
   "categories": ["Programming Languages"],
+  "activationEvents": [
+    "onLanguage:cambium"
+  ],
+  "main": "./src/extension.js",
   "contributes": {
     "languages": [
       {
@@ -24,5 +28,13 @@
         "path": "./syntaxes/cambium.tmLanguage.json"
       }
     ]
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1",
+    "vscode-languageserver": "^9.0.1",
+    "vscode-languageserver-textdocument": "^1.0.12"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.115.0"
   }
 }
