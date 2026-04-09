@@ -11,6 +11,7 @@ import {
 } from './step-handlers.js';
 import { extractSignals } from './signals.js';
 import { evaluateTriggers } from './triggers.js';
+import { runReview, runConsensus } from './compound.js';
 
 type IR = any;
 
@@ -39,7 +40,10 @@ function parseModelId(modelId: string): { provider: string; name: string } {
   return { provider: m[1], name: m[2] };
 }
 
-async function generateText(opts: { model: string; system: string; prompt: string; max_tokens?: number; temperature?: number; jsonSchema?: any; }): Promise<string> {
+type TokenUsage = { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+type GenerateResult = { text: string; usage?: TokenUsage };
+
+async function generateText(opts: { model: string; system: string; prompt: string; max_tokens?: number; temperature?: number; jsonSchema?: any; }): Promise<GenerateResult> {
   const { provider, name } = parseModelId(opts.model);
 
   try {
@@ -61,7 +65,14 @@ async function generateText(opts: { model: string; system: string; prompt: strin
       });
       if (!res.ok) throw new Error(`Ollama error: HTTP ${res.status}`);
       const json: any = await res.json();
-      return json.response as string;
+      return {
+        text: json.response as string,
+        usage: json.prompt_eval_count != null ? {
+          prompt_tokens: json.prompt_eval_count ?? 0,
+          completion_tokens: json.eval_count ?? 0,
+          total_tokens: (json.prompt_eval_count ?? 0) + (json.eval_count ?? 0),
+        } : undefined,
+      };
     }
 
     if (provider === 'omlx') {
@@ -115,14 +126,22 @@ async function generateText(opts: { model: string; system: string; prompt: strin
       const json: any = await res.json();
       const content = json?.choices?.[0]?.message?.content;
       if (!content) throw new Error('oMLX: missing choices[0].message.content');
-      return content as string;
+      const usage = json?.usage;
+      return {
+        text: content as string,
+        usage: usage ? {
+          prompt_tokens: usage.prompt_tokens ?? 0,
+          completion_tokens: usage.completion_tokens ?? 0,
+          total_tokens: usage.total_tokens ?? 0,
+        } : undefined,
+      };
     }
 
     throw new Error(`Unknown model provider: ${provider}`);
   } catch (err: any) {
     // Allow a deterministic mock for local development when the provider isn't reachable.
     if (process.env.CAMBIUM_ALLOW_MOCK === '1') {
-      return mockGenerate(opts.prompt);
+      return { text: mockGenerate(opts.prompt) };
     }
     const hint = provider === 'omlx'
       ? 'oMLX fetch failed. Check CAMBIUM_OMLX_BASEURL (default http://100.114.183.54:8080) and server status.'
@@ -258,7 +277,101 @@ async function main() {
       break;
     }
 
-    // 3. Correctors (deterministic post-validation transforms)
+    // 3. Compound constraints (review / consistency)
+    const constraints = ir.policies?.constraints ?? {};
+
+    // 3a. Compound review: LLM audits the output against the source document
+    if (constraints.compound?.strategy === 'review') {
+      const review = await runReview(parsed, ir, schema, generateText, extractJsonObject);
+      trace.steps.push({
+        type: 'Review',
+        ok: review.ok,
+        ms: review.ms,
+        meta: { issues: review.issues, raw_preview: review.raw_preview, usage: review.usage },
+      });
+
+      if (!review.ok) {
+        // Feed review issues into a repair pass
+        const reviewErrors = review.issues.map(i => ({
+          message: `Review: ${i.message}`,
+          instancePath: i.path,
+        }));
+        const repair = await handleRepair(
+          JSON.stringify(parsed, null, 2), reviewErrors, schema, ir,
+          maxRepairAttempts + 1, generateText, extractJsonObject,
+        );
+        trace.steps.push(repair.result);
+
+        if (repair.parsed) {
+          const revalidate = handleValidate(repair.parsed, validate, 'ValidateAfterReview');
+          if (revalidate.ok) {
+            parsed = repair.parsed;
+            trace.steps.push(revalidate);
+          } else {
+            trace.steps.push(revalidate);
+            // Review repair failed — continue with original (review is advisory)
+          }
+        }
+      }
+    }
+
+    // 3b. Consistency: generate N times, compare, flag disagreements
+    if (constraints.consistency?.passes > 1) {
+      const extraPasses = constraints.consistency.passes - 1;
+      const allOutputs = [parsed];
+
+      for (let p = 0; p < extraPasses; p++) {
+        const extraGen = await handleGenerate(step, ir, schema, generateText, extractJsonObject);
+        trace.steps.push({ ...extraGen.result, id: `${step.id}_pass_${p + 2}` });
+
+        if (extraGen.parsed) {
+          const extraV = handleValidate(extraGen.parsed, validate, 'ValidateConsensusPass');
+          if (extraV.ok) {
+            allOutputs.push(extraGen.parsed);
+          } else {
+            trace.steps.push(extraV);
+            // Invalid extra pass — skip it in consensus
+          }
+        }
+      }
+
+      if (allOutputs.length > 1) {
+        const consensus = runConsensus(allOutputs);
+        trace.steps.push({
+          type: 'Consensus',
+          ok: consensus.ok,
+          meta: {
+            passes: allOutputs.length,
+            disagreements: consensus.disagreements,
+          },
+        });
+
+        if (!consensus.ok) {
+          // Feed disagreements into repair
+          const consensusErrors = consensus.disagreements.map(d => ({
+            message: `Consensus: ${d.message} — values: ${JSON.stringify(d.values)}`,
+            instancePath: d.path,
+          }));
+          const repair = await handleRepair(
+            JSON.stringify(consensus.agreed, null, 2), consensusErrors, schema, ir,
+            maxRepairAttempts + 1, generateText, extractJsonObject,
+          );
+          trace.steps.push(repair.result);
+
+          if (repair.parsed) {
+            const revalidate = handleValidate(repair.parsed, validate, 'ValidateAfterConsensus');
+            if (revalidate.ok) {
+              parsed = repair.parsed;
+            }
+            trace.steps.push(revalidate);
+          }
+        } else {
+          parsed = consensus.agreed;
+        }
+      }
+    }
+
+    // 4. Correctors (deterministic post-validation transforms)
     if (correctorNames.length > 0) {
       const correctResult = handleCorrect(parsed, correctorNames, { document: ir.context?.document });
       trace.steps.push(correctResult);
@@ -301,7 +414,20 @@ async function main() {
 
   // ── Write outputs ───────────────────────────────────────────────────
   trace.finished_at = new Date().toISOString();
-  trace.final = { ok: finalOk, schema_id: schema.$id };
+
+  // Aggregate token usage across all LLM calls
+  const totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, llm_calls: 0 };
+  for (const step of trace.steps) {
+    const usage = step.meta?.usage;
+    if (usage) {
+      totalUsage.prompt_tokens += usage.prompt_tokens ?? 0;
+      totalUsage.completion_tokens += usage.completion_tokens ?? 0;
+      totalUsage.total_tokens += usage.total_tokens ?? 0;
+      totalUsage.llm_calls += 1;
+    }
+  }
+
+  trace.final = { ok: finalOk, schema_id: schema.$id, usage: totalUsage };
 
   writeFileSync(join(runDir, 'ir.json'), JSON.stringify(ir, null, 2));
   writeFileSync(join(runDir, 'trace.json'), JSON.stringify(trace, null, 2));

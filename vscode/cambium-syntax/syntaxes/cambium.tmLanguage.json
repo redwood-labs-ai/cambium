@@ -1,0 +1,185 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Cambium",
+  "scopeName": "source.cambium",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#class-declaration" },
+    { "include": "#method-definition" },
+    { "include": "#dsl-primitives" },
+    { "include": "#dsl-blocks" },
+    { "include": "#model-identifier" },
+    { "include": "#symbols" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#constants" },
+    { "include": "#ruby-keywords" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.cambium"
+    },
+
+    "class-declaration": {
+      "match": "^\\s*(class)\\s+([A-Z]\\w*)(?:\\s*(<)\\s*([A-Z]\\w*))?",
+      "captures": {
+        "1": { "name": "keyword.declaration.class.cambium" },
+        "2": { "name": "entity.name.type.class.cambium" },
+        "3": { "name": "keyword.operator.inheritance.cambium" },
+        "4": { "name": "entity.other.inherited-class.cambium support.class.cambium" }
+      }
+    },
+
+    "method-definition": {
+      "match": "^\\s*(def)\\s+(\\w+)",
+      "captures": {
+        "1": { "name": "keyword.declaration.function.cambium" },
+        "2": { "name": "entity.name.function.cambium" }
+      }
+    },
+
+    "dsl-primitives": {
+      "patterns": [
+        {
+          "comment": "Core model configuration primitives",
+          "match": "^\\s*(model|system|temperature|max_tokens|returns)\\b",
+          "captures": {
+            "1": { "name": "keyword.other.primitive.cambium support.function.cambium" }
+          }
+        },
+        {
+          "comment": "Contract + policy primitives",
+          "match": "^\\s*(uses|corrects|constrain|extract)\\b",
+          "captures": {
+            "1": { "name": "keyword.other.policy.cambium support.function.cambium" }
+          }
+        },
+        {
+          "comment": "Keyword arguments for primitives (to:, type:, path:, strategy:, passes:, unit:, target:, operation:, store_as:)",
+          "match": "\\b(to|type|path|strategy|passes|unit|target|operation|store_as):",
+          "captures": {
+            "1": { "name": "variable.parameter.cambium" }
+          }
+        },
+        {
+          "comment": "with keyword inside generate block",
+          "match": "\\b(with)\\b(?=\\s+\\w+:)",
+          "captures": {
+            "1": { "name": "keyword.other.primitive.cambium support.function.cambium" }
+          }
+        },
+        {
+          "comment": "require_citations! directive",
+          "match": "\\b(require_citations!)\\b",
+          "captures": {
+            "1": { "name": "keyword.other.directive.cambium" }
+          }
+        },
+        {
+          "comment": "tool call inside trigger block",
+          "match": "^\\s*(tool)\\s+",
+          "captures": {
+            "1": { "name": "keyword.other.primitive.cambium support.function.cambium" }
+          }
+        }
+      ]
+    },
+
+    "dsl-blocks": {
+      "patterns": [
+        {
+          "comment": "generate transaction block",
+          "match": "\\b(generate)\\b",
+          "name": "keyword.control.transaction.cambium"
+        },
+        {
+          "comment": "on trigger block",
+          "match": "^\\s*(on)\\s+",
+          "captures": {
+            "1": { "name": "keyword.control.trigger.cambium" }
+          }
+        },
+        {
+          "comment": "do/end block delimiters",
+          "match": "\\b(do|end)\\b",
+          "name": "keyword.control.block.cambium"
+        }
+      ]
+    },
+
+    "model-identifier": {
+      "comment": "provider:model pattern in strings like 'omlx:Qwen3.5-27B-4bit'",
+      "match": "\"([a-zA-Z0-9_-]+):([^\"]+)\"",
+      "captures": {
+        "1": { "name": "entity.name.tag.provider.cambium" },
+        "2": { "name": "entity.name.type.model.cambium" }
+      }
+    },
+
+    "symbols": {
+      "patterns": [
+        {
+          "comment": "Ruby symbols used as DSL references (:analyst, :calculator, :math, etc.)",
+          "match": ":(\\w+)",
+          "name": "constant.other.symbol.cambium"
+        }
+      ]
+    },
+
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.cambium",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.cambium",
+              "match": "\\\\."
+            },
+            {
+              "comment": "String interpolation",
+              "name": "meta.embedded.expression.cambium",
+              "begin": "#\\{",
+              "end": "\\}",
+              "patterns": [{ "include": "$self" }]
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.cambium",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.cambium",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+
+    "numbers": {
+      "match": "\\b(\\d+(\\.\\d+)?)\\b",
+      "name": "constant.numeric.cambium"
+    },
+
+    "constants": {
+      "match": "\\b([A-Z][a-zA-Z0-9]+)\\b",
+      "name": "entity.name.type.cambium"
+    },
+
+    "ruby-keywords": {
+      "match": "\\b(class|def|end|do|if|unless|else|elsif|true|false|nil)\\b",
+      "name": "keyword.control.ruby.cambium"
+    },
+
+    "operators": {
+      "match": "(=>|->|\\|)",
+      "name": "keyword.operator.cambium"
+    }
+  }
+}

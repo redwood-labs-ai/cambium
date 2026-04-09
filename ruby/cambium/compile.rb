@@ -68,6 +68,29 @@ end
 
 defs = klass._cambium_defaults
 
+# Resolve system prompt: symbol → file lookup, string → inline, nil → omit.
+system_prompt = nil
+if defs[:system]
+  raw = defs[:system]
+  if raw.is_a?(Symbol) || raw.is_a?(Cambium::ConstRef)
+    name = raw.to_s.downcase
+    # Look for app/systems/<name>.system.md relative to the source file's package
+    pkg_dir = File.dirname(File.dirname(File.expand_path(file)))  # up from app/gens/
+    system_file = File.join(pkg_dir, 'app', 'systems', "#{name}.system.md")
+    unless File.exist?(system_file)
+      # Also try relative to cwd
+      system_file = File.join('packages', 'cambium', 'app', 'systems', "#{name}.system.md")
+    end
+    if File.exist?(system_file)
+      system_prompt = File.read(system_file).strip
+    else
+      raise Cambium::CompileError, "System prompt '#{name}' not found. Looked for: #{system_file}"
+    end
+  else
+    system_prompt = raw.to_s
+  end
+end
+
 ir = {
   'version' => '0.2',
   'entry' => {
@@ -80,6 +103,7 @@ ir = {
     'temperature' => defs[:temperature],
     'max_tokens' => defs[:max_tokens]
   },
+  'system' => system_prompt,
   'policies' => {
     'tools_allowed' => (defs[:tools] || []),
     'correctors' => (defs[:correctors] || []),

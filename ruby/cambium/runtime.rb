@@ -55,6 +55,11 @@ module Cambium
         _cambium_defaults[:model] = id
       end
 
+      # System prompt: symbol resolves to app/systems/<name>.system.md, string is inline.
+      def system(prompt_or_name)
+        _cambium_defaults[:system] = prompt_or_name
+      end
+
       def temperature(v)
         _cambium_defaults[:temperature] = v
       end

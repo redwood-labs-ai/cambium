@@ -15,6 +15,9 @@ export type StepResult = {
 };
 
 // ── Generate ──────────────────────────────────────────────────────────
+export type TokenUsage = { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+export type GenerateTextResult = { text: string; usage?: TokenUsage };
+
 export type GenerateTextFn = (opts: {
   model: string;
   system: string;
@@ -22,7 +25,7 @@ export type GenerateTextFn = (opts: {
   max_tokens?: number;
   temperature?: number;
   jsonSchema?: any;
-}) => Promise<string>;
+}) => Promise<GenerateTextResult>;
 
 export type ExtractJsonFn = (text: string) => any;
 
@@ -35,17 +38,14 @@ export async function handleGenerate(
 ): Promise<{ raw: string; parsed: any; result: StepResult }> {
   const doc = ir.context?.document;
   const constraints = ir.policies?.constraints ?? {};
-
-  // Derive system prompt from IR metadata instead of hardcoding
-  const toneConstraint = constraints.tone?.to;
-  const roleLine = toneConstraint
-    ? `You are a ${toneConstraint} analyst.`
-    : 'You are an analyst.';
-
   const schemaKeys = Object.keys(schema.properties ?? {});
 
+  // System prompt: use author-defined prompt from IR, or fall back to a generic one.
+  const basePrompt = ir.system
+    ?? (constraints.tone?.to ? `You are a ${constraints.tone.to} analyst.` : 'You are an analyst.');
+
   const system = [
-    roleLine,
+    basePrompt,
     'CRITICAL OUTPUT RULES:',
     '- Output MUST be JSON only. No markdown. No code fences.',
     '- Do NOT include any reasoning, thoughts, or preambles (no "Thinking" / "Thinking Process").',
@@ -53,9 +53,6 @@ export async function handleGenerate(
     `- JSON MUST validate against schema id: ${schema.$id}.`,
     `- Use exactly these top-level keys: ${schemaKeys.join(', ')}.`,
     '- If unsure, leave fields empty but valid.',
-    'DATA EXTRACTION RULES:',
-    '- For array fields, extract ALL matching values from the document. Do not summarize or omit.',
-    '- Do not drop data points. If the document has 4 measurements, the array must have 4 entries.',
   ].join('\n');
 
   // Build a JSON template from schema properties
@@ -81,7 +78,7 @@ export async function handleGenerate(
   const outMax = Math.min(Number(ir.model.max_tokens ?? 1200), 500);
   const started = Date.now();
 
-  const raw = await generateText({
+  const genResult = await generateText({
     model: ir.model.id,
     system,
     prompt,
@@ -90,6 +87,7 @@ export async function handleGenerate(
     jsonSchema: schema,
   });
 
+  const raw = genResult.text;
   let parsed: any = undefined;
   let parseError: string | undefined;
   try {
@@ -107,7 +105,7 @@ export async function handleGenerate(
       ms: Date.now() - started,
       ok: parsed !== undefined,
       errors: parseError ? [{ message: parseError }] : undefined,
-      meta: { raw_preview: raw.slice(0, 400) },
+      meta: { raw_preview: raw.slice(0, 400), usage: genResult.usage },
     },
   };
 }
@@ -178,7 +176,7 @@ export async function handleRepair(
   const outMax = Math.min(Number(ir.model.max_tokens ?? 1200), 500);
   const started = Date.now();
 
-  const newRaw = await generateText({
+  const genResult = await generateText({
     model: ir.model.id,
     system: repairSystem,
     prompt: repairPrompt,
@@ -187,6 +185,7 @@ export async function handleRepair(
     jsonSchema: schema,
   });
 
+  const newRaw = genResult.text;
   let parsed: any = undefined;
   try {
     parsed = extractJson(newRaw);
@@ -201,7 +200,7 @@ export async function handleRepair(
       type: 'Repair',
       ms: Date.now() - started,
       ok: parsed !== undefined,
-      meta: { attempt, raw_preview: newRaw.slice(0, 400) },
+      meta: { attempt, raw_preview: newRaw.slice(0, 400), usage: genResult.usage },
     },
   };
 }

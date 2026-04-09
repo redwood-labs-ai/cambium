@@ -5,6 +5,3 @@ runs/
 # Ruby
 *.gem
 .bundle/
-
-# planning docs
-docs/

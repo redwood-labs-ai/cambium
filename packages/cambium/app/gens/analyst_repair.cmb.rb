@@ -21,7 +21,7 @@ class Analyst < GenModel
 
   # Consistency: generate N times, compare outputs, flag disagreements.
   # Higher cost (+1 LLM call per extra pass) but catches non-deterministic errors.
-  constrain :compound, strategy: :review
+  constrain :consistency, passes: 2
 
   # Signals: extract typed data from the validated output
   extract :latency_ms, type: :number, path: "metrics.latency_ms_samples"
