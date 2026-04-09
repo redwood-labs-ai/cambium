@@ -120,13 +120,14 @@ export function runConsensus(outputs: any[]): ConsensusResult {
 
 function compareFields(
   outputs: any[],
-  agreed: any,
+  agreedRoot: any,
   basePath: string,
   disagreements: Disagreement[],
 ): void {
-  if (agreed == null || typeof agreed !== 'object') return;
+  const current = basePath ? resolvePath(agreedRoot, basePath) : agreedRoot;
+  if (current == null || typeof current !== 'object') return;
 
-  if (Array.isArray(agreed)) {
+  if (Array.isArray(current)) {
     // Check array lengths across outputs
     const lengths = outputs.map(o => {
       const val = resolvePath(o, basePath);
@@ -143,19 +144,19 @@ function compareFields(
       // Take the longest array as the consensus (more data = better)
       const longestIdx = lengths.indexOf(Math.max(...lengths));
       const longestVal = resolvePath(outputs[longestIdx], basePath);
-      setPath(agreed, basePath, structuredClone(longestVal));
+      setPath(agreedRoot, basePath, structuredClone(longestVal));
     }
     return;
   }
 
-  for (const key of Object.keys(agreed)) {
+  for (const key of Object.keys(current)) {
     const path = basePath ? `${basePath}.${key}` : key;
     const values = outputs.map(o => resolvePath(o, path));
 
     if (values.every(v => typeof v === 'object' && v !== null && !Array.isArray(v))) {
-      compareFields(outputs, agreed[key], path, disagreements);
+      compareFields(outputs, agreedRoot, path, disagreements);
     } else if (values.every(v => Array.isArray(v))) {
-      compareFields(outputs, agreed[key], path, disagreements);
+      compareFields(outputs, agreedRoot, path, disagreements);
     } else {
       // Primitive comparison
       const allEqual = values.every(v => JSON.stringify(v) === JSON.stringify(values[0]));

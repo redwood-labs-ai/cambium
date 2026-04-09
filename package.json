@@ -9,7 +9,7 @@
     "run": "node ./cli/cambium.mjs",
     "compile": "ruby ./ruby/cambium/compile.rb",
     "runner": "node --import tsx ./src/runner.ts",
-    "test": "echo 'no tests wired yet' && exit 0"
+    "test": "vitest run"
   },
   "dependencies": {
     "@sinclair/typebox": "^0.34.40",
@@ -17,6 +17,7 @@
   },
   "devDependencies": {
     "tsx": "^4.19.2",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
   }
 }
