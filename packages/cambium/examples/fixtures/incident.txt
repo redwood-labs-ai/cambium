@@ -4,5 +4,6 @@ Timeline:
 - 10:01 - p95 latency 120 ms
 - 10:05 - p95 latency 140 ms
 - 10:12 - p95 latency 160 ms
+- 10:13 - p95 latency 195 ms
 
 Hypothesis: cache stampede after deploy.

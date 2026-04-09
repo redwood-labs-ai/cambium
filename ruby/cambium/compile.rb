@@ -69,7 +69,7 @@ end
 defs = klass._cambium_defaults
 
 ir = {
-  'version' => '0.1',
+  'version' => '0.2',
   'entry' => {
     'class' => klass.name,
     'method' => method,
@@ -85,11 +85,12 @@ ir = {
     'correctors' => (defs[:correctors] || []),
     'constraints' => (defs[:constraints] || {})
   },
-  # v0.1: schema id is the `returns` string (should map to TypeBox $id)
   'returnSchemaId' => defs[:returnSchema],
   'context' => {
     'document' => arg
   },
+  'signals' => (defs[:signals] || []),
+  'triggers' => (defs[:triggers] || []),
   'steps' => builder.steps
 }
 

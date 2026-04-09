@@ -2,6 +2,15 @@ import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import process from 'node:process';
 import Ajv from 'ajv';
+import { ToolRegistry } from './tools/registry.js';
+import {
+  handleGenerate,
+  handleValidate,
+  handleRepair,
+  handleCorrect,
+} from './step-handlers.js';
+import { extractSignals } from './signals.js';
+import { evaluateTriggers } from './triggers.js';
 
 type IR = any;
 
@@ -60,18 +69,24 @@ async function generateText(opts: { model: string; system: string; prompt: strin
       const baseUrl = process.env.CAMBIUM_OMLX_BASEURL ?? 'http://100.114.183.54:8080';
       const url = `${baseUrl.replace(/\/$/, '')}/v1/chat/completions`;
 
+      // Append /no_think token to suppress Qwen 3.x thinking mode.
+      // This is more reliable than chat_template_kwargs.enable_thinking=false,
+      // which can silently disable xgrammar (vllm#39130, sglang#6675).
+      const userContent = opts.prompt + '\n/no_think';
+
       const body: any = {
         model: name,
         temperature: opts.temperature ?? 0.2,
         max_tokens: opts.max_tokens ?? 1200,
         messages: [
           { role: 'system', content: opts.system },
-          { role: 'user', content: opts.prompt }
-        ]
+          { role: 'user', content: userContent }
+        ],
+        // Belt-and-suspenders: also send chat_template_kwargs to disable thinking.
+        chat_template_kwargs: { enable_thinking: false },
       };
 
       // Structured output (vLLM-compatible) — requires xgrammar enabled on the server.
-      // vLLM docs (newer) use: extra_body: { structured_outputs: { json: <schema> } }
       if (opts.jsonSchema && (process.env.CAMBIUM_OMLX_STRUCTURED_OUTPUTS ?? '1') === '1') {
         body.extra_body = { structured_outputs: { json: opts.jsonSchema } };
       }
@@ -128,15 +143,26 @@ function mockGenerate(prompt: string): string {
   return JSON.stringify(payload, null, 2);
 }
 
+function stripThinkingTokens(text: string): string {
+  // Strip <think>...</think> blocks (Qwen 3.x thinking mode artifacts)
+  return text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+}
+
 function extractJsonObject(text: string): any {
-  // v0.1: naive JSON extraction: find first '{' and last '}'
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
+  // Strip thinking tokens first, then any non-JSON preamble.
+  const cleaned = stripThinkingTokens(text);
+
+  // Try to find a top-level JSON object. Look for '{"' to skip stray braces in markdown/text.
+  let start = cleaned.indexOf('{"');
+  if (start === -1) start = cleaned.indexOf('{\n');
+  if (start === -1) start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
   if (start === -1 || end === -1 || end <= start) throw new Error('No JSON object found in model output');
-  const slice = text.slice(start, end + 1);
+  const slice = cleaned.slice(start, end + 1);
   return JSON.parse(slice);
 }
 
+// ── Main: Step-Graph Executor ─────────────────────────────────────────
 async function main() {
   const { irPath } = parseArgs(process.argv.slice(2));
   const irText = irPath === '-' ? readFileSync(0, 'utf8') : readFileSync(irPath, 'utf8');
@@ -155,8 +181,7 @@ async function main() {
     started_at: new Date().toISOString(),
   };
 
-  // Load TypeBox contracts compiled at runtime by importing the genesis package TS.
-  // v0.1 shortcut: dynamic import of the contracts file. (This is why runner is TS with tsx loader.)
+  // ── Load contracts ──────────────────────────────────────────────────
   const contractsMod: any = await import(join(process.cwd(), 'packages/cambium/src/contracts.ts'));
   const schema = contractsMod[ir.returnSchemaId];
   if (!schema) throw new Error(`Schema not found in contracts.ts for id: ${ir.returnSchemaId}`);
@@ -166,127 +191,138 @@ async function main() {
   const validate = ajv.getSchema(schema.$id);
   if (!validate) throw new Error(`AJV schema not registered: ${schema.$id}`);
 
-  const doc = ir.context?.document;
+  // ── Load tool registry ──────────────────────────────────────────────
+  const toolRegistry = new ToolRegistry();
+  toolRegistry.loadFromDir(join(process.cwd(), 'packages/cambium/app/tools'));
 
-  const genStep = ir.steps.find((s: any) => s.type === 'Generate');
-  if (!genStep) throw new Error('IR missing Generate step');
+  const toolsAllowed: string[] = ir.policies?.tools_allowed ?? [];
+  // Validate that all declared tools exist in the registry
+  for (const t of toolsAllowed) {
+    if (!toolRegistry.get(t)) {
+      throw new Error(`Tool "${t}" declared in policies.tools_allowed but not found in registry. Available: ${toolRegistry.list().join(', ')}`);
+    }
+  }
 
-  const jsonTemplate = {
-    summary: "",
-    metrics: { latency_ms_samples: [] as number[] },
-    key_facts: [] as any[]
-  };
+  const correctorNames: string[] = ir.policies?.correctors ?? [];
+  const maxRepairAttempts = ir.policies?.max_repair_attempts ?? 2;
 
-  const system = [
-    'You are a professional analyst.',
-    'CRITICAL OUTPUT RULES:',
-    '- Output MUST be JSON only. No markdown. No code fences.',
-    '- Do NOT include any reasoning, thoughts, or preambles (no "Thinking" / "Thinking Process").',
-    '- Output must start with "{" and end with "}".',
-    `- JSON MUST validate against schema id: ${schema.$id}.`,
-    '- Do not invent extra top-level keys. Use exactly: summary, metrics, key_facts.',
-    '- If unsure, leave fields empty but valid.'
-  ].join('\n');
+  // ── Execute IR steps ────────────────────────────────────────────────
+  let finalParsed: any = undefined;
+  let finalOk = false;
 
-  const prompt = [
-    `${genStep.prompt}`,
-    '',
-    'DOCUMENT:',
-    String(doc ?? ''),
-    '',
-    'OUTPUT_JSON_TEMPLATE (fill this; keep keys the same; no extra keys):',
-    JSON.stringify(jsonTemplate),
-  ].join('\n');
-
-  const started = Date.now();
-  // v0.1: cap output tokens to reduce rambling/truncation risk.
-  const outMax = Math.min(Number(ir.model.max_tokens ?? 1200), 500);
-
-  let raw = await generateText({
-    model: ir.model.id,
-    system,
-    prompt,
-    max_tokens: outMax,
-    temperature: ir.model.temperature,
-    jsonSchema: schema
-  });
-  trace.steps.push({ id: genStep.id, type: 'Generate', ms: Date.now() - started, raw_preview: raw.slice(0, 400) });
-
-  let parsed: any;
-  let ok = false;
-  let errors: any[] = [];
-
-  for (let attempt = 0; attempt < 1 + (ir.policies?.max_repair_attempts ?? 2); attempt++) {
-    try {
-      parsed = extractJsonObject(raw);
-    } catch (e: any) {
-      errors = [{ message: e.message }];
-      ok = false;
+  for (const step of ir.steps) {
+    if (step.type !== 'Generate') {
+      trace.steps.push({ type: step.type, id: step.id, ok: false, errors: [{ message: `Unknown step type: ${step.type}` }] });
+      continue;
     }
 
-    if (parsed && validate(parsed)) {
-      ok = true;
-      errors = [];
+    // ── Sub-pipeline: Generate → Validate → Repair → Correct → ToolCall → Return ──
+
+    // 1. Generate
+    const gen = await handleGenerate(step, ir, schema, generateText, extractJsonObject);
+    trace.steps.push(gen.result);
+
+    let raw = gen.raw;
+    let parsed = gen.parsed;
+
+    // 2. Validate + Repair loop
+    let ok = false;
+    let errors: any[] = [];
+
+    for (let attempt = 0; attempt < 1 + maxRepairAttempts; attempt++) {
+      const vResult = handleValidate(parsed, validate, attempt === 0 ? 'Validate' : 'ValidateAfterRepair');
+
+      if (vResult.ok) {
+        ok = true;
+        errors = [];
+        // Only push validate step on success if it wasn't first attempt (show the win after repair)
+        if (attempt > 0) trace.steps.push(vResult);
+        break;
+      }
+
+      errors = vResult.errors ?? [];
+      trace.steps.push(vResult);
+
+      // Don't repair after last attempt
+      if (attempt >= maxRepairAttempts) break;
+
+      // Repair
+      const repair = await handleRepair(raw, errors, schema, ir, attempt + 1, generateText, extractJsonObject);
+      trace.steps.push(repair.result);
+      raw = repair.raw;
+      parsed = repair.parsed;
+    }
+
+    if (!ok) {
+      finalOk = false;
       break;
     }
 
-    ok = false;
-    errors = validate.errors ? validate.errors.map(e => ({ ...e })) : errors;
+    // 3. Correctors (deterministic post-validation transforms)
+    if (correctorNames.length > 0) {
+      const correctResult = handleCorrect(parsed, correctorNames, { document: ir.context?.document });
+      trace.steps.push(correctResult);
 
-    trace.steps.push({ type: attempt === 0 ? 'Validate' : 'ValidateAfterRepair', ok: false, errors });
+      if (correctResult.meta?.corrected) {
+        parsed = correctResult.output;
 
-    // Repair
-    const repairSystem = [
-      'You are repairing JSON to satisfy a schema.',
-      'CRITICAL OUTPUT RULES:',
-      '- Output MUST be JSON only. No markdown. No code fences.',
-      '- Do NOT include reasoning or preambles.',
-      '- Output must start with "{" and end with "}".',
-      '- Edit ONLY the fields necessary to fix the validation errors.',
-      `- Schema id: ${schema.$id}.`,
-      '- Do not add extra top-level keys. Use exactly: summary, metrics, key_facts.'
-    ].join('\n');
+        // Re-validate after correction to ensure correctors didn't break schema
+        const revalidate = handleValidate(parsed, validate, 'ValidateAfterCorrect');
+        if (!revalidate.ok) {
+          trace.steps.push(revalidate);
+          finalOk = false;
+          break;
+        }
+      }
+    }
 
-    const repairPrompt = [
-      'ORIGINAL_OUTPUT (may be invalid):',
-      raw,
-      '',
-      'VALIDATION_ERRORS:',
-      JSON.stringify(errors, null, 2),
-      '',
-      'OUTPUT_JSON_TEMPLATE (return this shape; keep keys the same; no extra keys):',
-      JSON.stringify(jsonTemplate),
-      '',
-      'Return repaired JSON only.'
-    ].join('\n');
+    // 4. Signals + Triggers (general-purpose tool dispatch)
+    const signalDefs = ir.signals ?? [];
+    const triggerDefs = ir.triggers ?? [];
 
-    const rStarted = Date.now();
-    raw = await generateText({ model: ir.model.id, system: repairSystem, prompt: repairPrompt, max_tokens: outMax, temperature: ir.model.temperature, jsonSchema: schema });
-    trace.steps.push({ type: 'Repair', attempt: attempt + 1, ms: Date.now() - rStarted, raw_preview: raw.slice(0, 400) });
+    if (signalDefs.length > 0) {
+      const state = extractSignals(parsed, signalDefs);
+      trace.steps.push({ type: 'ExtractSignals', ok: true, meta: { state } });
+
+      if (triggerDefs.length > 0) {
+        const triggerResults = evaluateTriggers(triggerDefs, state, toolRegistry, toolsAllowed);
+        for (const tr of triggerResults) {
+          trace.steps.push(tr.traceEntry);
+          if (tr.fired && tr.target && tr.value !== undefined) {
+            setNestedValue(parsed, tr.target, tr.value);
+          }
+        }
+      }
+    }
+
+    finalParsed = parsed;
+    finalOk = true;
   }
 
-  // Deterministic post-step tool: calculator for avg latency.
-  if (ok && parsed?.metrics?.latency_ms_samples?.length && parsed.metrics.avg_latency_ms == null) {
-    const samples: number[] = parsed.metrics.latency_ms_samples;
-    const avg = samples.reduce((a, b) => a + b, 0) / samples.length;
-    parsed.metrics.avg_latency_ms = Math.round(avg * 1000) / 1000;
-    trace.steps.push({ type: 'ToolCall', tool: 'calculator(avg)', input: samples, output: parsed.metrics.avg_latency_ms });
-  }
-
+  // ── Write outputs ───────────────────────────────────────────────────
   trace.finished_at = new Date().toISOString();
-  trace.final = { ok, schema_id: schema.$id };
+  trace.final = { ok: finalOk, schema_id: schema.$id };
 
   writeFileSync(join(runDir, 'ir.json'), JSON.stringify(ir, null, 2));
   writeFileSync(join(runDir, 'trace.json'), JSON.stringify(trace, null, 2));
-  writeFileSync(join(runDir, 'output.json'), JSON.stringify(parsed ?? null, null, 2));
+  writeFileSync(join(runDir, 'output.json'), JSON.stringify(finalParsed ?? null, null, 2));
 
-  if (!ok) {
+  if (!finalOk) {
     console.error(`Validation failed after repair attempts. See ${join('runs', runId, 'trace.json')}`);
     process.exit(1);
   }
 
-  console.log(JSON.stringify(parsed, null, 2));
+  console.log(JSON.stringify(finalParsed, null, 2));
   console.error(`Trace: ${join('runs', runId, 'trace.json')}`);
+}
+
+function setNestedValue(obj: any, path: string, value: any): void {
+  const parts = path.split('.');
+  let current = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    current = current[parts[i]];
+  }
+  current[parts[parts.length - 1]] = value;
 }
 
 main().catch(err => {

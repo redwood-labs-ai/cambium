@@ -1,0 +1,19 @@
+{
+  "name": "calculator",
+  "description": "Deterministic math evaluation (avg, sum, min, max)",
+  "inputSchema": {
+    "type": "object",
+    "required": ["operation", "operands"],
+    "properties": {
+      "operation": { "type": "string", "enum": ["avg", "sum", "min", "max"] },
+      "operands": { "type": "array", "items": { "type": "number" } }
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["value"],
+    "properties": {
+      "value": { "type": "number" }
+    }
+  }
+}
