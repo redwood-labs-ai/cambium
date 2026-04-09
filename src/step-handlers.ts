@@ -288,3 +288,190 @@ export function handleToolCall(
     meta: { tool: toolName, operation, input, output: result },
   };
 }
+
+// ── Agentic Generate (multi-turn tool-use loop) ──────────────────────
+
+type Message = { role: string; content: string | null; tool_calls?: any[]; tool_call_id?: string };
+type ToolCallMsg = { id: string; type: 'function'; function: { name: string; arguments: string } };
+
+export type GenerateWithToolsFn = (opts: {
+  model: string;
+  messages: Message[];
+  tools: any[];
+  max_tokens?: number;
+  temperature?: number;
+}) => Promise<{ message: { content: string | null; tool_calls?: ToolCallMsg[] }; usage?: TokenUsage }>;
+
+export async function handleAgenticGenerate(
+  step: any,
+  ir: any,
+  schema: any,
+  toolsOpenAI: any[],
+  toolRegistry: ToolRegistry,
+  toolsAllowed: string[],
+  generateWithTools: GenerateWithToolsFn,
+  extractJson: ExtractJsonFn,
+  maxToolCalls: number,
+): Promise<{ raw: string; parsed: any; result: StepResult; traceSteps: StepResult[] }> {
+  const doc = ir.context?.document;
+  const constraints = ir.policies?.constraints ?? {};
+  const grounding = ir.policies?.grounding;
+  const schemaKeys = Object.keys(schema.properties ?? {});
+
+  const basePrompt = ir.system
+    ?? (constraints.tone?.to ? `You are a ${constraints.tone.to} agent.` : 'You are an agent.');
+
+  const systemParts = [
+    basePrompt,
+    '',
+    schemaPromptBlock(schema),
+    '',
+    'You have access to tools. Call them as needed to complete the task.',
+    'When you are done, respond with the final JSON output matching the schema above.',
+    'OUTPUT RULES:',
+    '- Final output MUST be JSON only. No markdown. No code fences. No reasoning.',
+    '- Final output must start with "{" and end with "}".',
+  ];
+
+  if (grounding?.require_citations) {
+    systemParts.push(
+      '',
+      'GROUNDING RULES:',
+      '- Every item in arrays with a citations field MUST include citations.',
+      '- Each citation MUST include a quote field with EXACT verbatim text from the document.',
+      '- Do not paraphrase or fabricate quotes.',
+    );
+  }
+
+  // Build context prompt parts
+  const contextParts = [step.prompt, '', 'DOCUMENT:', String(doc ?? '')];
+  const context = ir.context ?? {};
+  for (const key of Object.keys(context)) {
+    if (key.endsWith('_enriched')) {
+      const label = key.replace(/_enriched$/, '').toUpperCase() + '_ANALYSIS';
+      const value = typeof context[key] === 'string' ? context[key] : JSON.stringify(context[key], null, 2);
+      contextParts.push('', `${label}:`, value);
+    }
+  }
+
+  const messages: Message[] = [
+    { role: 'system', content: systemParts.join('\n') },
+    { role: 'user', content: contextParts.join('\n') },
+  ];
+
+  const traceSteps: StepResult[] = [];
+  const started = Date.now();
+  let totalToolCalls = 0;
+  let finalRaw = '';
+  let finalParsed: any = undefined;
+
+  for (let turn = 0; turn < maxToolCalls + 1; turn++) {
+    const turnStarted = Date.now();
+
+    // On the last allowed turn, omit tools to force the model to produce content
+    const toolsForTurn = totalToolCalls >= maxToolCalls ? [] : toolsOpenAI;
+
+    const response = await generateWithTools({
+      model: ir.model.id,
+      messages,
+      tools: toolsForTurn,
+      max_tokens: Number(ir.model.max_tokens ?? 1200),
+      temperature: ir.model.temperature,
+    });
+
+    const msg = response.message;
+
+    // Model wants to call tools
+    if (msg.tool_calls && msg.tool_calls.length > 0) {
+      // Append assistant message with tool calls to history
+      messages.push({ role: 'assistant', content: msg.content, tool_calls: msg.tool_calls });
+
+      const toolResults: StepResult[] = [];
+      for (const tc of msg.tool_calls) {
+        const fnName = tc.function.name;
+        let fnArgs: any;
+        try {
+          fnArgs = JSON.parse(tc.function.arguments);
+        } catch {
+          fnArgs = {};
+        }
+
+        let toolResult: any;
+        try {
+          const tcResult = handleToolCall(fnName, fnArgs.operation ?? fnName, fnArgs, toolRegistry, toolsAllowed);
+          toolResult = tcResult.output;
+          toolResults.push(tcResult);
+        } catch (e: any) {
+          toolResult = { error: e.message };
+          toolResults.push({
+            type: 'ToolCall',
+            ok: false,
+            errors: [{ message: e.message }],
+            meta: { tool: fnName, input: fnArgs },
+          });
+        }
+
+        // Append tool result to message history
+        messages.push({
+          role: 'tool',
+          content: JSON.stringify(toolResult),
+          tool_call_id: tc.id,
+        });
+
+        totalToolCalls++;
+      }
+
+      traceSteps.push({
+        type: 'AgenticTurn',
+        ms: Date.now() - turnStarted,
+        ok: true,
+        meta: {
+          turn: turn + 1,
+          tool_calls: msg.tool_calls.map((tc: any) => ({
+            name: tc.function.name,
+            args: tc.function.arguments,
+          })),
+          results: toolResults.map(r => r.meta),
+          usage: response.usage,
+        },
+      });
+
+      continue;
+    }
+
+    // Model produced content — this is the final output
+    finalRaw = msg.content ?? '';
+    try {
+      finalParsed = extractJson(finalRaw);
+    } catch {
+      // will be caught by validation
+    }
+
+    traceSteps.push({
+      type: 'AgenticFinal',
+      ms: Date.now() - turnStarted,
+      ok: finalParsed !== undefined,
+      meta: {
+        turn: turn + 1,
+        total_tool_calls: totalToolCalls,
+        raw_preview: finalRaw.slice(0, 400),
+        usage: response.usage,
+      },
+    });
+
+    break;
+  }
+
+  return {
+    raw: finalRaw,
+    parsed: finalParsed,
+    result: {
+      type: 'AgenticGenerate',
+      id: step.id,
+      ms: Date.now() - started,
+      ok: finalParsed !== undefined,
+      meta: { total_turns: traceSteps.length, total_tool_calls: totalToolCalls },
+    },
+    traceSteps,
+  };
+}

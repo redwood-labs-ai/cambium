@@ -55,6 +55,12 @@ module Cambium
         _cambium_defaults[:model] = id
       end
 
+      # Mode: :agentic enables multi-turn tool-use loop in generate.
+      # Without it, generate is a single LLM call (default).
+      def mode(m)
+        _cambium_defaults[:mode] = m.to_s
+      end
+
       # System prompt: symbol resolves to app/systems/<name>.system.md, string is inline.
       def system(prompt_or_name)
         _cambium_defaults[:system] = prompt_or_name

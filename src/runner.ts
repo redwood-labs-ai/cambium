@@ -5,6 +5,7 @@ import Ajv from 'ajv';
 import { ToolRegistry } from './tools/registry.js';
 import {
   handleGenerate,
+  handleAgenticGenerate,
   handleValidate,
   handleRepair,
   handleCorrect,
@@ -151,6 +152,77 @@ async function generateText(opts: { model: string; system: string; prompt: strin
   }
 }
 
+type Message = { role: string; content: string | null; tool_calls?: any[]; tool_call_id?: string };
+type ToolCallMessage = { id: string; type: 'function'; function: { name: string; arguments: string } };
+
+type GenerateWithToolsResult = {
+  message: { content: string | null; tool_calls?: ToolCallMessage[] };
+  usage?: TokenUsage;
+};
+
+async function generateWithTools(opts: {
+  model: string;
+  messages: Message[];
+  tools: any[];
+  max_tokens?: number;
+  temperature?: number;
+}): Promise<GenerateWithToolsResult> {
+  const { provider, name } = parseModelId(opts.model);
+
+  if (provider !== 'omlx') {
+    throw new Error(`Agentic mode requires oMLX provider (OpenAI-compatible). Got: ${provider}`);
+  }
+
+  const baseUrl = process.env.CAMBIUM_OMLX_BASEURL ?? 'http://100.114.183.54:8080';
+  const url = `${baseUrl.replace(/\/$/, '')}/v1/chat/completions`;
+
+  // Append /no_think to the last user message
+  const messages = opts.messages.map((m, i) => {
+    if (m.role === 'user' && i === opts.messages.findLastIndex(msg => msg.role === 'user')) {
+      return { ...m, content: (m.content ?? '') + '\n/no_think' };
+    }
+    return m;
+  });
+
+  const body: any = {
+    model: name,
+    temperature: opts.temperature ?? 0.2,
+    max_tokens: opts.max_tokens ?? 1200,
+    messages,
+    chat_template_kwargs: { enable_thinking: false },
+  };
+
+  // Only include tools if we have them (omitting forces the model to produce content)
+  if (opts.tools.length > 0) {
+    body.tools = opts.tools;
+  }
+
+  const apiKey = process.env.CAMBIUM_OMLX_API_KEY;
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (apiKey) headers['authorization'] = `Bearer ${apiKey}`;
+
+  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+  if (!res.ok) throw new Error(`oMLX error: HTTP ${res.status}`);
+  const json: any = await res.json();
+
+  const msg = json?.choices?.[0]?.message;
+  if (!msg) throw new Error('oMLX: missing choices[0].message');
+
+  const usage = json?.usage;
+
+  return {
+    message: {
+      content: msg.content ?? null,
+      tool_calls: msg.tool_calls ?? undefined,
+    },
+    usage: usage ? {
+      prompt_tokens: usage.prompt_tokens ?? 0,
+      completion_tokens: usage.completion_tokens ?? 0,
+      total_tokens: usage.total_tokens ?? 0,
+    } : undefined,
+  };
+}
+
 function mockGenerate(prompt: string): string {
   const matches = [...prompt.matchAll(/(\d+(?:\.\d+)?)\s*ms\b/gi)].map(m => Number(m[1]));
   const payload = {
@@ -282,12 +354,32 @@ async function main() {
 
     // ── Sub-pipeline: Generate → Validate → Repair → Correct → ToolCall → Return ──
 
-    // 1. Generate
-    const gen = await handleGenerate(step, ir, schema, generateText, extractJsonObject);
-    trace.steps.push(gen.result);
+    // 1. Generate (single-call or agentic multi-turn)
+    let raw: string;
+    let parsed: any;
 
-    let raw = gen.raw;
-    let parsed = gen.parsed;
+    if (ir.mode === 'agentic') {
+      const maxToolCalls = ir.policies?.constraints?.budget?.max_tool_calls ?? 20;
+      const toolsOpenAI = toolRegistry.toOpenAIFormat(toolsAllowed);
+
+      const agenticResult = await handleAgenticGenerate(
+        step, ir, schema, toolsOpenAI, toolRegistry, toolsAllowed,
+        generateWithTools, extractJsonObject, maxToolCalls,
+      );
+
+      trace.steps.push(agenticResult.result);
+      for (const ts of agenticResult.traceSteps) {
+        trace.steps.push(ts);
+      }
+
+      raw = agenticResult.raw;
+      parsed = agenticResult.parsed;
+    } else {
+      const gen = await handleGenerate(step, ir, schema, generateText, extractJsonObject);
+      trace.steps.push(gen.result);
+      raw = gen.raw;
+      parsed = gen.parsed;
+    }
 
     // 2. Validate + Repair loop
     let ok = false;

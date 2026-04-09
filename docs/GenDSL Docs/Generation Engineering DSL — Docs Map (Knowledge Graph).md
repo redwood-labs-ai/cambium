@@ -16,6 +16,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[P - constrain]]
 - [[P - Compound Generation]]
 - [[P - enrich]]
+- [[P - mode]]
 
 ## Runtime + compilation
 - [[C - IR (Intermediate Representation)]]

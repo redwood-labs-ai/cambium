@@ -43,4 +43,25 @@ export class ToolRegistry {
   list(): string[] {
     return [...this.defs.keys()];
   }
+
+  /**
+   * Convert tool definitions to OpenAI function-calling format.
+   * Only includes tools in the allowlist.
+   */
+  toOpenAIFormat(allowlist: string[]): any[] {
+    const tools: any[] = [];
+    for (const name of allowlist) {
+      const def = this.defs.get(name);
+      if (!def) continue;
+      tools.push({
+        type: 'function',
+        function: {
+          name: def.name,
+          description: def.description,
+          parameters: def.inputSchema,
+        },
+      });
+    }
+    return tools;
+  }
 }

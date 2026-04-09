@@ -104,6 +104,7 @@ ir = {
     'max_tokens' => defs[:max_tokens]
   },
   'system' => system_prompt,
+  'mode' => defs[:mode],
   'policies' => {
     'tools_allowed' => (defs[:tools] || []),
     'correctors' => (defs[:correctors] || []),
