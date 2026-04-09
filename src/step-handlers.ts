@@ -3,6 +3,7 @@ import { ToolRegistry } from './tools/registry.js';
 import { builtinTools } from './tools/index.js';
 import { runCorrectorPipeline } from './correctors/index.js';
 import type { CorrectorResult } from './correctors/types.js';
+import { schemaPromptBlock } from './schema-describe.js';
 
 export type StepResult = {
   type: string;
@@ -46,12 +47,12 @@ export async function handleGenerate(
 
   const system = [
     basePrompt,
-    'CRITICAL OUTPUT RULES:',
-    '- Output MUST be JSON only. No markdown. No code fences.',
-    '- Do NOT include any reasoning, thoughts, or preambles (no "Thinking" / "Thinking Process").',
+    '',
+    schemaPromptBlock(schema),
+    '',
+    'OUTPUT RULES:',
+    '- Output MUST be JSON only. No markdown. No code fences. No reasoning.',
     '- Output must start with "{" and end with "}".',
-    `- JSON MUST validate against schema id: ${schema.$id}.`,
-    `- Use exactly these top-level keys: ${schemaKeys.join(', ')}.`,
     '- If unsure, leave fields empty but valid.',
   ].join('\n');
 
@@ -65,15 +66,31 @@ export async function handleGenerate(
     else jsonTemplate[key] = null;
   }
 
-  const prompt = [
+  // Build prompt with document + any enriched context
+  const promptParts = [
     step.prompt,
     '',
     'DOCUMENT:',
     String(doc ?? ''),
+  ];
+
+  // Include enriched context fields (added by the enrich primitive)
+  const context = ir.context ?? {};
+  for (const key of Object.keys(context)) {
+    if (key.endsWith('_enriched')) {
+      const label = key.replace(/_enriched$/, '').toUpperCase() + '_ANALYSIS';
+      const value = typeof context[key] === 'string' ? context[key] : JSON.stringify(context[key], null, 2);
+      promptParts.push('', `${label}:`, value);
+    }
+  }
+
+  promptParts.push(
     '',
     'OUTPUT_JSON_TEMPLATE (fill this; keep keys the same; no extra keys):',
     JSON.stringify(jsonTemplate),
-  ].join('\n');
+  );
+
+  const prompt = promptParts.join('\n');
 
   const outMax = Math.min(Number(ir.model.max_tokens ?? 1200), 500);
   const started = Date.now();
@@ -151,13 +168,13 @@ export async function handleRepair(
 
   const repairSystem = [
     'You are repairing JSON to satisfy a schema.',
-    'CRITICAL OUTPUT RULES:',
-    '- Output MUST be JSON only. No markdown. No code fences.',
-    '- Do NOT include reasoning or preambles.',
+    '',
+    schemaPromptBlock(schema),
+    '',
+    'OUTPUT RULES:',
+    '- Output MUST be JSON only. No markdown. No code fences. No reasoning.',
     '- Output must start with "{" and end with "}".',
     '- Edit ONLY the fields necessary to fix the validation errors.',
-    `- Schema id: ${schema.$id}.`,
-    `- Use exactly these top-level keys: ${schemaKeys.join(', ')}.`,
   ].join('\n');
 
   const repairPrompt = [

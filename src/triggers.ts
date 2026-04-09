@@ -32,7 +32,8 @@ export function evaluateTriggers(
   for (const trigger of triggers) {
     const signalValue = state[trigger.on];
 
-    if (signalValue === undefined) {
+    // Skip if signal has no value or is an empty array
+    if (signalValue === undefined || (Array.isArray(signalValue) && signalValue.length === 0)) {
       results.push({
         fired: false,
         traceEntry: {

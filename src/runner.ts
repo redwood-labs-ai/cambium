@@ -12,6 +12,7 @@ import {
 import { extractSignals } from './signals.js';
 import { evaluateTriggers } from './triggers.js';
 import { runReview, runConsensus } from './compound.js';
+import { runEnrichment } from './enrich.js';
 
 type IR = any;
 
@@ -225,6 +226,50 @@ async function main() {
   const correctorNames: string[] = ir.policies?.correctors ?? [];
   const maxRepairAttempts = ir.policies?.max_repair_attempts ?? 2;
 
+  // ── Enrichments (pre-generate context processing) ───────────────────
+  const enrichments = ir.enrichments ?? [];
+  for (const enrichDef of enrichments) {
+    const contextValue = ir.context?.[enrichDef.field];
+    if (contextValue === undefined) {
+      trace.steps.push({
+        type: 'EnrichSkipped',
+        ok: true,
+        meta: { field: enrichDef.field, reason: `Field "${enrichDef.field}" not found in context` },
+      });
+      continue;
+    }
+
+    trace.steps.push({ type: 'Enrich', id: `enrich_${enrichDef.field}`, meta: { field: enrichDef.field, agent: enrichDef.agent } });
+
+    const enrichResult = await runEnrichment(
+      enrichDef, contextValue, ir, contractsMod, generateText, extractJsonObject,
+    );
+
+    // Add sub-agent trace steps under the enrichment
+    for (const subStep of enrichResult.traceSteps) {
+      trace.steps.push(subStep);
+    }
+
+    if (enrichResult.ok && enrichResult.output !== undefined) {
+      // Add enriched output as a new context field (e.g., "document" → "document_enriched").
+      // The original field stays intact so the parent agent still has access to the raw data.
+      const enrichedKey = `${enrichDef.field}_enriched`;
+      ir.context[enrichedKey] = enrichResult.output;
+      trace.steps.push({
+        type: 'EnrichComplete',
+        ok: true,
+        meta: { field: enrichDef.field, enrichedAs: enrichedKey, agent: enrichDef.agent, usage: enrichResult.usage },
+      });
+    } else {
+      trace.steps.push({
+        type: 'EnrichFailed',
+        ok: false,
+        meta: { field: enrichDef.field, agent: enrichDef.agent },
+      });
+      // Continue with raw context — enrichment failure is non-fatal
+    }
+  }
+
   // ── Execute IR steps ────────────────────────────────────────────────
   let finalParsed: any = undefined;
   let finalOk = false;
@@ -321,17 +366,34 @@ async function main() {
       const allOutputs = [parsed];
 
       for (let p = 0; p < extraPasses; p++) {
+        const passId = `${step.id}_pass_${p + 2}`;
         const extraGen = await handleGenerate(step, ir, schema, generateText, extractJsonObject);
-        trace.steps.push({ ...extraGen.result, id: `${step.id}_pass_${p + 2}` });
+        trace.steps.push({ ...extraGen.result, id: passId });
 
-        if (extraGen.parsed) {
-          const extraV = handleValidate(extraGen.parsed, validate, 'ValidateConsensusPass');
+        let extraRaw = extraGen.raw;
+        let extraParsed = extraGen.parsed;
+
+        // Run the same validate + repair loop as the primary generate
+        for (let attempt = 0; attempt < 1 + maxRepairAttempts; attempt++) {
+          const extraV = handleValidate(extraParsed, validate,
+            attempt === 0 ? 'ValidateConsensusPass' : 'ValidateConsensusPassAfterRepair');
+
           if (extraV.ok) {
-            allOutputs.push(extraGen.parsed);
-          } else {
-            trace.steps.push(extraV);
-            // Invalid extra pass — skip it in consensus
+            if (attempt > 0) trace.steps.push(extraV);
+            allOutputs.push(extraParsed);
+            break;
           }
+
+          trace.steps.push(extraV);
+          if (attempt >= maxRepairAttempts) break;
+
+          const extraRepair = await handleRepair(
+            extraRaw, extraV.errors ?? [], schema, ir,
+            attempt + 1, generateText, extractJsonObject,
+          );
+          trace.steps.push({ ...extraRepair.result, id: `${passId}_repair_${attempt + 1}` });
+          extraRaw = extraRepair.raw;
+          extraParsed = extraRepair.parsed;
         }
       }
 

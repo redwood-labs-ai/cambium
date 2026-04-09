@@ -113,6 +113,7 @@ ir = {
   'context' => {
     'document' => arg
   },
+  'enrichments' => (defs[:enrichments] || []),
   'signals' => (defs[:signals] || []),
   'triggers' => (defs[:triggers] || []),
   'steps' => builder.steps

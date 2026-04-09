@@ -1,6 +1,30 @@
 import { Type } from '@sinclair/typebox'
 
 // NOTE: TypeBox schemas are JSON Schema by construction.
+
+export const LogSummary = Type.Object(
+  {
+    key_events: Type.Array(
+      Type.Object(
+        {
+          timestamp: Type.String(),
+          message: Type.String(),
+          severity: Type.Union([
+            Type.Literal('info'),
+            Type.Literal('warning'),
+            Type.Literal('error'),
+            Type.Literal('critical'),
+          ]),
+        },
+        { additionalProperties: false }
+      )
+    ),
+    error_count: Type.Number(),
+    summary: Type.String(),
+  },
+  { additionalProperties: false, $id: 'LogSummary' }
+)
+
 export const AnalysisReport = Type.Object(
   {
     summary: Type.String(),

@@ -100,6 +100,17 @@ module Cambium
         }.compact
       end
 
+      # Enrich: pre-generate context enrichment via sub-agent.
+      #   enrich :datadog_logs do
+      #     agent :LogSummarizer, method: :summarize
+      #   end
+      def enrich(context_field, &block)
+        _cambium_defaults[:enrichments] ||= []
+        dsl = EnrichDSL.new(context_field.to_s)
+        dsl.instance_eval(&block) if block
+        _cambium_defaults[:enrichments] << dsl._enrichment
+      end
+
       # Triggers: declare a deterministic action when a signal has values.
       #   on :latency_ms do
       #     tool :calculator, operation: "avg", target: "metrics.avg_latency_ms"
@@ -150,6 +161,19 @@ module Cambium
       def stringify_keys(h)
         h.transform_keys(&:to_s)
       end
+    end
+  end
+
+  class EnrichDSL
+    attr_reader :_enrichment
+
+    def initialize(context_field)
+      @_enrichment = { 'field' => context_field }
+    end
+
+    def agent(name, method: nil)
+      @_enrichment['agent'] = name.to_s
+      @_enrichment['method'] = method.to_s if method
     end
   end
 

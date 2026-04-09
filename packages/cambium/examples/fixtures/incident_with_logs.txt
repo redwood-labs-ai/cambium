@@ -1,0 +1,24 @@
+Incident: API latency regression.
+
+Timeline:
+- 10:01 - p95 latency 120 ms
+- 10:05 - p95 latency 140 ms
+- 10:12 - p95 latency 160 ms
+- 10:13 - p95 latency 195 ms
+
+Hypothesis: cache stampede after deploy.
+
+---LOGS---
+10:00:58 [INFO] deploy-bot: deployment v2.14.3 started (commit abc123f)
+10:01:02 [INFO] deploy-bot: deployment v2.14.3 completed, 12 pods rolling
+10:01:05 [WARN] cache-service: miss rate spike detected, miss_rate=0.82 (normal: 0.05)
+10:01:08 [ERROR] api-gateway: upstream timeout after 500ms, endpoint=/api/v1/users
+10:01:12 [ERROR] api-gateway: upstream timeout after 620ms, endpoint=/api/v1/orders
+10:01:15 [WARN] cache-service: thundering herd detected, concurrent_fills=347
+10:01:18 [ERROR] api-gateway: circuit breaker OPEN for orders-service
+10:02:01 [INFO] cache-service: miss rate stabilizing, miss_rate=0.45
+10:03:30 [WARN] cache-service: miss rate still elevated, miss_rate=0.31
+10:05:00 [INFO] monitoring: p95 latency alert triggered, threshold=130ms
+10:08:22 [ERROR] api-gateway: upstream timeout after 480ms, endpoint=/api/v1/search
+10:12:00 [WARN] monitoring: p95 latency continuing to climb, current=160ms
+10:13:05 [ERROR] cache-service: eviction storm detected, evictions_per_sec=1205

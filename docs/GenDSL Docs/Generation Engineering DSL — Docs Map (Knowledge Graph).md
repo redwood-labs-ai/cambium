@@ -15,6 +15,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[P - corrects (correctors)]]
 - [[P - constrain]]
 - [[P - Compound Generation]]
+- [[P - enrich]]
 
 ## Runtime + compilation
 - [[C - IR (Intermediate Representation)]]
@@ -22,6 +23,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[C - Trace (observability)]]
 - [[C - Repair Loop]]
 - [[C - Signals, State, and Triggers]]
+- [[C - Schema Description (auto-generated)]]
 
 ## Data + integrations
 - [[D - Schemas (JSON Schema)]]
