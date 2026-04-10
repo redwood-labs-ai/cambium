@@ -84,6 +84,21 @@ runs/               # Execution artifacts (ir.json, trace.json, output.json)
 docs/GenDSL Docs/   # Full knowledge graph
 ```
 
+## Documentation
+
+Full docs are in `docs/GenDSL Docs/` — a knowledge graph with stable Doc IDs. Start with:
+- `docs/GenDSL Docs/00 - Getting Started.md`
+- `docs/GenDSL Docs/01 - Core Concepts.md`
+- `docs/GenDSL Docs/Generation Engineering DSL — Docs Map (Knowledge Graph).md` (index of all docs)
+
+Prefix key: **P** = Primitive, **C** = Compilation/Runtime, **D** = Data, **S** = Security, **N** = Design Note.
+
+The spec drafts are in `docs/` (root level):
+- `docs/Generation Engineering DSL (Rails-style) - Spec Draft.md`
+- `docs/Generation Engineering DSL — Reference Implementation (v0).md`
+
+Read these docs before making architectural decisions or adding new primitives.
+
 ## Development
 
 - Tests: `npm test` (vitest, 63 tests)
