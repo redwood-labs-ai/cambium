@@ -4,6 +4,7 @@ import { builtinTools } from './tools/index.js';
 import { runCorrectorPipeline } from './correctors/index.js';
 import type { CorrectorResult } from './correctors/types.js';
 import { schemaPromptBlock } from './schema-describe.js';
+import { parseInlineToolCalls } from './inline-tool-calls.js';
 
 export type StepResult = {
   type: string;
@@ -395,19 +396,26 @@ export async function handleAgenticGenerate(
 
     const msg = response.message;
     const elapsed = ((Date.now() - turnStarted) / 1000).toFixed(1);
-    if (msg.tool_calls?.length) {
-      log(`  model responded in ${elapsed}s with ${msg.tool_calls.length} tool call(s)`);
+
+    // Some models (e.g. Gemma) may emit tool calls inline in message.content.
+    const inlineToolCalls = msg.content ? parseInlineToolCalls(msg.content) : [];
+    const toolCalls = (msg.tool_calls && msg.tool_calls.length > 0)
+      ? msg.tool_calls
+      : (inlineToolCalls.length > 0 ? inlineToolCalls : undefined);
+
+    if (toolCalls?.length) {
+      log(`  model responded in ${elapsed}s with ${toolCalls.length} tool call(s)`);
     } else {
       log(`  model responded in ${elapsed}s with content`);
     }
 
     // Model wants to call tools — but not if we've hit the limit
-    if (msg.tool_calls && msg.tool_calls.length > 0 && totalToolCalls < maxToolCalls) {
+    if (toolCalls && toolCalls.length > 0 && totalToolCalls < maxToolCalls) {
       // Append assistant message with tool calls to history
-      messages.push({ role: 'assistant', content: msg.content, tool_calls: msg.tool_calls });
+      messages.push({ role: 'assistant', content: msg.content, tool_calls: toolCalls });
 
       const toolResults: StepResult[] = [];
-      for (const tc of msg.tool_calls) {
+      for (const tc of toolCalls) {
         const fnName = tc.function.name;
         let fnArgs: any;
         try {
@@ -452,7 +460,7 @@ export async function handleAgenticGenerate(
         ok: true,
         meta: {
           turn: turn + 1,
-          tool_calls: msg.tool_calls.map((tc: any) => ({
+          tool_calls: toolCalls.map((tc: any) => ({
             name: tc.function.name,
             args: tc.function.arguments,
           })),
