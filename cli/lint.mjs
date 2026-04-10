@@ -138,6 +138,15 @@ function lintPackage(pkgDir) {
         if (!def.name) fail(`  ${f}: missing "name"`);
         if (!def.inputSchema) fail(`  ${f}: missing "inputSchema"`);
         if (!def.outputSchema) fail(`  ${f}: missing "outputSchema"`);
+        if (def.permissions) {
+          const perms = def.permissions;
+          if (perms.network) warn(`  ${f}: declares network access`);
+          if (perms.filesystem) warn(`  ${f}: declares filesystem access`);
+          if (perms.exec) warn(`  ${f}: declares exec access — review carefully`);
+          if (perms.pure) pass(`  ${f}: pure (no side effects)`);
+        } else {
+          pass(`  ${f}: no permissions declared (treated as pure)`);
+        }
       } catch (e) {
         fail(`  ${f}: invalid JSON — ${e.message}`);
       }

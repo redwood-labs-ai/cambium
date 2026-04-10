@@ -1,11 +1,13 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import type { ToolPermissions } from './permissions.js';
 
 export type ToolDefinition = {
   name: string;
   description: string;
   inputSchema: object;
   outputSchema: object;
+  permissions?: ToolPermissions;
 };
 
 export class ToolRegistry {

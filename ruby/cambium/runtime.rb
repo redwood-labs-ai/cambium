@@ -94,6 +94,12 @@ module Cambium
         _cambium_defaults[:constraints][key.to_s] = opts
       end
 
+      # Security: declare security policy for tool execution.
+      #   security allow_network: true, network_hosts: ["api.example.com"]
+      def security(**opts)
+        _cambium_defaults[:security] = opts.transform_keys(&:to_s)
+      end
+
       # Grounding: declare that outputs must be grounded in a source.
       #   grounded_in :document, require_citations: true
       def grounded_in(source, require_citations: false)

@@ -1,6 +1,9 @@
 {
   "name": "calculator",
   "description": "Deterministic math evaluation (avg, sum, min, max)",
+  "permissions": {
+    "pure": true
+  },
   "inputSchema": {
     "type": "object",
     "required": ["operation", "operands"],

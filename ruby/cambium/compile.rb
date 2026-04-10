@@ -109,7 +109,8 @@ ir = {
     'tools_allowed' => (defs[:tools] || []),
     'correctors' => (defs[:correctors] || []),
     'constraints' => (defs[:constraints] || {}),
-    'grounding' => defs[:grounding]
+    'grounding' => defs[:grounding],
+    'security' => defs[:security]
   },
   'returnSchemaId' => defs[:returnSchema],
   'context' => {

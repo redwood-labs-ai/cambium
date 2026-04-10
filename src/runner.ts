@@ -295,6 +295,23 @@ async function main() {
     }
   }
 
+  // ── Security: validate tool permissions ─────────────────────────────
+  const { buildSecurityPolicy, validateAllToolPermissions } = await import('./tools/permissions.js');
+  const securityPolicy = buildSecurityPolicy(ir.policies);
+  const permViolations = validateAllToolPermissions(toolRegistry, toolsAllowed, securityPolicy);
+  if (permViolations.length > 0) {
+    for (const v of permViolations) {
+      console.error(`Security violation: ${v.message}`);
+    }
+    trace.steps.push({
+      type: 'SecurityCheck',
+      ok: false,
+      errors: permViolations.map(v => ({ message: v.message, tool: v.tool, permission: v.permission })),
+    });
+    throw new Error(`${permViolations.length} security violation(s). See trace for details.`);
+  }
+  trace.steps.push({ type: 'SecurityCheck', ok: true, meta: { tools_checked: toolsAllowed, policy: securityPolicy } });
+
   const correctorNames: string[] = ir.policies?.correctors ?? [];
   const maxRepairAttempts = ir.policies?.max_repair_attempts ?? 2;
 
