@@ -1,0 +1,22 @@
+{
+  "name": "web_extract",
+  "description": "Fetch a web page and extract its text content. Returns the page title and cleaned text.",
+  "permissions": {
+    "network": true
+  },
+  "inputSchema": {
+    "type": "object",
+    "required": ["url"],
+    "properties": {
+      "url": { "type": "string", "description": "The URL to fetch" }
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["content"],
+    "properties": {
+      "title": { "type": "string" },
+      "content": { "type": "string" }
+    }
+  }
+}

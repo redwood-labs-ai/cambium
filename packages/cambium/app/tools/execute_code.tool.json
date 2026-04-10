@@ -1,0 +1,24 @@
+{
+  "name": "execute_code",
+  "description": "Execute code in a sandboxed subprocess with timeout. Supports Python and Node.js. Returns stdout, stderr, and exit code.",
+  "permissions": {
+    "exec": true
+  },
+  "inputSchema": {
+    "type": "object",
+    "required": ["language", "code"],
+    "properties": {
+      "language": { "type": "string", "enum": ["python", "node"], "description": "Language to execute" },
+      "code": { "type": "string", "description": "Code to execute" }
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["stdout", "stderr", "exit_code"],
+    "properties": {
+      "stdout": { "type": "string" },
+      "stderr": { "type": "string" },
+      "exit_code": { "type": "number" }
+    }
+  }
+}

@@ -261,13 +261,13 @@ export function handleCorrect(
 }
 
 // ── ToolCall ──────────────────────────────────────────────────────────
-export function handleToolCall(
+export async function handleToolCall(
   toolName: string,
   operation: string,
   input: any,
   registry: ToolRegistry,
   allowlist: string[],
-): StepResult {
+): Promise<StepResult> {
   const started = Date.now();
 
   registry.assertAllowed(toolName, allowlist);
@@ -278,7 +278,8 @@ export function handleToolCall(
   const impl = builtinTools[toolName];
   if (!impl) throw new Error(`No built-in implementation for tool "${toolName}"`);
 
-  const result = impl(input);
+  // Support both sync and async tool implementations
+  const result = await Promise.resolve(impl(input));
 
   return {
     type: 'ToolCall',
@@ -398,7 +399,7 @@ export async function handleAgenticGenerate(
 
         let toolResult: any;
         try {
-          const tcResult = handleToolCall(fnName, fnArgs.operation ?? fnName, fnArgs, toolRegistry, toolsAllowed);
+          const tcResult = await handleToolCall(fnName, fnArgs.operation ?? fnName, fnArgs, toolRegistry, toolsAllowed);
           toolResult = tcResult.output;
           toolResults.push(tcResult);
         } catch (e: any) {

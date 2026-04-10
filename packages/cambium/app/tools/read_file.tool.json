@@ -1,0 +1,25 @@
+{
+  "name": "read_file",
+  "description": "Read a file's contents with size guards and binary detection. Supports offset and line limit for large files.",
+  "permissions": {
+    "filesystem": true
+  },
+  "inputSchema": {
+    "type": "object",
+    "required": ["path"],
+    "properties": {
+      "path": { "type": "string", "description": "Path to the file" },
+      "offset": { "type": "number", "description": "Line number to start from (1-indexed, default 1)", "default": 1 },
+      "limit": { "type": "number", "description": "Max lines to read (default 500)", "default": 500 }
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["content"],
+    "properties": {
+      "content": { "type": "string" },
+      "total_lines": { "type": "number" },
+      "truncated": { "type": "boolean" }
+    }
+  }
+}
