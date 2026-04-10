@@ -2,6 +2,9 @@ node_modules/
 runs/
 .DS_Store
 
+# Secrets
+.env
+
 # Ruby
 *.gem
 .bundle/

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import 'dotenv/config';
 import { spawnSync } from 'node:child_process';
 import { runGenerate } from './generate.mjs';
 import { runLint } from './lint.mjs';

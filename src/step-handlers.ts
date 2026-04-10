@@ -366,11 +366,24 @@ export async function handleAgenticGenerate(
   let finalRaw = '';
   let finalParsed: any = undefined;
 
+  const log = (msg: string) => process.stderr.write(`  ${msg}\n`);
+  log(`⟳ Agentic loop started (max ${maxToolCalls} tool calls)`);
+
   for (let turn = 0; turn < maxToolCalls + 1; turn++) {
     const turnStarted = Date.now();
 
     // On the last allowed turn, omit tools to force the model to produce content
     const toolsForTurn = totalToolCalls >= maxToolCalls ? [] : toolsOpenAI;
+    if (toolsForTurn.length === 0 && totalToolCalls > 0) {
+      log(`⟳ Turn ${turn + 1}: forcing final output (tool call limit reached)`);
+      // Add an explicit instruction to produce the final answer
+      messages.push({
+        role: 'user',
+        content: 'You have gathered enough information. STOP calling tools. Produce your final JSON output now. Output MUST be JSON only, starting with { and ending with }.',
+      });
+    } else {
+      log(`⟳ Turn ${turn + 1}: calling model...`);
+    }
 
     const response = await generateWithTools({
       model: ir.model.id,
@@ -381,9 +394,15 @@ export async function handleAgenticGenerate(
     });
 
     const msg = response.message;
+    const elapsed = ((Date.now() - turnStarted) / 1000).toFixed(1);
+    if (msg.tool_calls?.length) {
+      log(`  model responded in ${elapsed}s with ${msg.tool_calls.length} tool call(s)`);
+    } else {
+      log(`  model responded in ${elapsed}s with content`);
+    }
 
-    // Model wants to call tools
-    if (msg.tool_calls && msg.tool_calls.length > 0) {
+    // Model wants to call tools — but not if we've hit the limit
+    if (msg.tool_calls && msg.tool_calls.length > 0 && totalToolCalls < maxToolCalls) {
       // Append assistant message with tool calls to history
       messages.push({ role: 'assistant', content: msg.content, tool_calls: msg.tool_calls });
 
@@ -397,13 +416,18 @@ export async function handleAgenticGenerate(
           fnArgs = {};
         }
 
+        log(`  → ${fnName}(${JSON.stringify(fnArgs).slice(0, 100)})`);
+
         let toolResult: any;
         try {
           const tcResult = await handleToolCall(fnName, fnArgs.operation ?? fnName, fnArgs, toolRegistry, toolsAllowed);
           toolResult = tcResult.output;
           toolResults.push(tcResult);
+          const preview = JSON.stringify(toolResult).slice(0, 120);
+          log(`  ← ${preview}${preview.length >= 120 ? '...' : ''}`);
         } catch (e: any) {
           toolResult = { error: e.message };
+          log(`  ✗ ${e.message}`);
           toolResults.push({
             type: 'ToolCall',
             ok: false,
@@ -442,10 +466,12 @@ export async function handleAgenticGenerate(
 
     // Model produced content — this is the final output
     finalRaw = msg.content ?? '';
+    log(`⟳ Final output received (${finalRaw.length} chars, ${totalToolCalls} tool calls)`);
+    if (finalRaw) log(`  ${finalRaw.slice(0, 150)}${finalRaw.length > 150 ? '...' : ''}`);
     try {
       finalParsed = extractJson(finalRaw);
     } catch {
-      // will be caught by validation
+      log(`  ✗ Failed to parse JSON from output`);
     }
 
     traceSteps.push({
