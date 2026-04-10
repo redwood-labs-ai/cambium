@@ -2,6 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { runGenerate } from './generate.mjs';
 import { runLint } from './lint.mjs';
+import { runInit } from './init.mjs';
 
 function usage(msg) {
   if (msg) console.error(`\n${msg}`);
@@ -9,14 +10,16 @@ function usage(msg) {
 Cambium — Rails for generation engineering
 
 Usage:
-  cambium run <file.cmb.rb> --method <method> --arg <path>|-
+  cambium init [name]
   cambium new <type> <Name>
+  cambium run <file.cmb.rb> --method <method> --arg <path>|-
   cambium test
   cambium lint
 
 Commands:
-  run       Compile and execute a GenModel
+  init      Initialize a new Cambium workspace
   new       Scaffold a new agent, tool, schema, system, or corrector
+  run       Compile and execute a GenModel
   test      Run the test suite
   lint      Validate package structure and declarations
 
@@ -37,6 +40,12 @@ if (!cmd) usage();
 if (cmd === 'new') {
   const [type, name] = args;
   runGenerate(type, name);
+  process.exit(0);
+}
+
+// ── cambium init ──────────────────────────────────────────────────────
+if (cmd === 'init') {
+  runInit(args[0]);
   process.exit(0);
 }
 
