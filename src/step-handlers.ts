@@ -159,6 +159,23 @@ export function handleValidate(
 }
 
 // ── Repair ────────────────────────────────────────────────────────────
+function buildJsonTemplate(schema: any): Record<string, any> {
+  const schemaKeys = Object.keys(schema.properties ?? {});
+  const jsonTemplate: Record<string, any> = {};
+  for (const key of schemaKeys) {
+    const prop = schema.properties[key];
+    if (prop.type === 'string') jsonTemplate[key] = '';
+    else if (prop.type === 'array') jsonTemplate[key] = [];
+    else if (prop.type === 'object') jsonTemplate[key] = {};
+    else jsonTemplate[key] = null;
+  }
+  return jsonTemplate;
+}
+
+function looksLikeToolCallMarkup(raw: string): boolean {
+  return /<\|tool_call>|<tool_call>/.test(raw);
+}
+
 export async function handleRepair(
   raw: string,
   errors: any[],
@@ -170,14 +187,28 @@ export async function handleRepair(
 ): Promise<{ raw: string; parsed: any; result: StepResult }> {
   const schemaKeys = Object.keys(schema.properties ?? {});
 
-  // Build template same as generate
-  const jsonTemplate: Record<string, any> = {};
-  for (const key of schemaKeys) {
-    const prop = schema.properties[key];
-    if (prop.type === 'string') jsonTemplate[key] = '';
-    else if (prop.type === 'array') jsonTemplate[key] = [];
-    else if (prop.type === 'object') jsonTemplate[key] = {};
-    else jsonTemplate[key] = null;
+  const jsonTemplate = buildJsonTemplate(schema);
+
+  // If the "raw" output is actually tool-call markup, do NOT hallucinate a placeholder answer.
+  // Fail closed by returning an empty-but-valid JSON object (the agent loop should handle tools).
+  if (looksLikeToolCallMarkup(raw)) {
+    const started = Date.now();
+    const emptyRaw = JSON.stringify(jsonTemplate);
+    return {
+      raw: emptyRaw,
+      parsed: jsonTemplate,
+      result: {
+        type: 'Repair',
+        ms: Date.now() - started,
+        ok: true,
+        meta: {
+          attempt,
+          deterministic: true,
+          reason: 'tool_call_markup',
+          raw_preview: raw.slice(0, 200),
+        },
+      },
+    };
   }
 
   const repairSystem = [
@@ -189,6 +220,7 @@ export async function handleRepair(
     '- Output MUST be JSON only. No markdown. No code fences. No reasoning.',
     '- Output must start with "{" and end with "}".',
     '- Edit ONLY the fields necessary to fix the validation errors.',
+    '- Do NOT introduce new factual content. If information is missing, leave the field empty.',
   ].join('\n');
 
   const repairPrompt = [
