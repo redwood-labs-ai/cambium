@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
 import { runGenerate } from './generate.mjs';
+import { runLint } from './lint.mjs';
 
 function usage(msg) {
   if (msg) console.error(`\n${msg}`);
@@ -11,11 +12,13 @@ Usage:
   cambium run <file.cmb.rb> --method <method> --arg <path>|-
   cambium new <type> <Name>
   cambium test
+  cambium lint
 
 Commands:
   run       Compile and execute a GenModel
   new       Scaffold a new agent, tool, schema, system, or corrector
   test      Run the test suite
+  lint      Validate package structure and declarations
 
 Examples:
   cambium run packages/cambium/app/gens/analyst.cmb.rb --method analyze --arg document.txt
@@ -34,6 +37,12 @@ if (!cmd) usage();
 if (cmd === 'new') {
   const [type, name] = args;
   runGenerate(type, name);
+  process.exit(0);
+}
+
+// ── cambium lint ──────────────────────────────────────────────────────
+if (cmd === 'lint') {
+  runLint();
   process.exit(0);
 }
 
