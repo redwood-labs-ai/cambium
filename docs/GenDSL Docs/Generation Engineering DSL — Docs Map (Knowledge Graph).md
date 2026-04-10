@@ -41,6 +41,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[N - Failure Modes & Debugging]]
 - [[N - VS Code Language Server]]
 - [[N - Agentic Transactions]]
+- [[N - GAIA Benchmark Evaluation]]
 
 ---
 
