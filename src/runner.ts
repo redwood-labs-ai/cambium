@@ -14,6 +14,8 @@ import { extractSignals } from './signals.js';
 import { evaluateTriggers } from './triggers.js';
 import { runReview, runConsensus } from './compound.js';
 import { runEnrichment } from './enrich.js';
+import { parseBudget } from './budget.js';
+import type { Budget } from './budget.js';
 
 type IR = any;
 
@@ -315,6 +317,31 @@ async function main() {
   const correctorNames: string[] = ir.policies?.correctors ?? [];
   const maxRepairAttempts = ir.policies?.max_repair_attempts ?? 2;
 
+  // ── Budget tracking ─────────────────────────────────────────────────
+  const budget = parseBudget(ir.policies?.constraints);
+
+  /** Track tokens from a trace step and check budget. Throws on violation. */
+  function budgetTrack(step: any): void {
+    const usage = step.meta?.usage;
+    if (usage?.total_tokens) budget.addTokens(usage.total_tokens);
+
+    const violation = budget.check();
+    if (violation) {
+      trace.steps.push({
+        type: 'BudgetExceeded',
+        ok: false,
+        meta: { violation, budget: budget.summary() },
+      });
+      trace.finished_at = new Date().toISOString();
+      trace.final = { ok: false, schema_id: schema.$id, usage: budget.summary(), budget_exceeded: true };
+      writeFileSync(join(runDir, 'ir.json'), JSON.stringify(ir, null, 2));
+      writeFileSync(join(runDir, 'trace.json'), JSON.stringify(trace, null, 2));
+      writeFileSync(join(runDir, 'output.json'), 'null');
+      console.error(`Budget exceeded: ${violation.message}. See ${join('runs', runId, 'trace.json')}`);
+      process.exit(1);
+    }
+  }
+
   // ── Enrichments (pre-generate context processing) ───────────────────
   const enrichments = ir.enrichments ?? [];
   for (const enrichDef of enrichments) {
@@ -387,6 +414,7 @@ async function main() {
       trace.steps.push(agenticResult.result);
       for (const ts of agenticResult.traceSteps) {
         trace.steps.push(ts);
+        budgetTrack(ts);
       }
 
       raw = agenticResult.raw;
@@ -394,6 +422,7 @@ async function main() {
     } else {
       const gen = await handleGenerate(step, ir, schema, generateText, extractJsonObject);
       trace.steps.push(gen.result);
+      budgetTrack(gen.result);
       raw = gen.raw;
       parsed = gen.parsed;
     }
@@ -422,6 +451,7 @@ async function main() {
       // Repair
       const repair = await handleRepair(raw, errors, schema, ir, attempt + 1, generateText, extractJsonObject);
       trace.steps.push(repair.result);
+      budgetTrack(repair.result);
       raw = repair.raw;
       parsed = repair.parsed;
     }
@@ -437,12 +467,14 @@ async function main() {
     // 3a. Compound review: LLM audits the output against the source document
     if (constraints.compound?.strategy === 'review') {
       const review = await runReview(parsed, ir, schema, generateText, extractJsonObject);
-      trace.steps.push({
+      const reviewTraceEntry = {
         type: 'Review',
         ok: review.ok,
         ms: review.ms,
         meta: { issues: review.issues, raw_preview: review.raw_preview, usage: review.usage },
-      });
+      };
+      trace.steps.push(reviewTraceEntry);
+      budgetTrack(reviewTraceEntry);
 
       if (!review.ok) {
         // Feed review issues into a repair pass
@@ -455,6 +487,7 @@ async function main() {
           maxRepairAttempts + 1, generateText, extractJsonObject,
         );
         trace.steps.push(repair.result);
+        budgetTrack(repair.result);
 
         if (repair.parsed) {
           const revalidate = handleValidate(repair.parsed, validate, 'ValidateAfterReview');
@@ -630,7 +663,7 @@ async function main() {
     }
   }
 
-  trace.final = { ok: finalOk, schema_id: schema.$id, usage: totalUsage };
+  trace.final = { ok: finalOk, schema_id: schema.$id, usage: totalUsage, budget: budget.summary() };
 
   writeFileSync(join(runDir, 'ir.json'), JSON.stringify(ir, null, 2));
   writeFileSync(join(runDir, 'trace.json'), JSON.stringify(trace, null, 2));
