@@ -49,6 +49,23 @@ So the model cannot be the system’s governor.
 - The **runner** is authoritative: it executes a typed plan (IR), enforces policy, controls tools, tracks budgets, validates outputs, and writes traces.
 - The LLM is a bounded function: given context and strict output constraints, it proposes the next structured step or produces user-facing language.
 
+### 1.3 Generation engineering: turning probabilistic components into deterministic outcomes
+A useful mental model is **generation engineering**:
+
+> Deterministic systems design around nondeterministic components.
+
+We do not need the model to be correct 100% of the time to achieve production-grade reliability.
+We need:
+- deterministic *contracts* (schemas)
+- deterministic *gates* (policy/permissions)
+- deterministic *termination* (budgets)
+- deterministic *side effects* (two-phase commit)
+- deterministic *evidence* (trace)
+
+Analogy: a coin flip is probabilistic, but a *system* can deliver “heads” deterministically by retrying until success (within a bounded budget) and failing closed when the budget is exhausted.
+
+In LLM terms, “retry until heads” maps to bounded repair/re-ask loops, while the runner prevents retries from becoming an unbounded incident (tokens/tools/bad side effects).
+
 ---
 
 ## 2. Rails analogy: opinionated software, not “vibe coding”
