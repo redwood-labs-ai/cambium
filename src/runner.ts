@@ -14,7 +14,7 @@ import { extractSignals } from './signals.js';
 import { evaluateTriggers } from './triggers.js';
 import { runReview, runConsensus } from './compound.js';
 import { runEnrichment } from './enrich.js';
-import { parseBudget } from './budget.js';
+import { parseBudget, trackBudgetFromTraceStep } from './budget.js';
 import type { Budget } from './budget.js';
 
 type IR = any;
@@ -157,6 +157,62 @@ async function generateText(opts: { model: string; system: string; prompt: strin
 type Message = { role: string; content: string | null; tool_calls?: any[]; tool_call_id?: string };
 type ToolCallMessage = { id: string; type: 'function'; function: { name: string; arguments: string } };
 
+/**
+ * Parse inline tool calls from model content for models that don't use
+ * the OpenAI tool_calls response format.
+ *
+ * Supported formats:
+ *   Gemma:   <|tool_call>call:tool_name{json_args}<tool_call|>
+ *   Llama:   <|python_tag>tool_name.call(json_args)
+ *   Generic: <tool_call>{"name":"...","arguments":{...}}</tool_call>
+ */
+function parseInlineToolCalls(content: string): ToolCallMessage[] {
+  const calls: ToolCallMessage[] = [];
+  let id = 0;
+
+  // Gemma format: <|tool_call>call:name{args}<tool_call|>
+  // Args use <|"|> as quote delimiters: {key:<|"|>value<|"|>}
+  for (const m of content.matchAll(/<\|tool_call>call:(\w+)\{([\s\S]*?)\}(?:<\/?tool_call\|?>|$)/g)) {
+    const name = m[1];
+    let argsStr = m[2];
+    // Normalize Gemma quote delimiters to regular quotes
+    argsStr = argsStr.replace(/<\|"\|>/g, '"');
+    // Normalize key:value to "key":"value" for JSON parsing
+    argsStr = argsStr.replace(/(\w+):/g, '"$1":');
+    try {
+      const args = JSON.parse(`{${argsStr}}`);
+      calls.push({ id: `inline_${id++}`, type: 'function', function: { name, arguments: JSON.stringify(args) } });
+    } catch {
+      // Couldn't parse — try as-is with basic cleanup
+      try {
+        const simple: Record<string, string> = {};
+        for (const kv of argsStr.matchAll(/"?(\w+)"?\s*:\s*"([^"]*)"/g)) {
+          simple[kv[1]] = kv[2];
+        }
+        if (Object.keys(simple).length > 0) {
+          calls.push({ id: `inline_${id++}`, type: 'function', function: { name, arguments: JSON.stringify(simple) } });
+        }
+      } catch {}
+    }
+  }
+
+  // Generic XML format: <tool_call>{"name":"...","arguments":{...}}</tool_call>
+  if (calls.length === 0) {
+    for (const m of content.matchAll(/<tool_call>([\s\S]*?)<\/tool_call>/g)) {
+      try {
+        const parsed = JSON.parse(m[1]);
+        calls.push({
+          id: `inline_${id++}`,
+          type: 'function',
+          function: { name: parsed.name, arguments: JSON.stringify(parsed.arguments ?? {}) },
+        });
+      } catch {}
+    }
+  }
+
+  return calls;
+}
+
 type GenerateWithToolsResult = {
   message: { content: string | null; tool_calls?: ToolCallMessage[] };
   usage?: TokenUsage;
@@ -194,9 +250,13 @@ async function generateWithTools(opts: {
     chat_template_kwargs: { enable_thinking: false },
   };
 
-  // Only include tools if we have them (omitting forces the model to produce content)
+  // Include tools if we have them; force content output if empty
   if (opts.tools.length > 0) {
     body.tools = opts.tools;
+  } else {
+    // Explicitly disable tool calls — the model has seen tools in earlier turns
+    // and will keep calling them unless told not to
+    body.tool_choice = 'none';
   }
 
   const apiKey = process.env.CAMBIUM_OMLX_API_KEY;
@@ -212,10 +272,22 @@ async function generateWithTools(opts: {
 
   const usage = json?.usage;
 
+  // Standard OpenAI tool_calls, or parse from content for models that use inline formats
+  let toolCalls = msg.tool_calls ?? undefined;
+  let content = msg.content ?? null;
+
+  if (!toolCalls && content) {
+    const parsed = parseInlineToolCalls(content);
+    if (parsed.length > 0) {
+      toolCalls = parsed;
+      content = null; // the content was tool calls, not a final answer
+    }
+  }
+
   return {
     message: {
-      content: msg.content ?? null,
-      tool_calls: msg.tool_calls ?? undefined,
+      content,
+      tool_calls: toolCalls,
     },
     usage: usage ? {
       prompt_tokens: usage.prompt_tokens ?? 0,
@@ -320,10 +392,9 @@ async function main() {
   // ── Budget tracking ─────────────────────────────────────────────────
   const budget = parseBudget(ir.policies?.constraints);
 
-  /** Track tokens from a trace step and check budget. Throws on violation. */
+  /** Track usage/tool calls from a trace step and check budget. Throws on violation. */
   function budgetTrack(step: any): void {
-    const usage = step.meta?.usage;
-    if (usage?.total_tokens) budget.addTokens(usage.total_tokens);
+    trackBudgetFromTraceStep(budget, step);
 
     const violation = budget.check();
     if (violation) {

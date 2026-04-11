@@ -25,6 +25,14 @@ export const LogSummary = Type.Object(
   { additionalProperties: false, $id: 'LogSummary' }
 )
 
+export const GaiaAnswer = Type.Object(
+  {
+    reasoning: Type.String(),
+    answer: Type.String(),
+  },
+  { additionalProperties: false, $id: 'GaiaAnswer' }
+)
+
 export const AnalysisReport = Type.Object(
   {
     summary: Type.String(),

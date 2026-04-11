@@ -1,0 +1,33 @@
+{
+  "name": "web_search",
+  "description": "Search the web for information. Returns a list of results with title, URL, and snippet.",
+  "permissions": {
+    "network": true,
+    "network_hosts": ["api.tavily.com", "api.exa.ai"]
+  },
+  "inputSchema": {
+    "type": "object",
+    "required": ["query"],
+    "properties": {
+      "query": { "type": "string", "description": "The search query" },
+      "limit": { "type": "number", "description": "Max results to return (default 5)", "default": 5 }
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["results"],
+    "properties": {
+      "results": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "title": { "type": "string" },
+            "url": { "type": "string" },
+            "snippet": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

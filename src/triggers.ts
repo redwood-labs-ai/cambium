@@ -21,7 +21,7 @@ export type TriggerResult = {
  * Evaluate triggers against extracted signal state.
  * For each trigger whose signal has values, fire the action.
  */
-export function evaluateTriggers(
+export async function evaluateTriggers(
   triggers: TriggerDef[],
   state: SignalState,
   toolRegistry: ToolRegistry,
@@ -58,7 +58,7 @@ export function evaluateTriggers(
         }
       }
 
-      const tcResult = handleToolCall(
+      const tcResult = await handleToolCall(
         trigger.tool,
         toolInput.operation ?? 'unknown',
         toolInput,

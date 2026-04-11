@@ -159,6 +159,23 @@ export function handleValidate(
 }
 
 // ── Repair ────────────────────────────────────────────────────────────
+function buildJsonTemplate(schema: any): Record<string, any> {
+  const schemaKeys = Object.keys(schema.properties ?? {});
+  const jsonTemplate: Record<string, any> = {};
+  for (const key of schemaKeys) {
+    const prop = schema.properties[key];
+    if (prop.type === 'string') jsonTemplate[key] = '';
+    else if (prop.type === 'array') jsonTemplate[key] = [];
+    else if (prop.type === 'object') jsonTemplate[key] = {};
+    else jsonTemplate[key] = null;
+  }
+  return jsonTemplate;
+}
+
+function looksLikeToolCallMarkup(raw: string): boolean {
+  return /<\|tool_call>|<tool_call>/.test(raw);
+}
+
 export async function handleRepair(
   raw: string,
   errors: any[],
@@ -170,14 +187,28 @@ export async function handleRepair(
 ): Promise<{ raw: string; parsed: any; result: StepResult }> {
   const schemaKeys = Object.keys(schema.properties ?? {});
 
-  // Build template same as generate
-  const jsonTemplate: Record<string, any> = {};
-  for (const key of schemaKeys) {
-    const prop = schema.properties[key];
-    if (prop.type === 'string') jsonTemplate[key] = '';
-    else if (prop.type === 'array') jsonTemplate[key] = [];
-    else if (prop.type === 'object') jsonTemplate[key] = {};
-    else jsonTemplate[key] = null;
+  const jsonTemplate = buildJsonTemplate(schema);
+
+  // If the "raw" output is actually tool-call markup, do NOT hallucinate a placeholder answer.
+  // Fail closed by returning an empty-but-valid JSON object (the agent loop should handle tools).
+  if (looksLikeToolCallMarkup(raw)) {
+    const started = Date.now();
+    const emptyRaw = JSON.stringify(jsonTemplate);
+    return {
+      raw: emptyRaw,
+      parsed: jsonTemplate,
+      result: {
+        type: 'Repair',
+        ms: Date.now() - started,
+        ok: true,
+        meta: {
+          attempt,
+          deterministic: true,
+          reason: 'tool_call_markup',
+          raw_preview: raw.slice(0, 200),
+        },
+      },
+    };
   }
 
   const repairSystem = [
@@ -189,6 +220,7 @@ export async function handleRepair(
     '- Output MUST be JSON only. No markdown. No code fences. No reasoning.',
     '- Output must start with "{" and end with "}".',
     '- Edit ONLY the fields necessary to fix the validation errors.',
+    '- Do NOT introduce new factual content. If information is missing, leave the field empty.',
   ].join('\n');
 
   const repairPrompt = [
@@ -261,13 +293,13 @@ export function handleCorrect(
 }
 
 // ── ToolCall ──────────────────────────────────────────────────────────
-export function handleToolCall(
+export async function handleToolCall(
   toolName: string,
   operation: string,
   input: any,
   registry: ToolRegistry,
   allowlist: string[],
-): StepResult {
+): Promise<StepResult> {
   const started = Date.now();
 
   registry.assertAllowed(toolName, allowlist);
@@ -278,7 +310,8 @@ export function handleToolCall(
   const impl = builtinTools[toolName];
   if (!impl) throw new Error(`No built-in implementation for tool "${toolName}"`);
 
-  const result = impl(input);
+  // Support both sync and async tool implementations
+  const result = await Promise.resolve(impl(input));
 
   return {
     type: 'ToolCall',
@@ -365,11 +398,24 @@ export async function handleAgenticGenerate(
   let finalRaw = '';
   let finalParsed: any = undefined;
 
+  const log = (msg: string) => process.stderr.write(`  ${msg}\n`);
+  log(`⟳ Agentic loop started (max ${maxToolCalls} tool calls)`);
+
   for (let turn = 0; turn < maxToolCalls + 1; turn++) {
     const turnStarted = Date.now();
 
     // On the last allowed turn, omit tools to force the model to produce content
     const toolsForTurn = totalToolCalls >= maxToolCalls ? [] : toolsOpenAI;
+    if (toolsForTurn.length === 0 && totalToolCalls > 0) {
+      log(`⟳ Turn ${turn + 1}: forcing final output (tool call limit reached)`);
+      // Add an explicit instruction to produce the final answer
+      messages.push({
+        role: 'user',
+        content: 'You have gathered enough information. STOP calling tools. Produce your final JSON output now. Output MUST be JSON only, starting with { and ending with }.',
+      });
+    } else {
+      log(`⟳ Turn ${turn + 1}: calling model...`);
+    }
 
     const response = await generateWithTools({
       model: ir.model.id,
@@ -380,9 +426,15 @@ export async function handleAgenticGenerate(
     });
 
     const msg = response.message;
+    const elapsed = ((Date.now() - turnStarted) / 1000).toFixed(1);
+    if (msg.tool_calls?.length) {
+      log(`  model responded in ${elapsed}s with ${msg.tool_calls.length} tool call(s)`);
+    } else {
+      log(`  model responded in ${elapsed}s with content`);
+    }
 
-    // Model wants to call tools
-    if (msg.tool_calls && msg.tool_calls.length > 0) {
+    // Model wants to call tools — but not if we've hit the limit
+    if (msg.tool_calls && msg.tool_calls.length > 0 && totalToolCalls < maxToolCalls) {
       // Append assistant message with tool calls to history
       messages.push({ role: 'assistant', content: msg.content, tool_calls: msg.tool_calls });
 
@@ -396,13 +448,18 @@ export async function handleAgenticGenerate(
           fnArgs = {};
         }
 
+        log(`  → ${fnName}(${JSON.stringify(fnArgs).slice(0, 100)})`);
+
         let toolResult: any;
         try {
-          const tcResult = handleToolCall(fnName, fnArgs.operation ?? fnName, fnArgs, toolRegistry, toolsAllowed);
+          const tcResult = await handleToolCall(fnName, fnArgs.operation ?? fnName, fnArgs, toolRegistry, toolsAllowed);
           toolResult = tcResult.output;
           toolResults.push(tcResult);
+          const preview = JSON.stringify(toolResult).slice(0, 120);
+          log(`  ← ${preview}${preview.length >= 120 ? '...' : ''}`);
         } catch (e: any) {
           toolResult = { error: e.message };
+          log(`  ✗ ${e.message}`);
           toolResults.push({
             type: 'ToolCall',
             ok: false,
@@ -441,10 +498,12 @@ export async function handleAgenticGenerate(
 
     // Model produced content — this is the final output
     finalRaw = msg.content ?? '';
+    log(`⟳ Final output received (${finalRaw.length} chars, ${totalToolCalls} tool calls)`);
+    if (finalRaw) log(`  ${finalRaw.slice(0, 150)}${finalRaw.length > 150 ? '...' : ''}`);
     try {
       finalParsed = extractJson(finalRaw);
     } catch {
-      // will be caught by validation
+      log(`  ✗ Failed to parse JSON from output`);
     }
 
     traceSteps.push({
