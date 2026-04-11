@@ -84,6 +84,28 @@ export class Budget {
 }
 
 /**
+ * Apply usage + tool-call accounting from a trace step.
+ *
+ * - Adds tokens from step.meta.usage.total_tokens when present.
+ * - Increments tool calls for:
+ *   - ToolCall steps (1)
+ *   - AgenticTurn steps (meta.tool_calls.length)
+ */
+export function trackBudgetFromTraceStep(budget: Budget, step: any): void {
+  const usage = step?.meta?.usage;
+  if (usage?.total_tokens) budget.addTokens(usage.total_tokens);
+
+  if (step?.type === 'ToolCall' && step?.ok) {
+    budget.addToolCall();
+  }
+
+  if (step?.type === 'AgenticTurn') {
+    const n = Array.isArray(step?.meta?.tool_calls) ? step.meta.tool_calls.length : 0;
+    for (let i = 0; i < n; i++) budget.addToolCall();
+  }
+}
+
+/**
  * Parse budget constraints from IR policies.
  * Supports: constrain :budget, max_tokens: N, max_tool_calls: N, max_duration: "5m"
  */
