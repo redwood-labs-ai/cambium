@@ -14,7 +14,7 @@ import { extractSignals } from './signals.js';
 import { evaluateTriggers } from './triggers.js';
 import { runReview, runConsensus } from './compound.js';
 import { runEnrichment } from './enrich.js';
-import { parseBudget } from './budget.js';
+import { parseBudget, trackBudgetFromTraceStep } from './budget.js';
 import type { Budget } from './budget.js';
 
 type IR = any;
@@ -392,10 +392,9 @@ async function main() {
   // ── Budget tracking ─────────────────────────────────────────────────
   const budget = parseBudget(ir.policies?.constraints);
 
-  /** Track tokens from a trace step and check budget. Throws on violation. */
+  /** Track usage/tool calls from a trace step and check budget. Throws on violation. */
   function budgetTrack(step: any): void {
-    const usage = step.meta?.usage;
-    if (usage?.total_tokens) budget.addTokens(usage.total_tokens);
+    trackBudgetFromTraceStep(budget, step);
 
     const violation = budget.check();
     if (violation) {
