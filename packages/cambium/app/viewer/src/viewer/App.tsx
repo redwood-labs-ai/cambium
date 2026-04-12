@@ -72,8 +72,14 @@ export default function App() {
         />
       </div>
 
-      <div style={{ position: 'relative' }}>
-        <ReactFlow nodes={nodes} edges={edges} fitView onNodeClick={(_, n) => setSelectedNodeId(n.id)}>
+      <div style={{ position: 'relative', height: '100%' }}>
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          fitView
+          onNodeClick={(_, n) => setSelectedNodeId(n.id)}
+          style={{ width: '100%', height: '100%' }}
+        >
           <Background />
           <MiniMap />
           <Controls />
