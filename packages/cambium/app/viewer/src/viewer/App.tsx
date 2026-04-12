@@ -51,41 +51,87 @@ export default function App() {
     }
   }, [irText]);
 
-  // Be forgiving about the input shape. We primarily care about a steps[] array.
-  const irLike: IRRoot | null = useMemo(() => {
-    if (!parsed) return null;
-    if (Array.isArray((parsed as any).steps)) return parsed as IRRoot;
-    if ((parsed as any).ir && Array.isArray((parsed as any).ir.steps)) return (parsed as any).ir as IRRoot;
-    return null;
+  // Be forgiving about the input shape.
+  // We support either an IR-like object (with steps[]) or a Trace-like object (with steps[] but different shape).
+  const detected = useMemo(() => {
+    if (!parsed) return { kind: 'none' as const };
+
+    const steps = (parsed as any).steps;
+    if (!Array.isArray(steps)) return { kind: 'unknown' as const };
+
+    // Heuristic: trace steps always have {type, ok?, meta?} and often lack prompt/returns.
+    const looksTrace = steps.length > 0 && typeof steps[0]?.type === 'string' && !('returns' in (steps[0] ?? {}));
+    if (looksTrace) return { kind: 'trace' as const, trace: parsed as any };
+
+    return { kind: 'ir' as const, ir: parsed as IRRoot };
   }, [parsed]);
 
-  const { nodes, edges, graphError } = useMemo(() => {
-    if (!irLike) return { nodes: [], edges: [], graphError: parsed ? 'No steps[] found (expected .steps or .ir.steps)' : null };
-    try {
-      const { nodes, edges } = toFlowNodesEdges(irLike);
-      return { nodes, edges, graphError: null };
-    } catch (e: any) {
-      return { nodes: [], edges: [], graphError: e?.message ?? String(e) };
+  const { nodes, edges, graphError, loadedLabel } = useMemo(() => {
+    if (!parsed) return { nodes: [], edges: [], graphError: null, loadedLabel: 'Invalid JSON.' };
+
+    // IR path
+    if (detected.kind === 'ir') {
+      try {
+        const { nodes, edges } = toFlowNodesEdges(detected.ir);
+        return {
+          nodes,
+          edges,
+          graphError: null,
+          loadedLabel: `Loaded ${detected.ir.steps.length} IR step(s).`,
+        };
+      } catch (e: any) {
+        return { nodes: [], edges: [], graphError: e?.message ?? String(e), loadedLabel: 'Parsed IR, but failed to render.' };
+      }
     }
-  }, [irLike, parsed]);
+
+    // Trace path: render trace.steps linearly
+    if (detected.kind === 'trace') {
+      const tSteps = (detected.trace.steps ?? []) as any[];
+      try {
+        const nodes: Node[] = tSteps.map((s, idx) => ({
+          id: String(s.id ?? `trace_${idx}`),
+          position: { x: idx * 260, y: 80 },
+          data: { label: s.type ?? 'Step', step: s },
+          type: 'default',
+        }));
+        const edges: Edge[] = [];
+        for (let i = 0; i < nodes.length - 1; i++) {
+          edges.push({ id: `${nodes[i].id}__to__${nodes[i + 1].id}`, source: nodes[i].id, target: nodes[i + 1].id });
+        }
+        return {
+          nodes,
+          edges,
+          graphError: null,
+          loadedLabel: `Loaded ${tSteps.length} trace step(s).`,
+        };
+      } catch (e: any) {
+        return { nodes: [], edges: [], graphError: e?.message ?? String(e), loadedLabel: 'Parsed trace, but failed to render.' };
+      }
+    }
+
+    return { nodes: [], edges: [], graphError: 'No steps[] found.', loadedLabel: 'Parsed JSON, but no steps[] found.' };
+  }, [parsed, detected]);
 
   const selected = useMemo(() => {
-    if (!selectedNodeId || !irLike) return null;
-    return irLike.steps.find((s) => s.id === selectedNodeId) ?? null;
-  }, [irLike, selectedNodeId]);
+    if (!selectedNodeId || !parsed) return null;
+
+    if (detected.kind === 'ir') {
+      return detected.ir.steps.find((s) => s.id === selectedNodeId) ?? null;
+    }
+    if (detected.kind === 'trace') {
+      const tSteps = (detected.trace.steps ?? []) as any[];
+      return tSteps.find((s, idx) => String(s.id ?? `trace_${idx}`) === selectedNodeId) ?? null;
+    }
+
+    return null;
+  }, [parsed, detected, selectedNodeId]);
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '420px 1fr 420px', height: '100vh' }}>
       <div style={{ padding: 12, borderRight: '1px solid #ddd', overflow: 'auto' }}>
         <h3>IR (paste JSON)</h3>
         <div style={{ fontSize: 12, color: '#555', marginBottom: 8 }}>
-          {irLike ? (
-            <span>Loaded <b>{irLike.steps.length}</b> step(s).</span>
-          ) : parsed ? (
-            <span style={{ color: 'crimson' }}>Parsed JSON, but no steps[] found.</span>
-          ) : (
-            <span style={{ color: 'crimson' }}>Invalid JSON.</span>
-          )}
+          {loadedLabel}
         </div>
         <textarea
           style={{ width: '100%', height: '90%', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12 }}
