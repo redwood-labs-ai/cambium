@@ -17,7 +17,7 @@ import { runEnrichment } from './enrich.js';
 import { parseBudget, trackBudgetFromTraceStep } from './budget.js';
 import type { Budget } from './budget.js';
 
-type IR = any;
+type IR = import("./ir.js").IRRoot;
 
 type Args = { irPath: string };
 
