@@ -45,26 +45,48 @@ export default function App() {
 
   const parsed = useMemo(() => {
     try {
-      return JSON.parse(irText) as IRRoot;
+      return JSON.parse(irText) as any;
     } catch {
       return null;
     }
   }, [irText]);
 
-  const { nodes, edges } = useMemo(() => {
-    if (!parsed) return { nodes: [], edges: [] };
-    return toFlowNodesEdges(parsed);
+  // Be forgiving about the input shape. We primarily care about a steps[] array.
+  const irLike: IRRoot | null = useMemo(() => {
+    if (!parsed) return null;
+    if (Array.isArray((parsed as any).steps)) return parsed as IRRoot;
+    if ((parsed as any).ir && Array.isArray((parsed as any).ir.steps)) return (parsed as any).ir as IRRoot;
+    return null;
   }, [parsed]);
 
+  const { nodes, edges, graphError } = useMemo(() => {
+    if (!irLike) return { nodes: [], edges: [], graphError: parsed ? 'No steps[] found (expected .steps or .ir.steps)' : null };
+    try {
+      const { nodes, edges } = toFlowNodesEdges(irLike);
+      return { nodes, edges, graphError: null };
+    } catch (e: any) {
+      return { nodes: [], edges: [], graphError: e?.message ?? String(e) };
+    }
+  }, [irLike, parsed]);
+
   const selected = useMemo(() => {
-    if (!selectedNodeId || !parsed) return null;
-    return parsed.steps.find((s) => s.id === selectedNodeId) ?? null;
-  }, [parsed, selectedNodeId]);
+    if (!selectedNodeId || !irLike) return null;
+    return irLike.steps.find((s) => s.id === selectedNodeId) ?? null;
+  }, [irLike, selectedNodeId]);
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '420px 1fr 420px', height: '100vh' }}>
       <div style={{ padding: 12, borderRight: '1px solid #ddd', overflow: 'auto' }}>
         <h3>IR (paste JSON)</h3>
+        <div style={{ fontSize: 12, color: '#555', marginBottom: 8 }}>
+          {irLike ? (
+            <span>Loaded <b>{irLike.steps.length}</b> step(s).</span>
+          ) : parsed ? (
+            <span style={{ color: 'crimson' }}>Parsed JSON, but no steps[] found.</span>
+          ) : (
+            <span style={{ color: 'crimson' }}>Invalid JSON.</span>
+          )}
+        </div>
         <textarea
           style={{ width: '100%', height: '90%', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12 }}
           value={irText}
@@ -88,7 +110,7 @@ export default function App() {
 
       <div style={{ padding: 12, borderLeft: '1px solid #ddd', overflow: 'auto' }}>
         <h3>Node details</h3>
-        {!parsed && <div style={{ color: 'crimson' }}>Invalid JSON</div>}
+        {graphError && <div style={{ color: 'crimson', marginBottom: 8 }}>{graphError}</div>}
         {!selected && <div>Select a node.</div>}
         {selected && <pre style={{ fontSize: 12, whiteSpace: 'pre-wrap' }}>{JSON.stringify(selected, null, 2)}</pre>}
       </div>
