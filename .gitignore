@@ -8,3 +8,4 @@ runs/
 # Ruby
 *.gem
 .bundle/
+packages/cambium/app/viewer/dist
