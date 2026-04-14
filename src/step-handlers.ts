@@ -137,7 +137,7 @@ export async function handleGenerate(
       ms: Date.now() - started,
       ok: parsed !== undefined,
       errors: parseError ? [{ message: parseError }] : undefined,
-      meta: { raw_preview: raw.slice(0, 400), usage: genResult.usage },
+      meta: { model_used: ir.model.id, raw_preview: raw.slice(0, 400), usage: genResult.usage },
     },
   };
 }
@@ -264,7 +264,7 @@ export async function handleRepair(
       type: 'Repair',
       ms: Date.now() - started,
       ok: parsed !== undefined,
-      meta: { attempt, raw_preview: newRaw.slice(0, 400), usage: genResult.usage },
+      meta: { attempt, model_used: ir.model.id, raw_preview: newRaw.slice(0, 400), usage: genResult.usage },
     },
   };
 }
@@ -498,6 +498,7 @@ export async function handleAgenticGenerate(
         ok: true,
         meta: {
           turn: turn + 1,
+          model_used: ir.model.id,
           tool_calls: msg.tool_calls.map((tc: any) => ({
             name: tc.function.name,
             args: tc.function.arguments,
