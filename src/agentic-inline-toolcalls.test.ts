@@ -47,14 +47,14 @@ describe('stripInlineToolCalls', () => {
   it('strips Gemma tool calls and returns remaining text', () => {
     const content = 'Here is my answer: {"key":"value"}\n<|tool_call>call:search{q:<|"x"|>}</tool_call>';
     const stripped = stripInlineToolCalls(content);
-    expect(stripped).toBe('Here is my answer: {{"key":"value"}}');
+    expect(stripped).toBe('Here is my answer: {"key":"value"}');
   });
 
   it('strips XML tool calls and returns remaining text', () => {
     const content = 'Final answer:\n<tool_call>{"name":"tool","arguments":{}}</tool_call>\n{"result":true}';
     const stripped = stripInlineToolCalls(content);
     expect(stripped).toContain('Final answer:');
-    expect(stripped).toContain('{{"result":true}}');
+    expect(stripped).toContain('{"result":true}');
   });
 
   it('returns empty string when content is only tool calls', () => {
@@ -64,8 +64,8 @@ describe('stripInlineToolCalls', () => {
   });
 
   it('returns content unchanged when no tool calls present', () => {
-    const content = '{{"answer":"hello"}}';
+    const content = '{"answer":"hello"}';
     const stripped = stripInlineToolCalls(content);
-    expect(stripped).toBe('{{"answer":"hello"}}');
+    expect(stripped).toBe('{"answer":"hello"}');
   });
 });

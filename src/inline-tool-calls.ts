@@ -27,14 +27,15 @@ export function parseInlineToolCalls(content: string): ToolCallMessage[] {
   let id = 0;
 
   // Gemma format: <|tool_call>call:name{args}</tool_call>
-  // Args use <||> as quote delimiters
+  // Args use <|"..."|> as quote delimiters around string values
   for (const m of content.matchAll(GEMMA_RE)) {
     const name = m[1];
     let argsStr = m[2];
-    // Normalize Gemma quote delimiters to regular quotes
-    argsStr = argsStr.replace(new RegExp(String.raw`<\|""|>`, 'g'), '"');
-    // Normalize key:value to "key":"value" for JSON parsing
-    argsStr = argsStr.replace(/(\w+):/g, '"\$1":');
+    // Strip Gemma's <| and |> brackets surrounding quoted string values,
+    // leaving plain "..." that JSON.parse can consume.
+    argsStr = argsStr.replace(/<\|"/g, '"').replace(/"\|>/g, '"');
+    // Quote bare keys: key:"value" → "key":"value"
+    argsStr = argsStr.replace(/(\w+):/g, '"$1":');
     try {
       const args = JSON.parse(`{${argsStr}}`);
       calls.push({ id: `inline_${id++}`, type: 'function', function: { name, arguments: JSON.stringify(args) } });
