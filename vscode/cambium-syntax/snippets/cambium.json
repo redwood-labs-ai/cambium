@@ -1,0 +1,90 @@
+{
+  "GenModel boilerplate": {
+    "prefix": "genmodel",
+    "body": [
+      "class ${1:ModelName} < GenModel",
+      "  model \"${2|omlx:gemma-3-27b-it,omlx:Qwen3.5-27B-4bit,ollama:gemma3|}\"",
+      "  system :${3:system_prompt}",
+      "  returns ${4:SchemaName}",
+      "",
+      "  def ${5:method_name}(input)",
+      "    generate \"${6:prompt}\" do",
+      "      with context: input",
+      "    end",
+      "  end",
+      "end"
+    ],
+    "description": "Cambium GenModel class with generate block"
+  },
+  "Constrain block": {
+    "prefix": "constrain",
+    "body": [
+      "constrain :${1|tone,compound,consistency,budget|}, ${2|to,strategy,passes,max_tool_calls|}: ${3:value}"
+    ],
+    "description": "Runtime constraint declaration"
+  },
+  "Generate block": {
+    "prefix": "genblock",
+    "body": [
+      "generate \"${1:prompt}\" do",
+      "  with context: ${2:input}",
+      "  returns ${3:SchemaName}",
+      "end"
+    ],
+    "description": "Generate transaction block"
+  },
+  "Extract signal": {
+    "prefix": "signal",
+    "body": [
+      "extract :${1:signal_name}, type: :${2|number,string,boolean,array,object|}, path: \"${3:path.to.field}\""
+    ],
+    "description": "Signal extraction for triggers"
+  },
+  "Trigger block": {
+    "prefix": "trigger",
+    "body": [
+      "on :${1:signal_name} do",
+      "  tool :${2:tool_name}, operation: \"${3:operation}\", target: \"${4:target.path}\"",
+      "end"
+    ],
+    "description": "Deterministic trigger with tool call"
+  },
+  "Enrich block": {
+    "prefix": "enrich",
+    "body": [
+      "enrich :${1:context_key} do",
+      "  agent :${2:AgentName}, method: :${3:method_name}",
+      "end"
+    ],
+    "description": "Pre-generate context enrichment"
+  },
+  "Grounded in": {
+    "prefix": "grounded",
+    "body": [
+      "grounded_in :${1:source}, require_citations: true"
+    ],
+    "description": "Citation-grounded generation"
+  },
+  "Agentic mode": {
+    "prefix": "agentic",
+    "body": [
+      "mode :agentic",
+      "uses :${1:tool_name}"
+    ],
+    "description": "Multi-turn agentic generation with tools"
+  },
+  "Repair policy": {
+    "prefix": "repair",
+    "body": [
+      "repair max_attempts: ${1:3}, stop_on_no_improvement: true"
+    ],
+    "description": "Validation repair policy configuration"
+  },
+  "Compound review": {
+    "prefix": "review",
+    "body": [
+      "constrain :compound, strategy: :review, passes: ${1:2}"
+    ],
+    "description": "Compound review with multiple passes"
+  }
+}
