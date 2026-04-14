@@ -143,6 +143,41 @@ export async function handleGenerate(
 }
 
 // ── Validate ──────────────────────────────────────────────────────────
+
+/** Format AJV validation errors into a concise diff for trace + repair prompts. */
+export function formatValidationErrors(errors: any[]): string[] {
+  return errors.map(e => {
+    const path = e.instancePath || '/';
+    const keyword = e.keyword ?? 'validation';
+
+    if (keyword === 'required') {
+      const prefix = path === '/' ? '' : path;
+      return `missing required field: ${prefix}/${e.params?.missingProperty}`;
+    }
+    if (keyword === 'additionalProperties') {
+      const prefix = path === '/' ? '' : path;
+      return `unexpected field: ${prefix}/${e.params?.additionalProperty}`;
+    }
+    if (keyword === 'type') {
+      return `${path}: expected ${e.params?.type}, got ${typeof e.instance}`;
+    }
+    if (keyword === 'enum') {
+      return `${path}: value must be one of [${e.params?.allowedValues?.join(', ')}]`;
+    }
+    if (keyword === 'pattern') {
+      return `${path}: does not match pattern ${e.params?.pattern}`;
+    }
+    if (keyword === 'minLength') {
+      return `${path}: too short (min ${e.params?.limit})`;
+    }
+    if (keyword === 'maxLength') {
+      return `${path}: too long (max ${e.params?.limit})`;
+    }
+    // Fallback
+    return `${path}: ${e.message ?? keyword}`;
+  });
+}
+
 export function handleValidate(
   data: any,
   validate: ValidateFunction,
@@ -152,10 +187,12 @@ export function handleValidate(
     return { type: label ?? 'Validate', ok: false, errors: [{ message: 'No data to validate' }] };
   }
   const ok = validate(data) as boolean;
+  const rawErrors = ok ? undefined : validate.errors?.map(e => ({ ...e }));
   return {
     type: label ?? 'Validate',
     ok,
-    errors: ok ? undefined : validate.errors?.map(e => ({ ...e })),
+    errors: rawErrors,
+    meta: ok ? undefined : { validation_diff: formatValidationErrors(rawErrors ?? []) },
   };
 }
 
@@ -224,12 +261,14 @@ export async function handleRepair(
     '- Do NOT introduce new factual content. If information is missing, leave the field empty.',
   ].join('\n');
 
+  const formattedErrors = formatValidationErrors(errors);
+
   const repairPrompt = [
     'ORIGINAL_OUTPUT (may be invalid):',
     raw,
     '',
     'VALIDATION_ERRORS:',
-    JSON.stringify(errors, null, 2),
+    formattedErrors.join('\n'),
     '',
     'OUTPUT_JSON_TEMPLATE (return this shape; keep keys the same; no extra keys):',
     JSON.stringify(jsonTemplate),

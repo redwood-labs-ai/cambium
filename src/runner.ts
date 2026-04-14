@@ -338,6 +338,14 @@ async function main() {
   const correctorNames: string[] = ir.policies?.correctors ?? [];
   const maxRepairAttempts = ir.policies?.max_repair_attempts ?? 2;
 
+  // ── Repair policy (RED-139) ──────────────────────────────────────────
+  const repairPolicyConfig = ir.policies?.repair ?? {};
+  const repairPolicy = {
+    maxAttempts: repairPolicyConfig.max_attempts ?? maxRepairAttempts,
+    stopOnNoImprovement: repairPolicyConfig.stop_on_no_improvement ?? false,
+    mode: repairPolicyConfig.mode ?? 'full', // 'full' | 'partial'
+  };
+
   // ── Budget tracking ─────────────────────────────────────────────────
   const budget = parseBudget(ir.policies?.constraints);
 
@@ -450,8 +458,9 @@ async function main() {
     // 2. Validate + Repair loop
     let ok = false;
     let errors: any[] = [];
+    let prevErrorCount = Infinity;
 
-    for (let attempt = 0; attempt < 1 + maxRepairAttempts; attempt++) {
+    for (let attempt = 0; attempt < 1 + repairPolicy.maxAttempts; attempt++) {
       const vResult = handleValidate(parsed, validate, attempt === 0 ? 'Validate' : 'ValidateAfterRepair');
 
       if (vResult.ok) {
@@ -463,10 +472,29 @@ async function main() {
       }
 
       errors = vResult.errors ?? [];
+      const errorCount = errors.length;
+
+      // Stop-on-no-improvement: bail if errors aren't decreasing
+      if (repairPolicy.stopOnNoImprovement && attempt > 0 && errorCount >= prevErrorCount) {
+        trace.steps.push({
+          type: 'RepairStopped',
+          ok: false,
+          meta: {
+            reason: 'no_improvement',
+            attempt,
+            errorCount,
+            prevErrorCount,
+            policy: repairPolicy,
+          },
+        });
+        break;
+      }
+      prevErrorCount = errorCount;
+
       trace.steps.push(vResult);
 
       // Don't repair after last attempt
-      if (attempt >= maxRepairAttempts) break;
+      if (attempt >= repairPolicy.maxAttempts) break;
 
       // Repair
       const repair = await handleRepair(raw, errors, schema, ir, attempt + 1, generateText, extractJsonObject);
