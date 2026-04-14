@@ -16,6 +16,11 @@ import { runReview, runConsensus } from './compound.js';
 import { runEnrichment } from './enrich.js';
 import { parseBudget, trackBudgetFromTraceStep } from './budget.js';
 import type { Budget } from './budget.js';
+import {
+  parseInlineToolCalls,
+  stripInlineToolCalls,
+  type ToolCallMessage,
+} from './inline-tool-calls.js';
 
 type IR = any;
 
@@ -155,63 +160,7 @@ async function generateText(opts: { model: string; system: string; prompt: strin
 }
 
 type Message = { role: string; content: string | null; tool_calls?: any[]; tool_call_id?: string };
-type ToolCallMessage = { id: string; type: 'function'; function: { name: string; arguments: string } };
 
-/**
- * Parse inline tool calls from model content for models that don't use
- * the OpenAI tool_calls response format.
- *
- * Supported formats:
- *   Gemma:   <|tool_call>call:tool_name{json_args}<tool_call|>
- *   Llama:   <|python_tag>tool_name.call(json_args)
- *   Generic: <tool_call>{"name":"...","arguments":{...}}</tool_call>
- */
-function parseInlineToolCalls(content: string): ToolCallMessage[] {
-  const calls: ToolCallMessage[] = [];
-  let id = 0;
-
-  // Gemma format: <|tool_call>call:name{args}<tool_call|>
-  // Args use <|"|> as quote delimiters: {key:<|"|>value<|"|>}
-  for (const m of content.matchAll(/<\|tool_call>call:(\w+)\{([\s\S]*?)\}(?:<\/?tool_call\|?>|$)/g)) {
-    const name = m[1];
-    let argsStr = m[2];
-    // Normalize Gemma quote delimiters to regular quotes
-    argsStr = argsStr.replace(/<\|"\|>/g, '"');
-    // Normalize key:value to "key":"value" for JSON parsing
-    argsStr = argsStr.replace(/(\w+):/g, '"$1":');
-    try {
-      const args = JSON.parse(`{${argsStr}}`);
-      calls.push({ id: `inline_${id++}`, type: 'function', function: { name, arguments: JSON.stringify(args) } });
-    } catch {
-      // Couldn't parse — try as-is with basic cleanup
-      try {
-        const simple: Record<string, string> = {};
-        for (const kv of argsStr.matchAll(/"?(\w+)"?\s*:\s*"([^"]*)"/g)) {
-          simple[kv[1]] = kv[2];
-        }
-        if (Object.keys(simple).length > 0) {
-          calls.push({ id: `inline_${id++}`, type: 'function', function: { name, arguments: JSON.stringify(simple) } });
-        }
-      } catch {}
-    }
-  }
-
-  // Generic XML format: <tool_call>{"name":"...","arguments":{...}}</tool_call>
-  if (calls.length === 0) {
-    for (const m of content.matchAll(/<tool_call>([\s\S]*?)<\/tool_call>/g)) {
-      try {
-        const parsed = JSON.parse(m[1]);
-        calls.push({
-          id: `inline_${id++}`,
-          type: 'function',
-          function: { name: parsed.name, arguments: JSON.stringify(parsed.arguments ?? {}) },
-        });
-      } catch {}
-    }
-  }
-
-  return calls;
-}
 
 type GenerateWithToolsResult = {
   message: { content: string | null; tool_calls?: ToolCallMessage[] };
@@ -280,7 +229,7 @@ async function generateWithTools(opts: {
     const parsed = parseInlineToolCalls(content);
     if (parsed.length > 0) {
       toolCalls = parsed;
-      content = null; // the content was tool calls, not a final answer
+      content = stripInlineToolCalls(content); // strip markup, keep remaining text
     }
   }
 
