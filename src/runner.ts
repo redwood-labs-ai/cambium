@@ -645,9 +645,23 @@ async function main() {
     const grounding = ir.policies?.grounding;
     if (grounding?.require_citations) {
       const citResult = handleCorrect(parsed, ['citations'], { document: ir.context?.document });
-      trace.steps.push({ ...citResult, type: 'GroundingCheck' });
+      const citationResult = citResult.meta?.citationResult;
 
-      const citErrors = citResult.meta?.issues?.filter((i: any) => i.severity === 'error') ?? [];
+      trace.steps.push({
+        ...citResult,
+        type: 'GroundingCheck',
+        ok: citationResult?.allValid ?? (citResult.issues.length === 0),
+        meta: {
+          ...citResult.meta,
+          passed: citationResult?.passed?.length ?? 0,
+          failed: citationResult?.failed?.length ?? 0,
+          missing: citationResult?.missing?.length ?? 0,
+          totalChecked: citationResult?.totalChecked ?? 0,
+          details: citationResult?.failed ?? [],
+        },
+      });
+
+      const citErrors = citResult.issues?.filter((i: any) => i.severity === 'error') ?? [];
       if (citErrors.length > 0) {
         // Feed citation errors into repair
         const repairErrors = citErrors.map((i: any) => ({
