@@ -40,12 +40,18 @@ function generateAgent(name) {
 
   writeFile(join(PKG, 'app/gens', `${snake}.cmb.rb`), `\
 class ${pascal} < GenModel
-  model "omlx:Qwen3.5-27B-4bit"
+  model "omlx:gemma-4-31b-it-8bit"
   system :${snake}
   temperature 0.2
   max_tokens 1200
 
   returns ${schemaName}
+
+  # Optional: add tools, correctors, constraints, grounding
+  # uses :web_search, :calculator
+  # corrects :math
+  # constrain :budget, max_tool_calls: 4
+  # grounded_in :document, require_citations: true
 
   def analyze(document)
     generate "analyze this document" do
@@ -179,6 +185,7 @@ export const ${snake}: CorrectorFn = (data, _context): CorrectorResult => {
     corrected: issues.some(i => i.severity === 'fixed'),
     output,
     issues,
+    // meta: { ... }, // optional: add structured results for trace
   };
 };
 `);
