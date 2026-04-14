@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { runGenerate } from './generate.mjs';
 import { runLint } from './lint.mjs';
 import { runInit } from './init.mjs';
+import { runDoctor } from './doctor.mjs';
 
 function usage(msg) {
   if (msg) console.error(`\n${msg}`);
@@ -13,7 +14,8 @@ Cambium — Rails for generation engineering
 Usage:
   cambium init [name]
   cambium new <type> <Name>
-  cambium run <file.cmb.rb> --method <method> --arg <path>|-
+  cambium run <file.cmb.rb> --method <method> --arg <path>|- [--trace <path>] [--out <path>] [--mock]
+  cambium doctor
   cambium test
   cambium lint
 
@@ -21,14 +23,22 @@ Commands:
   init      Initialize a new Cambium workspace
   new       Scaffold a new agent, tool, schema, system, or corrector
   run       Compile and execute a GenModel
+  doctor    Check environment setup and dependencies
   test      Run the test suite
   lint      Validate package structure and declarations
 
+Run flags:
+  --trace <path>   Write trace JSON to <path> (default: runs/<id>/trace.json)
+  --out <path>     Write output JSON to <path> (default: runs/<id>/output.json)
+  --mock           Use deterministic mock instead of live LLM
+
 Examples:
   cambium run packages/cambium/app/gens/analyst.cmb.rb --method analyze --arg document.txt
+  cambium run gen.cmb.rb --method summarize --arg data.json --trace trace.json --out result.json
   cambium new agent BtcAnalyst
   cambium new tool price_fetcher
   cambium new schema TradeSignal
+  cambium doctor
   cambium test
 `);
   process.exit(2);
@@ -56,6 +66,12 @@ if (cmd === 'lint') {
   process.exit(0);
 }
 
+// ── cambium doctor ──────────────────────────────────────────────────
+if (cmd === 'doctor') {
+  runDoctor();
+  // runDoctor calls process.exit internally
+}
+
 // ── cambium test ──────────────────────────────────────────────────────
 if (cmd === 'test') {
   const result = spawnSync('npx', ['vitest', 'run', ...args], {
@@ -68,21 +84,33 @@ if (cmd === 'test') {
 // ── cambium run ───────────────────────────────────────────────────────
 if (cmd !== 'run') usage(`Unknown command: ${cmd}`);
 
+// Handle --help for run
+if (args.includes('--help') || args.includes('-h')) usage();
+
 const file = args[0];
-if (!file) usage('Missing .cmb.rb file');
+if (!file || file.startsWith('-')) usage('Missing .cmb.rb file');
 
 let method = null;
 let arg = null;
+let traceOut = null;
+let outputOut = null;
+let mock = false;
 for (let i = 1; i < args.length; i++) {
   const a = args[i];
   if (a === '--method') method = args[++i];
   else if (a === '--arg') arg = args[++i];
-  else usage(`Unknown arg: ${a}`);
+  else if (a === '--trace') traceOut = args[++i];
+  else if (a === '--out') outputOut = args[++i];
+  else if (a === '--mock') mock = true;
+  else if (a === '--help' || a === '-h') usage();
+  else usage(`Unknown flag: ${a}\nRun 'cambium run --help' for usage.`);
 }
-if (!method) usage('Missing --method');
-if (!arg) usage('Missing --arg');
+if (!method) usage('Missing --method\nRun "cambium run --help" for usage.');
+if (!arg) usage('Missing --arg\nRun "cambium run --help" for usage.');
 
 // Compile with Ruby → IR JSON (stdout)
+const compileEnv = { ...process.env };
+if (mock) compileEnv.CAMBIUM_ALLOW_MOCK = '1';
 const compile = spawnSync('ruby', ['./ruby/cambium/compile.rb', file, '--method', method, '--arg', arg], {
   encoding: 'utf8',
   maxBuffer: 50 * 1024 * 1024
@@ -95,10 +123,15 @@ if (compile.status !== 0) {
 const irJson = compile.stdout;
 
 // Run IR with TS runner
-const run = spawnSync('node', ['--import', 'tsx', './src/runner.ts', '--ir', '-'], {
+const runnerArgs = ['--import', 'tsx', './src/runner.ts', '--ir', '-'];
+if (traceOut) runnerArgs.push('--trace', traceOut);
+if (outputOut) runnerArgs.push('--out', outputOut);
+if (mock) runnerArgs.push('--mock');
+const run = spawnSync('node', runnerArgs, {
   input: irJson,
   encoding: 'utf8',
-  maxBuffer: 50 * 1024 * 1024
+  maxBuffer: 50 * 1024 * 1024,
+  env: compileEnv,
 });
 if (run.status !== 0) {
   console.error(run.stdout || '');
