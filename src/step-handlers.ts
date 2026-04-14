@@ -4,6 +4,7 @@ import { builtinTools } from './tools/index.js';
 import { runCorrectorPipeline } from './correctors/index.js';
 import type { CorrectorResult } from './correctors/types.js';
 import { schemaPromptBlock } from './schema-describe.js';
+import { parseInlineToolCalls, stripInlineToolCalls } from './inline-tool-calls.js';
 
 export type StepResult = {
   type: string;
@@ -427,6 +428,19 @@ export async function handleAgenticGenerate(
 
     const msg = response.message;
     const elapsed = ((Date.now() - turnStarted) / 1000).toFixed(1);
+
+    // Belt-and-suspenders: if generateWithTools returned content but no tool_calls,
+    // try parsing inline tool calls directly from msg.content.
+    // This handles edge cases where generateWithTools' inline parser found calls but
+    // the content also contained meaningful text that should be preserved.
+    if (msg.content && !msg.tool_calls) {
+      const inlineCalls = parseInlineToolCalls(msg.content);
+      if (inlineCalls.length > 0) {
+        msg.tool_calls = inlineCalls;
+        msg.content = stripInlineToolCalls(msg.content) || null;
+      }
+    }
+
     if (msg.tool_calls?.length) {
       log(`  model responded in ${elapsed}s with ${msg.tool_calls.length} tool call(s)`);
     } else {
