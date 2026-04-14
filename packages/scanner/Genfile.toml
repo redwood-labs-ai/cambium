@@ -1,0 +1,15 @@
+[package]
+name = "scanner"
+version = "0.1.0"
+kinds = ["gen"]
+
+[types]
+contracts = ["src/contracts.ts"]
+
+[exports.gens]
+ScannerPattern = "app/gens/scanner_pattern.cmb.rb"
+IssueResearcher = "app/gens/issue_researcher.cmb.rb"
+
+[exports.entrypoints]
+generate_pattern = "ScannerPattern#generate_pattern"
+research = "IssueResearcher#research"

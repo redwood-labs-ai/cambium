@@ -3,10 +3,11 @@ import { math } from './math.js';
 import { dates } from './dates.js';
 import { currency } from './currency.js';
 import { citations } from './citations.js';
+import { regexValidation } from './regex_validation.js';
 
 export type { CorrectorFn, CorrectorResult, CorrectorIssue } from './types.js';
 
-export const correctors: Record<string, CorrectorFn> = { math, dates, currency, citations };
+export const correctors: Record<string, CorrectorFn> = { math, dates, currency, citations, regex_validation: regexValidation };
 
 export function runCorrectorPipeline(
   names: string[],

@@ -1,0 +1,35 @@
+{
+  "name": "linear",
+  "description": "Read and update Linear project management issues — fetch issue details, update status, add comments",
+  "permissions": {
+    "network": true
+  },
+  "inputSchema": {
+    "type": "object",
+    "required": ["action", "identifier"],
+    "properties": {
+      "action": { "type": "string", "enum": ["read", "update", "comment"] },
+      "identifier": { "type": "string", "description": "Issue identifier (e.g., RED-123)" },
+      "state": { "type": "string", "description": "New state for update action (e.g., In Progress, Done)" },
+      "body": { "type": "string", "description": "Comment text for comment action" }
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["success"],
+    "properties": {
+      "success": { "type": "boolean" },
+      "issue": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "state": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "additionalProperties": false
+  }
+}

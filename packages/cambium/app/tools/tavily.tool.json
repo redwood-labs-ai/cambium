@@ -1,0 +1,38 @@
+{
+  "name": "tavily",
+  "description": "Search the web for vulnerability patterns, CVEs, exploit techniques, and detection approaches using Tavily's AI-optimized search API",
+  "permissions": {
+    "network": true
+  },
+  "inputSchema": {
+    "type": "object",
+    "required": ["query"],
+    "properties": {
+      "query": { "type": "string", "description": "Search query - vulnerability name, CVE ID, or technique" },
+      "max_results": { "type": "integer", "default": 5, "description": "Maximum number of results to return" },
+      "search_depth": { "type": "string", "enum": ["basic", "advanced"], "default": "basic", "description": "Basic for speed, advanced for deeper research" }
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["results"],
+    "properties": {
+      "results": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["title", "url", "content", "score"],
+          "properties": {
+            "title": { "type": "string" },
+            "url": { "type": "string" },
+            "content": { "type": "string" },
+            "score": { "type": "number" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "answer": { "type": "string", "description": "Tavily's AI-generated answer (advanced mode only)" }
+    },
+    "additionalProperties": false
+  }
+}

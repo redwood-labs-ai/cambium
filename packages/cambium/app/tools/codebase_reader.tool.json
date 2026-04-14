@@ -1,0 +1,27 @@
+{
+  "name": "codebase_reader",
+  "description": "Read source files from the target codebase to understand vulnerability context and write accurate detection patterns",
+  "permissions": {
+    "filesystem": true
+  },
+  "inputSchema": {
+    "type": "object",
+    "required": ["path"],
+    "properties": {
+      "path": { "type": "string", "description": "Relative path to the source file within the repo" },
+      "repo_url": { "type": "string", "description": "Git repo URL (optional, uses context default if omitted)" },
+      "ref": { "type": "string", "description": "Git ref/branch (optional, defaults to main)" }
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["content", "path"],
+    "properties": {
+      "content": { "type": "string", "description": "File contents" },
+      "path": { "type": "string" },
+      "language": { "type": "string" },
+      "lines": { "type": "integer" }
+    },
+    "additionalProperties": false
+  }
+}
