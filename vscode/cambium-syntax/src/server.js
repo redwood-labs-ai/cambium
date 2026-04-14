@@ -133,6 +133,10 @@ const PRIMITIVE_DOCS = {
     detail: 'Controls the execution strategy for generate.',
     doc: '`mode :agentic` enables multi-turn tool-use loop.\nThe model calls tools during generation, receives results, iterates.\n\n```ruby\nmode :agentic\n```',
   },
+  repair: {
+    detail: 'Configures the repair policy for validation failures.',
+    doc: 'Controls how the runner retries when output fails validation.\n\n```ruby\nrepair max_attempts: 3, stop_on_no_improvement: true\n```\n\n`max_attempts` — max repair iterations (default: from `policies.max_repair_attempts`)\n`stop_on_no_improvement` — halt if error count doesn\'t decrease',
+  },
   with: {
     detail: 'Passes context into a generate block.',
     doc: 'Keyword arguments become context fields available during generation.\n\n```ruby\nwith context: document\n```',
@@ -338,6 +342,37 @@ connection.onCompletion((params) => {
   // After "mode :" → suggest modes
   if (/mode\s+:/.test(line)) {
     return [{ label: 'agentic', kind: CompletionItemKind.EnumMember, detail: 'Multi-turn tool-use loop' }];
+  }
+
+  // After "enrich :" → suggest available agents from workspace scan
+  if (/enrich\s+:/.test(line)) {
+    // Scan for agent classes in the workspace
+    const agentCompletions = [];
+    const gensDir = path.join(workspaceRoot, 'packages/cambium/app/gens');
+    if (fs.existsSync(gensDir)) {
+      for (const f of fs.readdirSync(gensDir)) {
+        if (!f.endsWith('.cmb.rb')) continue;
+        const name = f.replace('.cmb.rb', '');
+        const content = fs.readFileSync(path.join(gensDir, f), 'utf8');
+        const classMatch = content.match(/class\s+(\w+)/);
+        if (classMatch) {
+          agentCompletions.push({
+            label: classMatch[1],
+            kind: CompletionItemKind.Class,
+            detail: `Agent from ${f}`,
+          });
+        }
+      }
+    }
+    return agentCompletions;
+  }
+
+  // After "repair" at start of line → suggest repair keywords
+  if (/^\s*repair\s*$/.test(line)) {
+    return [
+      { label: 'max_attempts:', kind: CompletionItemKind.Property, detail: 'Max repair iterations' },
+      { label: 'stop_on_no_improvement:', kind: CompletionItemKind.Property, detail: 'Halt if error count unchanged' },
+    ];
   }
 
   // Start of line → suggest primitives

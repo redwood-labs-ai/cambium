@@ -51,14 +51,21 @@
         },
         {
           "comment": "Contract + policy primitives",
-          "match": "^\\s*(uses|corrects|constrain|extract)\\b",
+          "match": "^\\s*(uses|corrects|constrain|extract|grounded_in|enrich|repair)\\b",
           "captures": {
             "1": { "name": "keyword.other.policy.cambium support.function.cambium" }
           }
         },
         {
-          "comment": "Keyword arguments for primitives (to:, type:, path:, strategy:, passes:, unit:, target:, operation:, store_as:)",
-          "match": "\\b(to|type|path|strategy|passes|unit|target|operation|store_as):",
+          "comment": "Execution mode directive — distinct color from config primitives",
+          "match": "^\\s*(mode)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.directive.cambium" }
+          }
+        },
+        {
+          "comment": "Keyword arguments for primitives",
+          "match": "\\b(to|type|path|strategy|passes|unit|target|operation|store_as|max_attempts|stop_on_no_improvement):",
           "captures": {
             "1": { "name": "variable.parameter.cambium" }
           }
@@ -93,6 +100,16 @@
           "comment": "generate transaction block",
           "match": "\\b(generate)\\b",
           "name": "keyword.control.transaction.cambium"
+        },
+        {
+          "comment": "enrich pre-generate block",
+          "match": "^\\s*(enrich)\\b",
+          "name": "keyword.control.enrich.cambium"
+        },
+        {
+          "comment": "grounded_in directive",
+          "match": "^\\s*(grounded_in)\\b",
+          "name": "keyword.control.grounding.cambium"
         },
         {
           "comment": "on trigger block",
