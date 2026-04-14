@@ -24,17 +24,44 @@ import {
 
 type IR = any;
 
-type Args = { irPath: string };
+type Args = { irPath: string; traceOut?: string; outputOut?: string; mock?: boolean };
 
 function parseArgs(argv: string[]): Args {
   let irPath: string | null = null;
+  let traceOut: string | undefined;
+  let outputOut: string | undefined;
+  let mock = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--ir') irPath = argv[++i];
-    else throw new Error(`Unknown arg: ${a}`);
+    else if (a === '--trace') traceOut = argv[++i];
+    else if (a === '--out') outputOut = argv[++i];
+    else if (a === '--mock') { mock = true; process.env.CAMBIUM_ALLOW_MOCK = '1'; }
+    else if (a === '--help' || a === '-h') {
+      console.error(`
+Cambium Runner — step-graph executor
+
+Usage:
+  node --import tsx src/runner.ts --ir <path|-  [--trace <path>] [--out <path>] [--mock]
+
+Flags:
+  --ir <path>      IR JSON file, or '-' for stdin
+  --trace <path>   Write trace JSON to <path> (default: runs/<id>/trace.json)
+  --out <path>     Write output JSON to <path> (default: runs/<id>/output.json)
+  --mock           Use deterministic mock instead of live LLM
+  --help, -h       Show this help
+
+Examples:
+  node --import tsx src/runner.ts --ir gen.ir.json
+  node --import tsx src/runner.ts --ir - --trace trace.json --out result.json
+  echo '{"..."}' | node --import tsx src/runner.ts --ir - --mock
+`);
+      process.exit(0);
+    }
+    else throw new Error(`Unknown flag: ${a}\nRun 'node --import tsx src/runner.ts --help' for usage.`);
   }
-  if (!irPath) throw new Error('Missing --ir');
-  return { irPath };
+  if (!irPath) throw new Error('Missing --ir\nRun "node --import tsx src/runner.ts --help" for usage.');
+  return { irPath, traceOut, outputOut, mock };
 }
 
 function nowId() {
@@ -279,7 +306,7 @@ function extractJsonObject(text: string): any {
 
 // ── Main: Step-Graph Executor ─────────────────────────────────────────
 async function main() {
-  const { irPath } = parseArgs(process.argv.slice(2));
+  const { irPath, traceOut, outputOut } = parseArgs(process.argv.slice(2));
   const irText = irPath === '-' ? readFileSync(0, 'utf8') : readFileSync(irPath, 'utf8');
   const ir: IR = JSON.parse(irText);
 
@@ -363,9 +390,9 @@ async function main() {
       trace.finished_at = new Date().toISOString();
       trace.final = { ok: false, schema_id: schema.$id, usage: budget.summary(), budget_exceeded: true };
       writeFileSync(join(runDir, 'ir.json'), JSON.stringify(ir, null, 2));
-      writeFileSync(join(runDir, 'trace.json'), JSON.stringify(trace, null, 2));
-      writeFileSync(join(runDir, 'output.json'), 'null');
-      console.error(`Budget exceeded: ${violation.message}. See ${join('runs', runId, 'trace.json')}`);
+      writeFileSync(traceOut ?? join(runDir, 'trace.json'), JSON.stringify(trace, null, 2));
+      writeFileSync(outputOut ?? join(runDir, 'output.json'), 'null');
+      console.error(`Budget exceeded: ${violation.message}. See ${traceOut ?? join('runs', runId, 'trace.json')}`);
       process.exit(1);
     }
   }
@@ -728,16 +755,16 @@ async function main() {
   trace.final = { ok: finalOk, schema_id: schema.$id, usage: totalUsage, budget: budget.summary() };
 
   writeFileSync(join(runDir, 'ir.json'), JSON.stringify(ir, null, 2));
-  writeFileSync(join(runDir, 'trace.json'), JSON.stringify(trace, null, 2));
-  writeFileSync(join(runDir, 'output.json'), JSON.stringify(finalParsed ?? null, null, 2));
+  writeFileSync(traceOut ?? join(runDir, 'trace.json'), JSON.stringify(trace, null, 2));
+  writeFileSync(outputOut ?? join(runDir, 'output.json'), JSON.stringify(finalParsed ?? null, null, 2));
 
   if (!finalOk) {
-    console.error(`Validation failed after repair attempts. See ${join('runs', runId, 'trace.json')}`);
+    console.error(`Validation failed after repair attempts. See ${traceOut ?? join('runs', runId, 'trace.json')}`);
     process.exit(1);
   }
 
   console.log(JSON.stringify(finalParsed, null, 2));
-  console.error(`Trace: ${join('runs', runId, 'trace.json')}`);
+  console.error(`Trace: ${traceOut ?? join('runs', runId, 'trace.json')}`);
 }
 
 function setNestedValue(obj: any, path: string, value: any): void {
