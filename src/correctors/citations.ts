@@ -7,26 +7,44 @@ import type { CorrectorFn, CorrectorResult, CorrectorIssue } from './types.js';
  * This corrector flags issues but does not auto-fix — fabricated quotes
  * can't be deterministically corrected. Issues feed into the repair loop.
  */
+/** Result from citation verification — structured for trace + repair. */
+export type CitationResult = {
+  passed: Array<{ path: string; quote: string }>;
+  failed: Array<{ path: string; quote: string; reason: string }>;
+  missing: Array<{ path: string }>;
+  totalChecked: number;
+  allValid: boolean;
+};
+
 export const citations: CorrectorFn = (data, context): CorrectorResult => {
   const issues: CorrectorIssue[] = [];
   const output = structuredClone(data);
   const document = context.document ?? '';
 
-  walkAndCheck(output, '', document, issues);
+  const citationResult: CitationResult = {
+    passed: [],
+    failed: [],
+    missing: [],
+    totalChecked: 0,
+    allValid: true,
+  };
+
+  walkAndCheck(output, '', document, issues, citationResult);
 
   return {
-    corrected: false, // citations corrector only flags, never auto-fixes
+    corrected: false,
     output,
     issues,
+    meta: { citationResult },
   };
 };
 
-function walkAndCheck(obj: any, basePath: string, document: string, issues: CorrectorIssue[]): void {
+function walkAndCheck(obj: any, basePath: string, document: string, issues: CorrectorIssue[], citationResult: CitationResult): void {
   if (obj == null || typeof obj !== 'object') return;
 
   if (Array.isArray(obj)) {
     for (let i = 0; i < obj.length; i++) {
-      walkAndCheck(obj[i], `${basePath}[${i}]`, document, issues);
+      walkAndCheck(obj[i], `${basePath}[${i}]`, document, issues, citationResult);
     }
     return;
   }
@@ -36,8 +54,8 @@ function walkAndCheck(obj: any, basePath: string, document: string, issues: Corr
     const cits = obj.citations;
 
     if (!Array.isArray(cits) || cits.length === 0) {
-      // Missing citations — flag if require_citations is active
-      // (caller decides whether this is an error based on grounding policy)
+      citationResult.missing.push({ path: `${basePath}.citations` });
+      citationResult.allValid = false;
       issues.push({
         path: `${basePath}.citations`,
         message: 'Missing citations for this item',
@@ -48,7 +66,16 @@ function walkAndCheck(obj: any, basePath: string, document: string, issues: Corr
       for (let i = 0; i < cits.length; i++) {
         const cit = cits[i];
         if (cit.quote && typeof cit.quote === 'string') {
-          if (!quoteExistsInDocument(cit.quote, document)) {
+          citationResult.totalChecked++;
+          if (quoteExistsInDocument(cit.quote, document)) {
+            citationResult.passed.push({ path: `${basePath}.citations[${i}].quote`, quote: cit.quote });
+          } else {
+            citationResult.failed.push({
+              path: `${basePath}.citations[${i}].quote`,
+              quote: cit.quote,
+              reason: 'not found in source document',
+            });
+            citationResult.allValid = false;
             issues.push({
               path: `${basePath}.citations[${i}].quote`,
               message: `Cited quote not found in source document: "${cit.quote.slice(0, 80)}${cit.quote.length > 80 ? '...' : ''}"`,
@@ -64,7 +91,7 @@ function walkAndCheck(obj: any, basePath: string, document: string, issues: Corr
   // Recurse into nested objects/arrays
   for (const key of Object.keys(obj)) {
     if (key === 'citations') continue; // already checked
-    walkAndCheck(obj[key], `${basePath}.${key}`, document, issues);
+    walkAndCheck(obj[key], `${basePath}.${key}`, document, issues, citationResult);
   }
 }
 
