@@ -12,6 +12,14 @@ describe('parseInlineToolCalls', () => {
     expect(args.query).toBe('hello world');
   });
 
+  it('parses Gemma tool calls with <tool_call|> closing variant', () => {
+    const content = '<|tool_call>call:web_search{query:<|"hello"|>}<tool_call|>';
+    const calls = parseInlineToolCalls(content);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].function.name).toBe('web_search');
+    expect(JSON.parse(calls[0].function.arguments).query).toBe('hello');
+  });
+
   it('parses multiple Gemma tool calls', () => {
     const content = '<|tool_call>call:search{q:<|"a"|>}</tool_call><|tool_call>call:lookup{id:<|"1"|>}</tool_call>';
     const calls = parseInlineToolCalls(content);

@@ -7,8 +7,10 @@
  * the OpenAI tool_calls response format.
  *
  * Supported formats:
- *   Gemma:   <|tool_call>call:tool_name{json_args}</tool_call>
- *   Generic:  <tool_call>{"name":"...","arguments":{...}}</tool_call>
+ *   Gemma:   <|tool_call>call:tool_name{json_args}<CLOSE>
+ *            where <CLOSE> is any of </tool_call>, <tool_call|>, </tool_call|>,
+ *            or end-of-string (Gemma variants differ by fine-tune).
+ *   Generic: <tool_call>{"name":"...","arguments":{...}}</tool_call>
  */
 
 export type ToolCallMessage = {
