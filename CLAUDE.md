@@ -104,9 +104,11 @@ Read these docs before making architectural decisions or adding new primitives.
 
 ## Development
 
-- Tests: `npm test` (vitest, 63 tests)
-- Model: oMLX server at `CAMBIUM_OMLX_BASEURL` (default `http://100.114.183.54:8080`)
-- Qwen 3.5 thinking mode: suppressed via `/no_think` token + `chat_template_kwargs`
+- Tests: `npm test` (vitest)
+- Providers supported for agentic mode:
+  - **oMLX** (OpenAI-compatible): `CAMBIUM_OMLX_BASEURL` (default `http://100.114.183.54:8080`), optional `CAMBIUM_OMLX_API_KEY`. Model id: `"omlx:<name>"`.
+  - **Ollama**: `CAMBIUM_OLLAMA_BASEURL` (default `http://localhost:11434`), no API key. Model id: `"ollama:<name>"` or a bare `"<name>"` (Ollama is the default when no `provider:` prefix).
+- Qwen 3.5 thinking mode (oMLX): suppressed via `/no_think` token + `chat_template_kwargs`
 - VS Code: syntax highlighting + LSP (hover, go-to-definition, completions) for `.cmb.rb`
 
 ## For contributors
