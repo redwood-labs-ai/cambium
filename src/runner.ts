@@ -203,8 +203,49 @@ async function generateWithTools(opts: {
 }): Promise<GenerateWithToolsResult> {
   const { provider, name } = parseModelId(opts.model);
 
+  if (provider === 'ollama') {
+    // RED-208: Ollama's /api/chat accepts OpenAI-format tools and returns
+    // tool_calls in message.tool_calls. Request/response shaping lives in
+    // src/providers/ollama.ts so it's unit-testable without a live server.
+    const { buildOllamaChatRequest, normalizeOllamaChatResponse } = await import('./providers/ollama.js');
+    const baseUrl = process.env.CAMBIUM_OLLAMA_BASEURL ?? 'http://localhost:11434';
+    const url = `${baseUrl.replace(/\/$/, '')}/api/chat`;
+    const body = buildOllamaChatRequest({
+      model: name,
+      messages: opts.messages,
+      tools: opts.tools,
+      max_tokens: opts.max_tokens,
+      temperature: opts.temperature,
+    });
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`Ollama error: HTTP ${res.status}`);
+    const json: any = await res.json();
+    const normalized = normalizeOllamaChatResponse(json);
+
+    // Inline tool-call parsing fallback — some Ollama models emit tool calls
+    // as markup in content (same as RED-142 for Gemma on oMLX).
+    let content = normalized.message.content;
+    let toolCalls = normalized.message.tool_calls;
+    if ((!toolCalls || toolCalls.length === 0) && content) {
+      const parsed = parseInlineToolCalls(content);
+      if (parsed.length > 0) {
+        toolCalls = parsed;
+        content = stripInlineToolCalls(content);
+      }
+    }
+
+    return {
+      message: { content, tool_calls: toolCalls },
+      usage: normalized.usage,
+    };
+  }
+
   if (provider !== 'omlx') {
-    throw new Error(`Agentic mode requires oMLX provider (OpenAI-compatible). Got: ${provider}`);
+    throw new Error(`Agentic mode: unknown provider "${provider}". Supported: omlx, ollama.`);
   }
 
   const baseUrl = process.env.CAMBIUM_OMLX_BASEURL ?? 'http://100.114.183.54:8080';
