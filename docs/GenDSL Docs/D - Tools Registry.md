@@ -17,7 +17,7 @@ app/tools/
 
 The registry walks the directory and, for each `.tool.json`, looks for a sibling `.tool.ts` (or `.tool.js`) and imports its `execute(input, ctx?)` export. No edits to `src/tools/index.ts` or the registry itself are required.
 
-Framework-provided "batteries-included" tools (calculator, read_file, web_search, web_extract, execute_code) currently still live in `src/tools/` with a hardcoded registration map. Migration tracked in RED-221.
+Framework-provided "batteries-included" tools (calculator, read_file, web_search, web_extract, execute_code) live in `src/builtin-tools/` in the same paired-file layout as app tools (RED-221). The runner loads `src/builtin-tools/` first, then `packages/<pkg>/app/tools/`. `Map.set` overwrites on name collision, so app tools automatically shadow framework builtins — that's the override hook.
 
 ## Semantics
 
