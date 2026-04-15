@@ -19,8 +19,7 @@
 
 import { lookup as dnsLookupCb, type LookupAddress } from 'node:dns';
 import { promisify } from 'node:util';
-import { Agent as HttpAgent } from 'node:http';
-import { Agent as HttpsAgent } from 'node:https';
+import { Agent as UndiciAgent, fetch as undiciFetch, buildConnector } from 'undici';
 import type { NetworkPolicy } from './permissions.js';
 import { hostMatchesList } from './permissions.js';
 
@@ -294,9 +293,12 @@ export async function checkAndResolve(
 }
 
 /**
- * Drop-in fetch wrapper. Validates the URL, then issues fetch with an
- * agent whose `lookup` hook returns the *already-validated* first IP —
- * preventing TOCTOU between our resolution and the kernel's.
+ * Drop-in fetch wrapper. Validates the URL, then issues fetch via an undici
+ * Agent whose connector forces the TCP connection to the *already-validated*
+ * IP. Closes the TOCTOU window between our DNS resolution and the kernel's.
+ *
+ * The TLS handshake still uses the original hostname for SNI + cert
+ * verification — only the underlying connect target is pinned.
  */
 export async function guardedFetch(
   url: string,
@@ -314,25 +316,22 @@ export async function guardedFetch(
   }
 
   const pinnedIp = decision.resolved_ips[0];
-  const family = parseV4(pinnedIp) != null ? 4 : 6;
 
-  // Pin the connection to the validated IP via a per-request agent.
-  const parsed = new URL(url);
-  const isHttps = parsed.protocol === 'https:';
-  const AgentCtor: any = isHttps ? HttpsAgent : HttpAgent;
-  const agent = new AgentCtor({
-    lookup: (_hostname: string, _opts: any, cb: any) => cb(null, pinnedIp, family),
-    keepAlive: false,
-  });
+  // undici's buildConnector returns a connect fn we can wrap. We rewrite the
+  // connection target's hostname to the pinned IP while leaving servername
+  // (SNI) on the original hostname so cert verification still works.
+  const baseConnect = buildConnector({});
+  const pinningConnect: typeof baseConnect = (options, cb) => {
+    return baseConnect(
+      { ...options, hostname: pinnedIp },
+      cb,
+    );
+  };
 
-  // node:fetch (undici) doesn't honor http.Agent directly. Pass via dispatcher
-  // for undici, or fall back. For simplicity in this module we attach via
-  // (init as any).agent which works for node-fetch-style call sites; a future
-  // PR can wire this through undici's Dispatcher.
-  const finalInit: any = { ...(init ?? {}), agent };
+  const dispatcher = new UndiciAgent({ connect: pinningConnect });
   try {
-    return await fetch(url, finalInit);
+    return (await undiciFetch(url, { ...(init as any), dispatcher })) as unknown as Response;
   } finally {
-    agent.destroy?.();
+    await dispatcher.close().catch(() => { /* ignore */ });
   }
 }
