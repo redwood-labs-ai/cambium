@@ -743,7 +743,7 @@ async function main() {
       trace.steps.push({
         ...citResult,
         type: 'GroundingCheck',
-        ok: citationResult?.allValid ?? (citResult.issues.length === 0),
+        ok: citationResult?.allValid ?? ((citResult.issues ?? []).length === 0),
         meta: {
           ...citResult.meta,
           passed: citationResult?.passed?.length ?? 0,
@@ -789,7 +789,7 @@ async function main() {
       trace.steps.push({ type: 'ExtractSignals', ok: true, meta: { state } });
 
       if (triggerDefs.length > 0) {
-        const triggerResults = evaluateTriggers(triggerDefs, state, toolRegistry, toolsAllowed, {
+        const triggerResults = await evaluateTriggers(triggerDefs, state, toolRegistry, toolsAllowed, {
           policy: securityPolicy, budget, traceEvents: trace.steps,
         });
         for (const tr of triggerResults) {
