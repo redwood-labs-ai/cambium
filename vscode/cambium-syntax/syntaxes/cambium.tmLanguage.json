@@ -51,14 +51,14 @@
         },
         {
           "comment": "Contract + policy primitives",
-          "match": "^\\s*(uses|corrects|constrain|extract|grounded_in|enrich|repair|mode|security)\\b",
+          "match": "^\\s*(uses|corrects|constrain|extract|grounded_in|enrich|repair|mode|security|budget)\\b",
           "captures": {
             "1": { "name": "keyword.other.policy.cambium support.function.cambium" }
           }
         },
         {
           "comment": "Keyword arguments for primitives",
-          "match": "\\b(to|type|path|strategy|passes|unit|target|operation|store_as|max_attempts|stop_on_no_improvement|allow_network|allow_filesystem):",
+          "match": "\\b(to|type|path|strategy|passes|unit|target|operation|store_as|max_attempts|stop_on_no_improvement|network|filesystem|exec|allowlist|denylist|block_private|block_metadata|roots|allowed|per_tool|per_run|max_calls):",
           "captures": {
             "1": { "name": "variable.parameter.cambium" }
           }
