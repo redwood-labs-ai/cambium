@@ -43,7 +43,10 @@ Module.define_method(:const_missing) do |name|
   Cambium::ConstRef.new(name.to_s)
 end
 
-# Load the DSL file (defines GenModel subclasses)
+# Load the DSL file (defines GenModel subclasses).
+# Track the source file so symbol-resolution primitives (security :pack,
+# budget :pack, system :name) know which package to look in.
+Cambium::CompilerState.current_source_file = file
 load file
 
 klass = Cambium::Registry.model_classes.last
@@ -110,8 +113,8 @@ ir = {
     'correctors' => (defs[:correctors] || []),
     'constraints' => (defs[:constraints] || {}),
     'grounding' => defs[:grounding],
-    'security' => defs[:security],
-    'budget' => defs[:budget]
+    'security' => Cambium.flatten_slot_state(defs[:security]),
+    'budget'   => Cambium.flatten_slot_state(defs[:budget])
   },
   'returnSchemaId' => defs[:returnSchema],
   'context' => {
