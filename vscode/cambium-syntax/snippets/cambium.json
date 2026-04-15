@@ -110,5 +110,19 @@
       "constrain :compound, strategy: :review, passes: ${1:2}"
     ],
     "description": "Compound review with multiple passes"
+  },
+  "Policy pack ref (security)": {
+    "prefix": "secpack",
+    "body": [
+      "security :${1:research_defaults}"
+    ],
+    "description": "Pull the security export from a policy pack (RED-214)."
+  },
+  "Policy pack ref (budget)": {
+    "prefix": "budgetpack",
+    "body": [
+      "budget :${1:research_defaults}"
+    ],
+    "description": "Pull the budget export from a policy pack (RED-214)."
   }
 }
