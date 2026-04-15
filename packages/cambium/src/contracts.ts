@@ -83,3 +83,53 @@ export const WebResearchResult = Type.Object(
   },
   { additionalProperties: false, $id: 'WebResearchResult' }
 )
+
+// RED-216: agentic tool scaffolder output.
+// The gen produces a typed plan for a new plugin tool; the CLI writes
+// it to disk on user confirm.
+export const ToolScaffoldResult = Type.Object(
+  {
+    name: Type.String({
+      description: 'snake_case identifier used in `uses :<name>` and for file names',
+    }),
+    description: Type.String({
+      description: 'one-sentence description shown to the model when it decides whether to call the tool',
+    }),
+    permissions: Type.Object(
+      {
+        pure: Type.Optional(Type.Boolean()),
+        network: Type.Optional(Type.Boolean()),
+        network_hosts: Type.Optional(Type.Array(Type.String())),
+        filesystem: Type.Optional(Type.Boolean()),
+        filesystem_paths: Type.Optional(Type.Array(Type.String())),
+        exec: Type.Optional(Type.Boolean()),
+      },
+      { additionalProperties: false }
+    ),
+    input_schema: Type.Object(
+      {
+        type: Type.Literal('object'),
+        required: Type.Optional(Type.Array(Type.String())),
+        properties: Type.Record(Type.String(), Type.Unknown()),
+        additionalProperties: Type.Optional(Type.Boolean()),
+      },
+      { additionalProperties: false }
+    ),
+    output_schema: Type.Object(
+      {
+        type: Type.Literal('object'),
+        required: Type.Optional(Type.Array(Type.String())),
+        properties: Type.Record(Type.String(), Type.Unknown()),
+        additionalProperties: Type.Optional(Type.Boolean()),
+      },
+      { additionalProperties: false }
+    ),
+    handler_typescript: Type.String({
+      description: 'Full TS source for <name>.tool.ts — imports, types, execute function. Must export async function execute(input, ctx?).',
+    }),
+    rationale: Type.String({
+      description: 'One-paragraph explanation of why the chosen permissions and schemas are right for the described task',
+    }),
+  },
+  { additionalProperties: false, $id: 'ToolScaffoldResult' }
+)

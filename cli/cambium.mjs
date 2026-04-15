@@ -49,6 +49,20 @@ if (!cmd) usage();
 
 // ── cambium new ───────────────────────────────────────────────────────
 if (cmd === 'new') {
+  // `cambium new tool --describe "..."` routes to the agentic scaffolder.
+  // Everything else stays deterministic via runGenerate.
+  const describeIdx = args.indexOf('--describe');
+  if (describeIdx >= 0 && args[0] === 'tool') {
+    const description = args[describeIdx + 1];
+    if (!description) {
+      console.error('Usage: cambium new tool --describe "<what the tool does>"');
+      process.exit(2);
+    }
+    const { runAgenticToolScaffold } = await import('./scaffold-tool.mjs');
+    await runAgenticToolScaffold(description);
+    process.exit(0);
+  }
+
   const [type, name] = args;
   runGenerate(type, name);
   process.exit(0);

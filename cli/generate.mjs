@@ -94,15 +94,19 @@ function generateTool(name) {
 
   console.log(`\nGenerating tool: ${snake}\n`);
 
+  // RED-209 layout: paired .tool.json + .tool.ts in app/tools/. The
+  // registry auto-discovers both; no edits to src/tools/index.ts.
   writeFile(join(PKG, 'app/tools', `${snake}.tool.json`), JSON.stringify({
     name: snake,
     description: `TODO: describe what ${snake} does`,
+    permissions: { pure: true },
     inputSchema: {
       type: 'object',
       required: ['input'],
       properties: {
         input: { type: 'string' },
       },
+      additionalProperties: false,
     },
     outputSchema: {
       type: 'object',
@@ -110,33 +114,35 @@ function generateTool(name) {
       properties: {
         result: { type: 'string' },
       },
+      additionalProperties: false,
     },
   }, null, 2) + '\n');
 
-  writeFile(join('src/tools', `${snake}.ts`), `\
-export function execute(input: { input: string }): { result: string } {
+  writeFile(join(PKG, 'app/tools', `${snake}.tool.ts`), `\
+/**
+ * Plugin tool handler. Auto-discovered alongside ${snake}.tool.json (RED-209).
+ *
+ * If this tool needs network access, declare it in the .tool.json
+ * permissions block and use \`ctx.fetch\` here — NOT globalThis.fetch
+ * (the SSRF guard lives on ctx.fetch; direct fetch bypasses it).
+ */
+import type { ToolContext } from '../../../../src/tools/tool-context.js';
+
+export async function execute(
+  input: { input: string },
+  _ctx?: ToolContext,
+): Promise<{ result: string }> {
   // TODO: implement ${snake}
   return { result: input.input };
 }
 `);
 
-  writeFile(join('src/tools', `${snake}.test.ts`), `\
-import { describe, it, expect } from 'vitest'
-import { execute } from './${snake}.js'
-
-describe('${snake}', () => {
-  it('executes', () => {
-    const result = execute({ input: 'test' })
-    expect(result).toHaveProperty('result')
-  })
-})
-`);
-
   console.log(`\nNext steps:`);
-  console.log(`  1. Edit ${PKG}/app/tools/${snake}.tool.json (input/output schemas)`);
-  console.log(`  2. Implement src/tools/${snake}.ts`);
-  console.log(`  3. Register in src/tools/index.ts: import and add to builtinTools`);
-  console.log(`  4. Declare in your agent: uses :${snake}`);
+  console.log(`  1. Edit ${PKG}/app/tools/${snake}.tool.json — input/output schemas + permissions`);
+  console.log(`  2. Implement ${PKG}/app/tools/${snake}.tool.ts`);
+  console.log(`  3. Declare in your agent: uses :${snake}`);
+  console.log(`\nTip: try \`cambium new tool --describe "what it does"\` for an agentic scaffolder`);
+  console.log(`     that infers the schema and permissions from a natural-language description.`);
 }
 
 function generateSchema(name) {
