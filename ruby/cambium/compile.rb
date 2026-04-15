@@ -71,6 +71,46 @@ end
 
 defs = klass._cambium_defaults
 
+# RED-210: validate `returns <Schema>` against the package's contracts.ts
+# BEFORE the runner sees the IR. A typo here used to surface as an obscure
+# "Schema not found in contracts.ts for id: ..." at runtime startup; now
+# it fails at compile time with a list of valid schema names.
+if (schema_name = defs[:returnSchema])
+  pkg_dir = File.dirname(File.dirname(File.expand_path(file)))  # up from app/gens/
+  contracts_candidates = [
+    File.join(pkg_dir, 'src', 'contracts.ts'),
+    File.join('packages', 'cambium', 'src', 'contracts.ts'),
+  ].uniq.select { |p| File.exist?(p) }
+
+  # If no contracts file is discoverable, skip — the runner will still
+  # catch the typo, and we don't want to block compile on arbitrary
+  # contracts layouts. Validation is best-effort but should be strict
+  # when it can run.
+  unless contracts_candidates.empty?
+    all_exports = []
+    found = false
+    contracts_candidates.each do |cf|
+      content = File.read(cf)
+      content.scan(/^\s*export\s+const\s+([A-Z][A-Za-z0-9_]*)\b/) do |m|
+        all_exports << m[0]
+      end
+      found = true if content.match?(/^\s*export\s+const\s+#{Regexp.escape(schema_name)}\b/)
+    end
+
+    unless found
+      available = all_exports.uniq.sort
+      suggestion = available.find { |e| e.downcase == schema_name.downcase } ||
+                   available.find { |e| e.start_with?(schema_name) || schema_name.start_with?(e) }
+      hint = suggestion ? "\n\nDid you mean '#{suggestion}'?" : ''
+      raise Cambium::CompileError,
+            "Unknown schema '#{schema_name}' referenced by `returns` in #{file}.\n\n" \
+            "Available schemas (from #{contracts_candidates.join(', ')}):\n  " \
+            "#{available.join("\n  ")}" \
+            "#{hint}"
+    end
+  end
+end
+
 # Resolve system prompt: symbol → file lookup, string → inline, nil → omit.
 system_prompt = nil
 if defs[:system]

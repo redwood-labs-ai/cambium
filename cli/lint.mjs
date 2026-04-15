@@ -160,21 +160,32 @@ function lintPackage(pkgDir) {
     for (const f of allGens) {
       const content = readFileSync(join(gensDir, f), 'utf8');
 
-      // Check returns references a known schema
+      // RED-210: `returns <Schema>` must resolve to an export in
+      // contracts.ts. Upgrade from warn to fail — a typo here crashes
+      // the runner with an obscure message, so catching it at lint
+      // time is the whole point. The Ruby compiler also enforces this
+      // at compile time; lint is the second line of defense for gens
+      // that haven't been compiled yet.
       const returnsMatch = content.match(/returns\s+(\w+)/);
-      if (returnsMatch) {
+      if (returnsMatch && genfile.types?.contracts) {
         const schemaName = returnsMatch[1];
-        // Check if it's exported from contracts.ts
-        if (genfile.types?.contracts) {
-          const contracts = Array.isArray(genfile.types.contracts) ? genfile.types.contracts : [genfile.types.contracts];
-          for (const c of contracts) {
-            const contractsContent = readFileSync(join(pkgDir, c), 'utf8');
-            if (contractsContent.includes(`export const ${schemaName}`)) {
-              pass(`${f}: returns ${schemaName} (found in contracts)`);
-            } else {
-              warn(`${f}: returns ${schemaName} — not found in ${c}`);
-            }
-          }
+        const contracts = Array.isArray(genfile.types.contracts) ? genfile.types.contracts : [genfile.types.contracts];
+        const availableExports = new Set();
+        let foundIn = null;
+        for (const c of contracts) {
+          const contractsContent = readFileSync(join(pkgDir, c), 'utf8');
+          const exportRe = /^\s*export\s+const\s+([A-Z][A-Za-z0-9_]*)\b/gm;
+          for (const m of contractsContent.matchAll(exportRe)) availableExports.add(m[1]);
+          if (contractsContent.includes(`export const ${schemaName}`)) foundIn = c;
+        }
+        if (foundIn) {
+          pass(`${f}: returns ${schemaName} (found in ${foundIn})`);
+        } else {
+          const sorted = [...availableExports].sort();
+          const suggestion = sorted.find(e => e.toLowerCase() === schemaName.toLowerCase())
+            ?? sorted.find(e => e.startsWith(schemaName) || schemaName.startsWith(e));
+          const hint = suggestion ? ` Did you mean '${suggestion}'?` : '';
+          fail(`${f}: returns ${schemaName} — not exported from ${contracts.join(', ')}.${hint}`);
         }
       }
 
