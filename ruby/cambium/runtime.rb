@@ -115,7 +115,19 @@ module Cambium
     # Resolve a pack name to a file in one of the search dirs, eval it
     # inside a PolicyPackBuilder, return the populated PolicyPack.
     def self.load(name, search_dirs)
-      candidates = search_dirs.map { |d| File.join(d, "#{name}.policy.rb") }
+      # Restrict pack names to a safe identifier shape so a Symbol like
+      # `:"../secret"` can't be interpolated into a path that escapes
+      # the policies dir. Compile-time on trusted source, but cheap to
+      # harden — the check matches the implicit assumption elsewhere
+      # (system: + tool: names follow the same convention).
+      name_str = name.to_s
+      unless name_str =~ /\A[a-z][a-z0-9_]*\z/
+        raise CompileError,
+              "Invalid policy pack name '#{name}'. Pack names must be lowercase " \
+              "identifiers matching /\\A[a-z][a-z0-9_]*\\z/ (e.g. :research_defaults)."
+      end
+
+      candidates = search_dirs.map { |d| File.join(d, "#{name_str}.policy.rb") }
       file = candidates.find { |f| File.exist?(f) }
       if file.nil?
         raise CompileError,
@@ -124,7 +136,15 @@ module Cambium
 
       pack = new(name)
       builder = PolicyPackBuilder.new(pack)
-      builder.instance_eval(File.read(file), file)
+      begin
+        builder.instance_eval(File.read(file), file)
+      rescue CompileError
+        raise # already structured — preserve as-is
+      rescue ScriptError, StandardError => e
+        raise CompileError,
+              "Failed to load policy pack '#{name}' from #{file}: " \
+              "#{e.class}: #{e.message}"
+      end
       pack
     end
   end
