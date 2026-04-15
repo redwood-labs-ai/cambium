@@ -370,12 +370,11 @@ export async function handleToolCall(
   const def = registry.get(toolName);
   if (!def) throw new Error(`Tool "${toolName}" not found in registry. Available: ${registry.list().join(', ')}`);
 
-  const impl = builtinTools[toolName];
-  if (!impl) throw new Error(`No built-in implementation for tool "${toolName}"`);
-
   const events = env.traceEvents;
 
-  // Budget pre-call gate. Refuses the call before spending.
+  // Budget pre-call gate. Must run BEFORE any other gate so budget
+  // violations always surface first in the trace — invariant from
+  // RED-137's ToolCallEnv contract.
   if (env.budget) {
     const violation = env.budget.checkBeforeCall(toolName);
     if (violation) {
@@ -391,6 +390,20 @@ export async function handleToolCall(
       err.budgetViolation = violation;
       throw err;
     }
+  }
+
+  // RED-209: plugin handlers (auto-discovered from app/tools/*.tool.ts)
+  // take precedence over the framework's builtinTools map. A tool that
+  // declares itself in app/tools with the same name as a framework
+  // builtin overrides it — that's the extension point apps use to ship
+  // their own versions of `calculator` / `web_search` / etc.
+  const impl = registry.getHandler(toolName) ?? builtinTools[toolName];
+  if (!impl) {
+    throw new Error(
+      `No implementation found for tool "${toolName}". Either declare a handler in ` +
+      `app/tools/${toolName}.tool.ts (paired with the .tool.json) or register it in ` +
+      `src/tools/index.ts builtinTools.`,
+    );
   }
 
   // Build the ToolContext (policy-bound fetch for network tools).

@@ -1,0 +1,21 @@
+{
+  "name": "echo_plugin",
+  "description": "Pure echo — returns its input under `echoed`. Proof-of-concept plugin tool: schema and handler are auto-discovered together. See RED-209.",
+  "permissions": { "pure": true },
+  "inputSchema": {
+    "type": "object",
+    "required": ["message"],
+    "properties": {
+      "message": { "type": "string" }
+    },
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["echoed"],
+    "properties": {
+      "echoed": { "type": "string" }
+    },
+    "additionalProperties": false
+  }
+}

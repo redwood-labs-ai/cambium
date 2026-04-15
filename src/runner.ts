@@ -335,7 +335,7 @@ async function main() {
 
   // ── Load tool registry ──────────────────────────────────────────────
   const toolRegistry = new ToolRegistry();
-  toolRegistry.loadFromDir(join(process.cwd(), 'packages/cambium/app/tools'));
+  await toolRegistry.loadFromDir(join(process.cwd(), 'packages/cambium/app/tools'));
 
   const toolsAllowed: string[] = ir.policies?.tools_allowed ?? [];
   // Validate that all declared tools exist in the registry

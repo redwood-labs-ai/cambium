@@ -3,9 +3,9 @@ import { evaluateTriggers } from './triggers.js'
 import { ToolRegistry } from './tools/registry.js'
 import { join } from 'node:path'
 
-function loadedRegistry() {
+async function loadedRegistry() {
   const reg = new ToolRegistry()
-  reg.loadFromDir(join(process.cwd(), 'packages/cambium/app/tools'))
+  await reg.loadFromDir(join(process.cwd(), 'packages/cambium/app/tools'))
   return reg
 }
 
@@ -20,7 +20,7 @@ describe('evaluateTriggers', () => {
     }]
     const state = { latency_ms: [120, 140, 160] }
 
-    const results = await evaluateTriggers(triggers, state, loadedRegistry(), ['calculator'])
+    const results = await evaluateTriggers(triggers, state, await loadedRegistry(), ['calculator'])
     expect(results).toHaveLength(1)
     expect(results[0].fired).toBe(true)
     expect(results[0].value).toBe(140)
@@ -35,7 +35,7 @@ describe('evaluateTriggers', () => {
       args: { operation: 'avg' },
     }]
 
-    const results = await evaluateTriggers(triggers, {}, loadedRegistry(), ['calculator'])
+    const results = await evaluateTriggers(triggers, {}, await loadedRegistry(), ['calculator'])
     expect(results[0].fired).toBe(false)
   })
 
@@ -48,7 +48,7 @@ describe('evaluateTriggers', () => {
     }]
     const state = { latency_ms: [] }
 
-    const results = await evaluateTriggers(triggers, state, loadedRegistry(), ['calculator'])
+    const results = await evaluateTriggers(triggers, state, await loadedRegistry(), ['calculator'])
     expect(results[0].fired).toBe(false)
   })
 
@@ -62,7 +62,7 @@ describe('evaluateTriggers', () => {
     const state = { latency_ms: [100] }
 
     await expect(
-      evaluateTriggers(triggers, state, loadedRegistry(), [])
+      evaluateTriggers(triggers, state, await loadedRegistry(), [])
     ).rejects.toThrow('not in policies.tools_allowed')
   })
 
@@ -75,7 +75,7 @@ describe('evaluateTriggers', () => {
     }]
     const state = { latency_ms: [100] }
 
-    const results = await evaluateTriggers(triggers, state, loadedRegistry(), [])
+    const results = await evaluateTriggers(triggers, state, await loadedRegistry(), [])
     expect(results[0].fired).toBe(false)
   })
 })
