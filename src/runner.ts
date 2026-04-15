@@ -374,7 +374,7 @@ async function main() {
   };
 
   // ── Budget tracking ─────────────────────────────────────────────────
-  const budget = parseBudget(ir.policies?.constraints);
+  const budget = parseBudget(ir.policies);
 
   /** Track usage/tool calls from a trace step and check budget. Throws on violation. */
   function budgetTrack(step: any): void {
