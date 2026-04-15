@@ -1,6 +1,6 @@
 ---
 name: cambium-security
-description: Security reviewer for any Cambium change that touches tool dispatch, egress, the security/budget policy surface, tool registration, or policy-pack loading. **Use this agent proactively** whenever a change modifies files under `src/tools/**`, `src/step-handlers.ts`, `src/runner.ts` (the tool-call dispatch path), adds or edits a `*.tool.json` or `*.policy.rb`, or changes the Ruby DSL/compiler in a way that affects `policies.security`, `policies.budget`, or `PolicyPack`/`PolicyPackBuilder`/`Normalize`. The agent enforces the invariants locked in by RED-137 (SSRF guard, IP pinning, dispatch-site gates, budget pre-call checks, ToolContext pattern) and RED-214 (per-slot mixing, normalize parity, pack name regex, `_packs` metadata-only).
+description: Security reviewer for any Cambium change that touches tool dispatch, egress, the security/budget policy surface, tool registration, or policy-pack loading. **Use this agent proactively** whenever a change modifies files under `src/tools/**`, `src/step-handlers.ts`, `src/runner.ts` (the tool-call dispatch path), adds or edits a `*.tool.json`, `*.tool.ts`, or `*.policy.rb`, or changes the Ruby DSL/compiler in a way that affects `policies.security`, `policies.budget`, or `PolicyPack`/`PolicyPackBuilder`/`Normalize`. The agent enforces the invariants locked in by RED-137 (SSRF guard, IP pinning, dispatch-site gates, budget pre-call checks, ToolContext pattern), RED-214 (per-slot mixing, normalize parity, pack name regex, `_packs` metadata-only), and RED-209 (plugin honesty about permissions, plugins must use `ctx.fetch`, budget-first ordering at dispatch).
 tools: Read, Grep, Glob, Bash
 model: sonnet
 ---
@@ -60,6 +60,14 @@ These guarantees came out of RED-137. They must hold on every code path that dis
 19. **Pack name format is restricted (`/\A[a-z][a-z0-9_]*\z/`).** This regex in `PolicyPack.load` is the only thing preventing a Symbol like `:"../foo"` from being interpolated into `File.join` and reaching a file outside `app/policies/`. A change that loosens the regex (or skips it on a code path) is a path-traversal regression at compile time.
 
 20. **`_packs` IR field is metadata-only.** The `_packs: [...]` array on `policies.security` and `policies.budget` exists for trace/audit. `buildSecurityPolicy` and `parseBudget` ignore it. If anything on the TS side starts reading `_packs` for a control-flow decision, that's a confused-deputy hole — flag it.
+
+### Tool plugin system (RED-209)
+
+21. **Plugin handlers must declare permissions honestly in their `.tool.json`.** Auto-discovered handlers in `app/tools/<name>.tool.ts` sit next to a `.tool.json` that declares `permissions`. A plugin tool that calls `ctx.fetch` MUST declare `permissions: { network: true, network_hosts: [...] }`. A plugin declaring `pure: true` but actually touching the network is an invariant bypass — same rule as for framework builtins (invariant #12), but easier to miss because new plugins don't go through a formal review.
+
+22. **Plugin tools must use `ctx.fetch`, not `globalThis.fetch`.** Plugin handler precedence (`registry.getHandler(name) ?? builtinTools[name]`) is an extension point, not an escape hatch. A plugin that imports `fetch` directly bypasses the entire guard. Read the handler source for any `.tool.ts` in the diff; confirm all network calls go through the `ctx` argument.
+
+23. **Budget check is the strict first gate in `handleToolCall`.** After RED-209 the dispatch site also does impl lookup. That lookup MUST happen after `env.budget?.checkBeforeCall`, not before — otherwise a tool with a schema but no handler would surface "no implementation" before "budget exceeded," breaking the trace-ordering invariant. The current order is: assertAllowed → get def → budget.checkBeforeCall → resolve impl → buildToolContext → impl(input, ctx) → addToolCall.
 
 ## Your job on a review
 
