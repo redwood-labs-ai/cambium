@@ -39,9 +39,9 @@ class Agent < GenModel
 
   budget \
     per_tool: {
-      tavily:           { max_calls: 5,  max_bytes: 2_000_000 },
+      tavily:           { max_calls: 5  },
       linear:           { max_calls: 20 },
-      codebase_reader:  { max_calls: 50, max_bytes: 5_000_000 },
+      codebase_reader:  { max_calls: 50 },
     },
     per_run: { max_calls: 100 }
 end
@@ -86,9 +86,10 @@ Budget state lives on the run context, not global. Counters per
 `(run_id, tool_name)`:
 
 - `calls` — incremented before dispatch.
-- `bytes` — sum of response body sizes for fetch-based tools.
 
-(`max_cost_usd` and `tokens` are deferred — see Out of scope.)
+(`max_bytes`, `max_tokens`, `max_cost_usd` are deferred — see Out of scope.
+ `max_calls` is the runaway-loop case and lands real value today without
+ requiring a tokenizer or cost reporting in the dispatch path.)
 
 Check happens **before** dispatch. Exceeding any limit raises
 `BudgetExceeded` with the limit, current value, and increment that would
@@ -134,6 +135,7 @@ New event types under `tool.*`:
     "per_tool": { "tavily": { "max_calls": 5 } },
     "per_run":  { "max_calls": 100 }
   }
+  // v1 supports max_calls only. See "Out of scope" for rationale.
 }
 ```
 
@@ -142,9 +144,11 @@ New event types under `tool.*`:
 - HTTPS cert pinning per host.
 - Outbound proxy enforcement.
 - Filesystem write sandboxing (read-only roots only for now).
-- USD cost budgets and token budgets — deferred until tools self-report
-  cost in a standard `_meta` shape. `max_calls` + `max_bytes` cover the
-  runaway-loop case for now.
+- Byte / token / USD cost budgets. Bytes don't track the real cost (model
+  tokens do); tokens need a tokenizer in the dispatch path and a per-model
+  strategy; USD needs a tool `_meta` convention for cost reporting.
+  `max_calls` covers the runaway-loop case cheaply; the rest lands as a
+  follow-up once we settle the tokenizer/`_meta` questions.
 
 ## Test plan
 

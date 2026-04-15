@@ -6,7 +6,6 @@ export type BudgetLimits = {
 
 export type PerToolLimits = {
   max_calls?: number;
-  max_bytes?: number;
 };
 
 export type BudgetState = {
@@ -17,7 +16,6 @@ export type BudgetState = {
 
 export type PerToolState = {
   calls: number;
-  bytes: number;
 };
 
 export type BudgetViolation = {
@@ -55,15 +53,10 @@ export class Budget {
     if (tool) this.ensureToolState(tool).calls += 1;
   }
 
-  /** Record bytes transferred on behalf of a specific tool. */
-  addBytes(tool: string, n: number): void {
-    if (n > 0) this.ensureToolState(tool).bytes += n;
-  }
-
   private ensureToolState(tool: string): PerToolState {
     let s = this.perToolState[tool];
     if (!s) {
-      s = { calls: 0, bytes: 0 };
+      s = { calls: 0 };
       this.perToolState[tool] = s;
     }
     return s;
@@ -76,15 +69,14 @@ export class Budget {
 
   /**
    * Pre-call gate. Call before dispatching `tool` to see whether the
-   * *next* invocation (cost `increment`) would push us over any per-tool
-   * or per-run limit. Returns a violation if so, or null.
+   * *next* invocation would push us over any per-tool or per-run limit.
+   * Returns a violation if so, or null.
    *
-   * Use this to refuse the call before spending the time/bytes, rather
-   * than learning about it in `check()` after the damage is done.
+   * Use this to refuse the call before spending the time, rather than
+   * learning about it in `check()` after the damage is done.
    */
-  checkBeforeCall(tool: string, increment: { calls?: number; bytes?: number } = {}): BudgetViolation | null {
+  checkBeforeCall(tool: string, increment: { calls?: number } = {}): BudgetViolation | null {
     const addCalls = increment.calls ?? 1;
-    const addBytes = increment.bytes ?? 0;
     const perTool = this.perTool[tool];
     const state = this.ensureToolState(tool);
 
@@ -95,15 +87,6 @@ export class Budget {
         used: state.calls,
         max: perTool.max_calls,
         message: `Per-tool call budget exceeded for "${tool}": ${state.calls + addCalls} > ${perTool.max_calls}`,
-      };
-    }
-    if (perTool?.max_bytes != null && state.bytes + addBytes > perTool.max_bytes) {
-      return {
-        limit: 'max_bytes',
-        tool,
-        used: state.bytes,
-        max: perTool.max_bytes,
-        message: `Per-tool byte budget exceeded for "${tool}": ${state.bytes + addBytes} > ${perTool.max_bytes}`,
       };
     }
     if (this.limits.max_tool_calls != null && this.state.tool_calls_used + addCalls > this.limits.max_tool_calls) {
@@ -160,12 +143,6 @@ export class Budget {
           message: `Per-tool call budget exceeded for "${tool}": ${s.calls} / ${limits.max_calls}`,
         };
       }
-      if (limits.max_bytes != null && s.bytes > limits.max_bytes) {
-        return {
-          limit: 'max_bytes', tool, used: s.bytes, max: limits.max_bytes,
-          message: `Per-tool byte budget exceeded for "${tool}": ${s.bytes} / ${limits.max_bytes}`,
-        };
-      }
     }
 
     return null;
@@ -177,8 +154,7 @@ export class Budget {
     for (const [tool, state] of Object.entries(this.perToolState)) {
       const limits = this.perTool[tool];
       perTool[tool] = {
-        calls:  { used: state.calls, max: limits?.max_calls ?? 'unlimited' },
-        bytes:  { used: state.bytes, max: limits?.max_bytes ?? 'unlimited' },
+        calls: { used: state.calls, max: limits?.max_calls ?? 'unlimited' },
       };
     }
     return {
@@ -256,7 +232,6 @@ export function parseBudget(policies: any): Budget {
   for (const [tool, limits] of Object.entries(perTool) as [string, any][]) {
     perToolLimits[tool] = {
       max_calls: limits?.max_calls != null ? Number(limits.max_calls) : undefined,
-      max_bytes: limits?.max_bytes != null ? Number(limits.max_bytes) : undefined,
     };
   }
 

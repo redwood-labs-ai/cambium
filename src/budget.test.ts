@@ -102,13 +102,13 @@ describe('parseBudget (new policies.budget shape)', () => {
     const b = parseBudget({
       budget: {
         per_tool: {
-          tavily: { max_calls: 5, max_bytes: 2_000_000 },
+          tavily: { max_calls: 5 },
           linear: { max_calls: 20 },
         },
       },
     });
-    expect(b.perTool.tavily).toEqual({ max_calls: 5, max_bytes: 2_000_000 });
-    expect(b.perTool.linear).toEqual({ max_calls: 20, max_bytes: undefined });
+    expect(b.perTool.tavily).toEqual({ max_calls: 5 });
+    expect(b.perTool.linear).toEqual({ max_calls: 20 });
   })
 
   it('per_run.max_tool_calls alias also works', () => {
@@ -135,13 +135,6 @@ describe('Budget per-tool gating', () => {
     expect(b.checkBeforeCall('tavily')).not.toBeNull();
   })
 
-  it('checkBeforeCall blocks when bytes would exceed max_bytes', () => {
-    const b = new Budget({}, { tavily: { max_bytes: 1000 } });
-    b.addBytes('tavily', 900);
-    expect(b.checkBeforeCall('tavily', { bytes: 50 })).toBeNull();
-    expect(b.checkBeforeCall('tavily', { bytes: 200 })).not.toBeNull();
-  })
-
   it('per-tool violation names the tool and metric', () => {
     const b = new Budget({}, { tavily: { max_calls: 1 } });
     b.addToolCall('tavily');
@@ -166,12 +159,10 @@ describe('Budget per-tool gating', () => {
   })
 
   it('summary includes per-tool usage', () => {
-    const b = new Budget({}, { tavily: { max_calls: 5, max_bytes: 10_000 } });
+    const b = new Budget({}, { tavily: { max_calls: 5 } });
     b.addToolCall('tavily');
-    b.addBytes('tavily', 1234);
     const s = b.summary();
     expect(s.per_tool.tavily.calls).toEqual({ used: 1, max: 5 });
-    expect(s.per_tool.tavily.bytes).toEqual({ used: 1234, max: 10_000 });
   })
 })
 

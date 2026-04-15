@@ -153,15 +153,15 @@ module Cambium
       #
       #   budget \
       #     per_tool: {
-      #       tavily: { max_calls: 5, max_bytes: 2_000_000 },
+      #       tavily: { max_calls: 5 },
       #       linear: { max_calls: 20 },
       #     },
       #     per_run: { max_calls: 100 }
       #
-      # Metrics supported in v1: max_calls, max_bytes.
-      # (max_cost_usd / max_tokens deferred — see RED-137 design note.)
+      # Metric supported in v1: max_calls only.
+      # (max_tokens / max_cost_usd deferred — see RED-137 design note.)
       def budget(**opts)
-        allowed_metrics = %w[max_calls max_bytes]
+        allowed_metrics = %w[max_calls]
         normalized = {}
 
         if (per_tool = opts[:per_tool])
