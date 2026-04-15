@@ -1,6 +1,13 @@
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import process from 'node:process';
+
+// Framework-builtin tools live next to this file, so their path is
+// pinned to the runner's module directory. Using process.cwd() would
+// break when the runner is invoked from a subdirectory — app tools stay
+// cwd-relative because they're project-local by definition.
+const RUNNER_DIR = dirname(fileURLToPath(import.meta.url));
 import Ajv from 'ajv';
 import { ToolRegistry } from './tools/registry.js';
 import {
@@ -376,6 +383,9 @@ async function main() {
 
   // ── Load tool registry ──────────────────────────────────────────────
   const toolRegistry = new ToolRegistry();
+  // Load framework-builtin tools first, then app-supplied. loadFromDir
+  // overwrites on name collision, so app tools win (RED-221 override hook).
+  await toolRegistry.loadFromDir(join(RUNNER_DIR, 'builtin-tools'));
   await toolRegistry.loadFromDir(join(process.cwd(), 'packages/cambium/app/tools'));
 
   const toolsAllowed: string[] = ir.policies?.tools_allowed ?? [];
@@ -733,7 +743,7 @@ async function main() {
       trace.steps.push({
         ...citResult,
         type: 'GroundingCheck',
-        ok: citationResult?.allValid ?? (citResult.issues.length === 0),
+        ok: citationResult?.allValid ?? ((citResult.issues ?? []).length === 0),
         meta: {
           ...citResult.meta,
           passed: citationResult?.passed?.length ?? 0,
@@ -779,7 +789,7 @@ async function main() {
       trace.steps.push({ type: 'ExtractSignals', ok: true, meta: { state } });
 
       if (triggerDefs.length > 0) {
-        const triggerResults = evaluateTriggers(triggerDefs, state, toolRegistry, toolsAllowed, {
+        const triggerResults = await evaluateTriggers(triggerDefs, state, toolRegistry, toolsAllowed, {
           policy: securityPolicy, budget, traceEvents: trace.steps,
         });
         for (const tr of triggerResults) {

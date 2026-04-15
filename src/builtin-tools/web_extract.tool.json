@@ -2,7 +2,8 @@
   "name": "web_extract",
   "description": "Fetch a web page and extract its text content. Returns the page title and cleaned text.",
   "permissions": {
-    "network": true
+    "network": true,
+    "network_hosts": ["*"]
   },
   "inputSchema": {
     "type": "object",

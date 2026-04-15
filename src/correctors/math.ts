@@ -1,5 +1,5 @@
 import type { CorrectorFn, CorrectorResult, CorrectorIssue } from './types.js';
-import { execute as calc } from '../tools/calculator.js';
+import { execute as calc } from '../builtin-tools/calculator.tool.js';
 
 /**
  * Math corrector: walks the output looking for aggregate fields

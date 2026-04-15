@@ -5,6 +5,7 @@ import { join } from 'node:path'
 
 async function loadedRegistry() {
   const reg = new ToolRegistry()
+  await reg.loadFromDir(join(process.cwd(), 'src/builtin-tools'))
   await reg.loadFromDir(join(process.cwd(), 'packages/cambium/app/tools'))
   return reg
 }

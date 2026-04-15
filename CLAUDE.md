@@ -64,7 +64,7 @@ packages/cambium/
   app/
     gens/           # GenModel DSL files (.cmb.rb)
     systems/        # System prompts (.system.md)
-    tools/          # Tool definitions (.tool.json) + optional handlers (.tool.ts)
+    tools/          # App plugin tools — paired .tool.json + .tool.ts (auto-discovered)
     policies/       # Policy packs (.policy.rb) — bundled security + budget
   src/
     contracts.ts    # TypeBox schemas (single source of truth)
@@ -74,7 +74,12 @@ packages/cambium/
 src/
   runner.ts         # TS runtime (executes IR)
   step-handlers.ts  # Generate, validate, repair, correct handlers
-  tools/            # Tool implementations + registry
+  builtin-tools/    # Framework-provided tools (RED-221): calculator, read_file,
+                    # web_search, web_extract, execute_code — same plugin layout
+                    # (.tool.json + .tool.ts) as app tools. App tools override
+                    # framework builtins with the same name.
+  tools/            # Tool framework infrastructure (registry, ToolContext,
+                    # network-guard, permissions — NOT handlers)
   correctors/       # Built-in correctors (math, dates, currency, citations)
   signals.ts        # Signal extraction engine
   triggers.ts       # Trigger evaluation engine

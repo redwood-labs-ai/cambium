@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { execute } from './calculator.js'
+import { execute } from './calculator.tool.js'
 
 describe('calculator', () => {
   it('computes avg', () => {
