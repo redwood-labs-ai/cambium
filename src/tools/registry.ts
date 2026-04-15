@@ -16,16 +16,18 @@ export type ToolHandler = (input: any, ctx?: ToolContext) => any;
 
 /**
  * ToolRegistry owns both the schemas (`.tool.json`) and the handlers
- * (`.tool.ts` / `.tool.js`) for plugin tools. A plugin tool lives as a
- * paired set of files in the same directory:
+ * (`.tool.ts` / `.tool.js`) for every tool. A tool lives as a paired
+ * set of files in the same directory:
  *
- *   my_tool.tool.json   — schema + permissions (already here)
+ *   my_tool.tool.json   — schema + permissions
  *   my_tool.tool.ts     — handler exporting `execute(input, ctx?)`
  *
- * The registry auto-discovers both. Framework-builtin tools (calculator,
- * read_file, etc.) continue to live in `src/tools/` and get looked up
- * via the `builtinTools` map as a fallback; when a plugin and a builtin
- * share a name, the plugin wins (app code overrides the framework).
+ * Framework-builtin tools (calculator, read_file, web_search, etc.) live
+ * in `src/builtin-tools/`. App-supplied plugin tools live in
+ * `packages/<pkg>/app/tools/`. The runner calls `loadFromDir` on both
+ * in that order — framework first, app second — and the registry's
+ * Map.set overwrites on name collision, so an app tool automatically
+ * shadows a framework builtin with the same name (RED-221 override hook).
  */
 export class ToolRegistry {
   private defs = new Map<string, ToolDefinition>();

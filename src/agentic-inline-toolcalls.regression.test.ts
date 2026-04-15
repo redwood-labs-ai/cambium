@@ -18,6 +18,7 @@ import { ToolRegistry } from './tools/registry.js';
 describe('agentic mode — inline tool call regression', () => {
   it('executes an inline <|tool_call> from Gemma and produces a final JSON answer', async () => {
     const toolRegistry = new ToolRegistry();
+    await toolRegistry.loadFromDir(join(process.cwd(), 'src/builtin-tools'));
     await toolRegistry.loadFromDir(join(process.cwd(), 'packages/cambium/app/tools'));
 
     const ir = {

@@ -1,6 +1,6 @@
 import type { ValidateFunction } from 'ajv';
 import { ToolRegistry } from './tools/registry.js';
-import { builtinTools } from './tools/index.js';
+import { testOverrideHandlers } from './tools/index.js';
 import { runCorrectorPipeline } from './correctors/index.js';
 import type { CorrectorResult } from './correctors/types.js';
 import { schemaPromptBlock } from './schema-describe.js';
@@ -392,17 +392,16 @@ export async function handleToolCall(
     }
   }
 
-  // RED-209: plugin handlers (auto-discovered from app/tools/*.tool.ts)
-  // take precedence over the framework's builtinTools map. A tool that
-  // declares itself in app/tools with the same name as a framework
-  // builtin overrides it — that's the extension point apps use to ship
-  // their own versions of `calculator` / `web_search` / etc.
-  const impl = registry.getHandler(toolName) ?? builtinTools[toolName];
+  // Post-RED-221: all tools — framework-builtin and app-supplied —
+  // are auto-discovered plugin tools, so the registry is authoritative.
+  // testOverrideHandlers is a narrow escape hatch for tests that need
+  // to shim a handler without writing a fixture file; dispatch uses it
+  // only as a fallback when the registry has no handler.
+  const impl = registry.getHandler(toolName) ?? testOverrideHandlers[toolName];
   if (!impl) {
     throw new Error(
-      `No implementation found for tool "${toolName}". Either declare a handler in ` +
-      `app/tools/${toolName}.tool.ts (paired with the .tool.json) or register it in ` +
-      `src/tools/index.ts builtinTools.`,
+      `No implementation found for tool "${toolName}". Declare a handler in ` +
+      `app/tools/${toolName}.tool.ts (paired with the .tool.json).`,
     );
   }
 

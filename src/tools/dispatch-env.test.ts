@@ -6,21 +6,21 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { join } from 'node:path';
 import { handleToolCall } from '../step-handlers.js';
 import { ToolRegistry } from './registry.js';
-import { builtinTools } from './index.js';
+import { testOverrideHandlers } from './index.js';
 import { Budget } from '../budget.js';
 import type { SecurityPolicy } from './permissions.js';
 
+const BUILTINS = join(process.cwd(), 'src/builtin-tools');
+const APP_TOOLS = join(process.cwd(), 'packages/cambium/app/tools');
+
 // Calculator is pure — no network, no filesystem. Good probe tool for
 // testing the dispatch envelope without triggering real side effects.
+// Post-RED-221 it's loaded from the real builtin-tools dir, so we get
+// both the schema and the real handler without any shimming.
 const registry = new ToolRegistry();
+await registry.loadFromDir(BUILTINS);
+
 const registerDef = (def: any) => (registry as any).defs.set(def.name, def);
-registerDef({
-  name: 'calculator',
-  description: 'arithmetic',
-  permissions: { pure: true },
-  inputSchema: {},
-  outputSchema: {},
-});
 
 const allowlist = ['calculator'];
 
@@ -61,7 +61,9 @@ describe('handleToolCall env — budget gate', () => {
 
 describe('handleToolCall env — permission denied via ctx.fetch', () => {
   beforeEach(() => {
-    // Register a shim "net_tool" that always tries to hit a URL via ctx.fetch.
+    // Register a shim "net_tool" that always tries to hit a metadata URL.
+    // Schema is registered directly on the registry; handler goes in
+    // testOverrideHandlers so we don't need a fixture file on disk.
     registerDef({
       name: 'net_tool',
       description: 'tries to fetch something',
@@ -69,7 +71,7 @@ describe('handleToolCall env — permission denied via ctx.fetch', () => {
       inputSchema: {},
       outputSchema: {},
     });
-    builtinTools['net_tool'] = async (_input: any, ctx: any) => {
+    testOverrideHandlers['net_tool'] = async (_input: any, ctx: any) => {
       const res = await ctx.fetch('http://169.254.169.254/latest/meta-data/');
       return { ok: res.ok };
     };
@@ -99,12 +101,11 @@ describe('handleToolCall env — permission denied via ctx.fetch', () => {
   });
 });
 
-describe('handleToolCall — plugin tool dispatch (RED-209)', () => {
-  it('dispatches a plugin tool whose handler was auto-discovered', async () => {
-    // Use a fresh registry loaded from the real app/tools dir so we
-    // exercise the full discovery path (not the shim registerDef above).
+describe('handleToolCall — plugin tool dispatch', () => {
+  it('dispatches a plugin tool whose handler was auto-discovered (RED-209)', async () => {
+    // Uses the echo_plugin fixture in packages/cambium/app/tools/.
     const reg = new ToolRegistry();
-    await reg.loadFromDir(join(process.cwd(), 'packages/cambium/app/tools'));
+    await reg.loadFromDir(APP_TOOLS);
 
     const result = await handleToolCall(
       'echo_plugin', 'run', { message: 'hello from plugin' }, reg, ['echo_plugin'],
@@ -114,19 +115,28 @@ describe('handleToolCall — plugin tool dispatch (RED-209)', () => {
     expect(result.output).toEqual({ echoed: 'hello from plugin' });
   });
 
-  it('prefers plugin handler over a builtin with the same name', async () => {
-    // Register a builtin-map entry for `echo_plugin` that would produce
-    // a different output; prove the plugin handler wins.
-    builtinTools['echo_plugin'] = async () => ({ echoed: 'from-builtin' });
-    try {
-      const reg = new ToolRegistry();
-      await reg.loadFromDir(join(process.cwd(), 'packages/cambium/app/tools'));
-      const result = await handleToolCall(
-        'echo_plugin', 'run', { message: 'from-plugin' }, reg, ['echo_plugin'],
-      );
-      expect(result.output).toEqual({ echoed: 'from-plugin' });
-    } finally {
-      delete builtinTools['echo_plugin'];
-    }
+  it('app-supplied tool overrides a framework builtin with the same name (RED-221)', async () => {
+    // Simulate an app that ships its own `calculator` by writing a
+    // shadow fixture to a temp dir that loads AFTER builtin-tools.
+    const { mkdtempSync, writeFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const override = mkdtempSync(join(tmpdir(), 'cambium-shadow-'));
+    writeFileSync(join(override, 'calculator.tool.json'), JSON.stringify({
+      name: 'calculator',
+      description: 'shadowed',
+      permissions: { pure: true },
+      inputSchema: { type: 'object', properties: {} },
+      outputSchema: { type: 'object', properties: { value: { type: 'string' } } },
+    }));
+    writeFileSync(join(override, 'calculator.tool.ts'), `
+      export function execute() { return { value: 'from-app' }; }
+    `);
+
+    const reg = new ToolRegistry();
+    await reg.loadFromDir(BUILTINS);       // framework first
+    await reg.loadFromDir(override);       // app second — wins on conflict
+
+    const result = await handleToolCall('calculator', 'run', {}, reg, ['calculator']);
+    expect(result.output).toEqual({ value: 'from-app' });
   });
 });

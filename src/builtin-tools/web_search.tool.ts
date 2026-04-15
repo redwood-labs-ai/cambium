@@ -1,5 +1,5 @@
 import process from 'node:process';
-import type { ToolContext } from './tool-context.js';
+import type { ToolContext } from '../tools/tool-context.js';
 
 type SearchResult = { title: string; url: string; snippet: string };
 type SearchOutput = { results: SearchResult[] };
@@ -12,7 +12,13 @@ export async function execute(input: { query: string; limit?: number }, ctx?: To
   const { query, limit = 5 } = input;
   if (!query) throw new Error('web_search: missing query');
 
-  const fetchFn = ctx?.fetch ?? globalThis.fetch;
+  // RED-137 invariant: network tools MUST go through ctx.fetch. No
+  // globalThis.fetch fallback — if ctx is absent we throw rather than
+  // silently bypassing the SSRF guard + IP pinning + allowlist.
+  if (!ctx?.fetch) {
+    throw new Error('web_search: no ToolContext — cannot issue network request without policy enforcement');
+  }
+  const fetchFn = ctx.fetch;
   const tavilyKey = process.env.TAVILY_API_KEY;
   const exaKey = process.env.EXA_API_KEY;
 

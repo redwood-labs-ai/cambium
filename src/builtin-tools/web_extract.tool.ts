@@ -1,4 +1,4 @@
-import type { ToolContext } from './tool-context.js';
+import type { ToolContext } from '../tools/tool-context.js';
 
 const MAX_CONTENT_CHARS = 50_000;
 
@@ -19,8 +19,15 @@ export async function execute(
   const { url } = input;
   if (!url) throw new Error('web_extract: missing url');
 
-  const fetchFn = ctx?.fetch ?? globalThis.fetch;
-  const res = await fetchFn(url, {
+  // RED-137 invariant: network tools MUST go through ctx.fetch (the
+  // policy-bound, SSRF-guarded, IP-pinned fetch). Direct callers (e.g.
+  // unit tests calling execute() without a dispatch wrapper) must
+  // supply a mock ctx — we refuse to fall back to globalThis.fetch,
+  // because that would silently skip every egress check.
+  if (!ctx?.fetch) {
+    throw new Error('web_extract: no ToolContext — cannot issue network request without policy enforcement');
+  }
+  const res = await ctx.fetch(url, {
     headers: {
       'user-agent': 'Cambium/0.1 (web_extract tool)',
       'accept': 'text/html, text/plain, application/json',

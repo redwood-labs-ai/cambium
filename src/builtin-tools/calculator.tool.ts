@@ -1,3 +1,9 @@
+/**
+ * Framework-builtin tool (RED-221). Paired with calculator.tool.json;
+ * auto-discovered by the registry at runner startup, same as any
+ * app-supplied plugin tool.
+ */
+
 export function execute(input: { operation: string; operands: number[] }): { value: number } {
   const { operation, operands } = input;
   if (!operands.length) throw new Error('calculator: empty operands');
