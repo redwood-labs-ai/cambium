@@ -105,3 +105,27 @@ Read these docs before making architectural decisions or adding new primitives.
 - Model: oMLX server at `CAMBIUM_OMLX_BASEURL` (default `http://100.114.183.54:8080`)
 - Qwen 3.5 thinking mode: suppressed via `/no_think` token + `chat_template_kwargs`
 - VS Code: syntax highlighting + LSP (hover, go-to-definition, completions) for `.cmb.rb`
+
+## For contributors
+
+The section above orients new users. This section is for anyone modifying Cambium itself (including Claude).
+
+### Specialist agents
+
+Dedicated Claude Code sub-agents live in `.claude/agents/`. Invoke them (via the `Agent` tool with `subagent_type:`) for concentrated context on specific concerns:
+
+- **`cambium-security`** — reviews changes that touch tool dispatch, egress, the `security`/`budget` policy surface, or tool registration. Enforces the 16 invariants locked in by RED-137 (SSRF guard, IP pinning, dispatch-site gates, budget pre-call checks). **Use proactively** when modifying `src/tools/**`, `src/step-handlers.ts`, `src/runner.ts`, adding a `*.tool.json`, or changing the Ruby DSL's `security`/`budget` shape.
+
+### Non-obvious invariants
+
+Things that will bite you if you don't know them:
+
+- **Egress is enforced at fetch time, not at startup.** The static check in `validateToolPermissions` is an early warning. The real gate is `checkAndResolve` + `guardedFetch`. Tools that call `globalThis.fetch` bypass the entire guard — they must go through `ctx.fetch`. See `docs/GenDSL Docs/S - Tool Sandboxing (RED-137).md`.
+- **Budget check happens before dispatch.** `handleToolCall` calls `budget.checkBeforeCall(toolName)` before invoking the tool. Reordering this lets a tool run once past its cap.
+- **Budget violations terminate agentic loops.** When `checkBeforeCall` throws mid-loop, `budgetExhausted` flips true and the next turn forces final output. Without this the model retries the refused call indefinitely.
+- **The old flat `security allow_network: true` / `allow_filesystem: true` / `allow_exec: true` / `network_hosts_allowlist: [...]` shapes are removed.** The Ruby DSL raises `ArgumentError` on them. Don't reintroduce these anywhere.
+- **`parseBudget` accepts both the new `policies.budget` shape and the legacy `policies.constraints.budget`.** Needed for back-compat with `gaia_solver`.
+
+### Tracking
+
+Cambium work is tracked in Linear. Team: **RED** (Redwood Labs), project: **Cambium**. Branch naming: `RED-<NNN>/<short-slug>`. Commit subjects: `RED-<NNN>: <message>`.
