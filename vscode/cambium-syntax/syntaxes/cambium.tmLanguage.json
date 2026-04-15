@@ -51,21 +51,14 @@
         },
         {
           "comment": "Contract + policy primitives",
-          "match": "^\\s*(uses|corrects|constrain|extract|grounded_in|enrich|repair)\\b",
+          "match": "^\\s*(uses|corrects|constrain|extract|grounded_in|enrich|repair|mode|security)\\b",
           "captures": {
             "1": { "name": "keyword.other.policy.cambium support.function.cambium" }
           }
         },
         {
-          "comment": "Execution mode directive — distinct color from config primitives",
-          "match": "^\\s*(mode)\\b",
-          "captures": {
-            "1": { "name": "keyword.control.directive.cambium" }
-          }
-        },
-        {
           "comment": "Keyword arguments for primitives",
-          "match": "\\b(to|type|path|strategy|passes|unit|target|operation|store_as|max_attempts|stop_on_no_improvement):",
+          "match": "\\b(to|type|path|strategy|passes|unit|target|operation|store_as|max_attempts|stop_on_no_improvement|allow_network|allow_filesystem):",
           "captures": {
             "1": { "name": "variable.parameter.cambium" }
           }

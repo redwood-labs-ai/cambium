@@ -137,6 +137,10 @@ const PRIMITIVE_DOCS = {
     detail: 'Configures the repair policy for validation failures.',
     doc: 'Controls how the runner retries when output fails validation.\n\n```ruby\nrepair max_attempts: 3, stop_on_no_improvement: true\n```\n\n`max_attempts` — max repair iterations (default: from `policies.max_repair_attempts`)\n`stop_on_no_improvement` — halt if error count doesn\'t decrease',
   },
+  security: {
+    detail: 'Configures tool security permissions.',
+    doc: 'Controls filesystem and network access for tool execution.\n\n```ruby\nsecurity allow_network: true, allow_filesystem: true\n```',
+  },
   with: {
     detail: 'Passes context into a generate block.',
     doc: 'Keyword arguments become context fields available during generation.\n\n```ruby\nwith context: document\n```',
@@ -372,6 +376,14 @@ connection.onCompletion((params) => {
     return [
       { label: 'max_attempts:', kind: CompletionItemKind.Property, detail: 'Max repair iterations' },
       { label: 'stop_on_no_improvement:', kind: CompletionItemKind.Property, detail: 'Halt if error count unchanged' },
+    ];
+  }
+
+  // After "security" at start of line → suggest security keywords
+  if (/^\s*security\s*$/.test(line)) {
+    return [
+      { label: 'allow_network:', kind: CompletionItemKind.Property, detail: 'Allow network access for tools' },
+      { label: 'allow_filesystem:', kind: CompletionItemKind.Property, detail: 'Allow filesystem access for tools' },
     ];
   }
 
