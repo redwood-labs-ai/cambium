@@ -40,7 +40,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[S - Secrets & Data Boundaries]]
 
 ## Design notes
-- [[N - Model Identifiers (provider:model)]]
+- [[N - Model Identifiers]]
 - [[N - Failure Modes & Debugging]]
 - [[N - VS Code Language Server]]
 - [[N - Agentic Transactions]]
