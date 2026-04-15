@@ -3,6 +3,7 @@
  * permission-denied trace events — do the right thing at the dispatch site.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
+import { join } from 'node:path';
 import { handleToolCall } from '../step-handlers.js';
 import { ToolRegistry } from './registry.js';
 import { builtinTools } from './index.js';
@@ -95,5 +96,37 @@ describe('handleToolCall env — permission denied via ctx.fetch', () => {
     await expect(
       handleToolCall('net_tool', 'run', {}, registry, ['net_tool'], { traceEvents: trace }),
     ).rejects.toThrow(/Network egress denied.*net_tool.*no network policy/);
+  });
+});
+
+describe('handleToolCall — plugin tool dispatch (RED-209)', () => {
+  it('dispatches a plugin tool whose handler was auto-discovered', async () => {
+    // Use a fresh registry loaded from the real app/tools dir so we
+    // exercise the full discovery path (not the shim registerDef above).
+    const reg = new ToolRegistry();
+    await reg.loadFromDir(join(process.cwd(), 'packages/cambium/app/tools'));
+
+    const result = await handleToolCall(
+      'echo_plugin', 'run', { message: 'hello from plugin' }, reg, ['echo_plugin'],
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toEqual({ echoed: 'hello from plugin' });
+  });
+
+  it('prefers plugin handler over a builtin with the same name', async () => {
+    // Register a builtin-map entry for `echo_plugin` that would produce
+    // a different output; prove the plugin handler wins.
+    builtinTools['echo_plugin'] = async () => ({ echoed: 'from-builtin' });
+    try {
+      const reg = new ToolRegistry();
+      await reg.loadFromDir(join(process.cwd(), 'packages/cambium/app/tools'));
+      const result = await handleToolCall(
+        'echo_plugin', 'run', { message: 'from-plugin' }, reg, ['echo_plugin'],
+      );
+      expect(result.output).toEqual({ echoed: 'from-plugin' });
+    } finally {
+      delete builtinTools['echo_plugin'];
+    }
   });
 });

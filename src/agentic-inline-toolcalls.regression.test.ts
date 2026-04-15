@@ -18,7 +18,7 @@ import { ToolRegistry } from './tools/registry.js';
 describe('agentic mode — inline tool call regression', () => {
   it('executes an inline <|tool_call> from Gemma and produces a final JSON answer', async () => {
     const toolRegistry = new ToolRegistry();
-    toolRegistry.loadFromDir(join(process.cwd(), 'packages/cambium/app/tools'));
+    await toolRegistry.loadFromDir(join(process.cwd(), 'packages/cambium/app/tools'));
 
     const ir = {
       model: { id: 'omlx:gemma-mock', max_tokens: 512, temperature: 0.2 },
