@@ -94,10 +94,99 @@ module Cambium
         _cambium_defaults[:constraints][key.to_s] = opts
       end
 
-      # Security: declare security policy for tool execution.
-      #   security allow_network: true, network_hosts: ["api.example.com"]
+      # Security: declare tool-execution policy.
+      #
+      #   security \
+      #     network: {
+      #       allowlist: ["api.tavily.com"],
+      #       denylist:  [],
+      #       block_private:  true,   # default true when network: present
+      #       block_metadata: true,   # default true when network: present
+      #     },
+      #     filesystem: { roots: ["./examples"] }
+      #
+      # Omitting `network:` denies all egress. Omitting `filesystem:` denies
+      # all filesystem access.
       def security(**opts)
-        _cambium_defaults[:security] = opts.transform_keys(&:to_s)
+        removed = opts.keys.map(&:to_s) & %w[allow_network allow_filesystem allow_exec network_hosts_allowlist]
+        unless removed.empty?
+          raise ArgumentError,
+                "security #{removed.join(', ')} was removed in RED-137. " \
+                "Use the nested form: security network: { allowlist: [...] }. " \
+                "See docs/GenDSL Docs/S - Tool Sandboxing (RED-137).md"
+        end
+
+        normalized = {}
+
+        if (net = opts[:network])
+          raise ArgumentError, "security network: must be a Hash" unless net.is_a?(Hash)
+          normalized['network'] = {
+            'allowlist'      => Array(net[:allowlist] || net['allowlist']),
+            'denylist'       => Array(net[:denylist]  || net['denylist']),
+            'block_private'  => net.fetch(:block_private)  { net.fetch('block_private',  true) },
+            'block_metadata' => net.fetch(:block_metadata) { net.fetch('block_metadata', true) },
+          }
+        end
+
+        if (fs = opts[:filesystem])
+          raise ArgumentError, "security filesystem: must be a Hash" unless fs.is_a?(Hash)
+          normalized['filesystem'] = {
+            'roots' => Array(fs[:roots] || fs['roots']),
+          }
+        end
+
+        # Minimal exec slot — proper sandbox (seccomp/container) is a follow-up ticket.
+        if (ex = opts[:exec])
+          raise ArgumentError, "security exec: must be a Hash" unless ex.is_a?(Hash)
+          normalized['exec'] = {
+            'allowed' => ex.fetch(:allowed) { ex.fetch('allowed', false) },
+          }
+        end
+
+        unknown = opts.keys.map(&:to_s) - %w[network filesystem exec]
+        raise ArgumentError, "unknown security keys: #{unknown.join(', ')}" unless unknown.empty?
+
+        _cambium_defaults[:security] = normalized
+      end
+
+      # Budget: per-tool and per-run resource caps for tool execution.
+      #
+      #   budget \
+      #     per_tool: {
+      #       tavily: { max_calls: 5 },
+      #       linear: { max_calls: 20 },
+      #     },
+      #     per_run: { max_calls: 100 }
+      #
+      # Metric supported in v1: max_calls only.
+      # (max_tokens / max_cost_usd deferred — see RED-137 design note.)
+      def budget(**opts)
+        allowed_metrics = %w[max_calls]
+        normalized = {}
+
+        if (per_tool = opts[:per_tool])
+          raise ArgumentError, "budget per_tool: must be a Hash" unless per_tool.is_a?(Hash)
+          normalized['per_tool'] = per_tool.each_with_object({}) do |(tool, limits), h|
+            raise ArgumentError, "budget per_tool[#{tool}] must be a Hash" unless limits.is_a?(Hash)
+            limits_str = limits.transform_keys(&:to_s)
+            unknown = limits_str.keys - allowed_metrics
+            raise ArgumentError, "unsupported budget metric(s) for #{tool}: #{unknown.join(', ')}" unless unknown.empty?
+            h[tool.to_s] = limits_str
+          end
+        end
+
+        if (per_run = opts[:per_run])
+          raise ArgumentError, "budget per_run: must be a Hash" unless per_run.is_a?(Hash)
+          per_run_str = per_run.transform_keys(&:to_s)
+          unknown = per_run_str.keys - allowed_metrics
+          raise ArgumentError, "unsupported budget metric(s) for per_run: #{unknown.join(', ')}" unless unknown.empty?
+          normalized['per_run'] = per_run_str
+        end
+
+        unknown = opts.keys.map(&:to_s) - %w[per_tool per_run]
+        raise ArgumentError, "unknown budget keys: #{unknown.join(', ')}" unless unknown.empty?
+
+        _cambium_defaults[:budget] = normalized
       end
 
       # Grounding: declare that outputs must be grounded in a source.

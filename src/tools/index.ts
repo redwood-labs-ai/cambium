@@ -3,8 +3,9 @@ import { execute as readFileExecute } from './read_file.js';
 import { execute as executeCodeExecute } from './execute_code.js';
 import { execute as webSearchExecute } from './web_search.js';
 import { execute as webExtractExecute } from './web_extract.js';
+import type { ToolContext } from './tool-context.js';
 
-export const builtinTools: Record<string, (input: any) => any> = {
+export const builtinTools: Record<string, (input: any, ctx?: ToolContext) => any> = {
   calculator: calculatorExecute,
   read_file: readFileExecute,
   execute_code: executeCodeExecute,

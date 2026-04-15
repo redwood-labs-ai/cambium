@@ -1,4 +1,5 @@
 import process from 'node:process';
+import type { ToolContext } from './tool-context.js';
 
 type SearchResult = { title: string; url: string; snippet: string };
 type SearchOutput = { results: SearchResult[] };
@@ -7,21 +8,24 @@ type SearchOutput = { results: SearchResult[] };
  * Web search tool. Supports Tavily and Exa backends.
  * Backend selected by available API key: TAVILY_API_KEY or EXA_API_KEY.
  */
-export async function execute(input: { query: string; limit?: number }): Promise<SearchOutput> {
+export async function execute(input: { query: string; limit?: number }, ctx?: ToolContext): Promise<SearchOutput> {
   const { query, limit = 5 } = input;
   if (!query) throw new Error('web_search: missing query');
 
+  const fetchFn = ctx?.fetch ?? globalThis.fetch;
   const tavilyKey = process.env.TAVILY_API_KEY;
   const exaKey = process.env.EXA_API_KEY;
 
-  if (tavilyKey) return searchTavily(query, limit, tavilyKey);
-  if (exaKey) return searchExa(query, limit, exaKey);
+  if (tavilyKey) return searchTavily(query, limit, tavilyKey, fetchFn);
+  if (exaKey) return searchExa(query, limit, exaKey, fetchFn);
 
   throw new Error('web_search: no search backend configured. Set TAVILY_API_KEY or EXA_API_KEY.');
 }
 
-async function searchTavily(query: string, limit: number, apiKey: string): Promise<SearchOutput> {
-  const res = await fetch('https://api.tavily.com/search', {
+type FetchFn = (url: string, init?: RequestInit) => Promise<Response>;
+
+async function searchTavily(query: string, limit: number, apiKey: string, fetchFn: FetchFn): Promise<SearchOutput> {
+  const res = await fetchFn('https://api.tavily.com/search', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -44,8 +48,8 @@ async function searchTavily(query: string, limit: number, apiKey: string): Promi
   return { results };
 }
 
-async function searchExa(query: string, limit: number, apiKey: string): Promise<SearchOutput> {
-  const res = await fetch('https://api.exa.ai/search', {
+async function searchExa(query: string, limit: number, apiKey: string, fetchFn: FetchFn): Promise<SearchOutput> {
+  const res = await fetchFn('https://api.exa.ai/search', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',

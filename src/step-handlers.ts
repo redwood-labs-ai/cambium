@@ -5,6 +5,9 @@ import { runCorrectorPipeline } from './correctors/index.js';
 import type { CorrectorResult } from './correctors/types.js';
 import { schemaPromptBlock } from './schema-describe.js';
 import { parseInlineToolCalls, stripInlineToolCalls } from './inline-tool-calls.js';
+import type { SecurityPolicy } from './tools/permissions.js';
+import type { Budget } from './budget.js';
+import { buildToolContext } from './tools/tool-context.js';
 
 export type StepResult = {
   type: string;
@@ -333,12 +336,32 @@ export function handleCorrect(
 }
 
 // ── ToolCall ──────────────────────────────────────────────────────────
+/**
+ * Optional per-run environment threaded into handleToolCall. When provided,
+ * each fields enables an extra guard at the dispatch site:
+ *
+ *   - policy   → builds a ToolContext with a policy-bound fetch (SSRF guard)
+ *                and emits tool.permission.granted/denied trace events.
+ *   - budget   → runs checkBeforeCall and emits tool.budget.exceeded; refuses
+ *                dispatch if the call would violate any per-tool or per-run limit.
+ *   - traceEvents → array to append structured events into (runner's trace.steps).
+ *
+ * All fields are optional; unit tests and scripts that call handleToolCall
+ * without an env still work exactly as before.
+ */
+export type ToolCallEnv = {
+  policy?: SecurityPolicy;
+  budget?: Budget;
+  traceEvents?: any[];
+};
+
 export async function handleToolCall(
   toolName: string,
   operation: string,
   input: any,
   registry: ToolRegistry,
   allowlist: string[],
+  env: ToolCallEnv = {},
 ): Promise<StepResult> {
   const started = Date.now();
 
@@ -350,8 +373,53 @@ export async function handleToolCall(
   const impl = builtinTools[toolName];
   if (!impl) throw new Error(`No built-in implementation for tool "${toolName}"`);
 
-  // Support both sync and async tool implementations
-  const result = await Promise.resolve(impl(input));
+  const events = env.traceEvents;
+
+  // Budget pre-call gate. Refuses the call before spending.
+  if (env.budget) {
+    const violation = env.budget.checkBeforeCall(toolName);
+    if (violation) {
+      if (events) events.push({
+        type: 'tool.budget.exceeded',
+        tool: toolName,
+        metric: violation.limit,
+        current: violation.used,
+        increment: 1,
+        limit: violation.max,
+      });
+      const err: any = new Error(violation.message);
+      err.budgetViolation = violation;
+      throw err;
+    }
+  }
+
+  // Build the ToolContext (policy-bound fetch for network tools).
+  const ctx = buildToolContext({
+    toolName,
+    policy: env.policy?.network,
+  });
+
+  let result: any;
+  try {
+    result = await Promise.resolve(impl(input, ctx));
+  } catch (e: any) {
+    // If the network guard denied the call, emit a structured trace event.
+    if (e?.guardDecision && events) {
+      const d = e.guardDecision;
+      events.push({
+        type: 'tool.permission.denied',
+        tool: toolName,
+        host: d.host,
+        reason: d.reason,
+        rule: d.rule,
+        resolved_ips: d.resolved_ips,
+      });
+    }
+    throw e;
+  }
+
+  // Record the call against the per-tool / per-run budget.
+  env.budget?.addToolCall(toolName);
 
   return {
     type: 'ToolCall',
@@ -385,6 +453,7 @@ export async function handleAgenticGenerate(
   generateWithTools: GenerateWithToolsFn,
   extractJson: ExtractJsonFn,
   maxToolCalls: number,
+  env: ToolCallEnv = {},
 ): Promise<{ raw: string; parsed: any; result: StepResult; traceSteps: StepResult[] }> {
   const doc = ir.context?.document;
   const constraints = ir.policies?.constraints ?? {};
@@ -437,6 +506,11 @@ export async function handleAgenticGenerate(
   let totalToolCalls = 0;
   let finalRaw = '';
   let finalParsed: any = undefined;
+  // RED-137: any budget violation during the loop flips this to true, which
+  // short-circuits the next turn to a final-output-only call. Avoids the
+  // denial-loop pathology where the model retries the same tool call
+  // dozens of times against a per-tool cap that's never going to change.
+  let budgetExhausted = false;
 
   const log = (msg: string) => process.stderr.write(`  ${msg}\n`);
   log(`⟳ Agentic loop started (max ${maxToolCalls} tool calls)`);
@@ -444,11 +518,13 @@ export async function handleAgenticGenerate(
   for (let turn = 0; turn < maxToolCalls + 1; turn++) {
     const turnStarted = Date.now();
 
-    // On the last allowed turn, omit tools to force the model to produce content
-    const toolsForTurn = totalToolCalls >= maxToolCalls ? [] : toolsOpenAI;
-    if (toolsForTurn.length === 0 && totalToolCalls > 0) {
-      log(`⟳ Turn ${turn + 1}: forcing final output (tool call limit reached)`);
-      // Add an explicit instruction to produce the final answer
+    // On the last allowed turn (or after a budget violation), omit tools to
+    // force the model to produce content from what it already has.
+    const forceFinal = totalToolCalls >= maxToolCalls || budgetExhausted;
+    const toolsForTurn = forceFinal ? [] : toolsOpenAI;
+    if (forceFinal && totalToolCalls > 0) {
+      const reason = budgetExhausted ? 'budget exhausted' : 'tool call limit reached';
+      log(`⟳ Turn ${turn + 1}: forcing final output (${reason})`);
       messages.push({
         role: 'user',
         content: 'You have gathered enough information. STOP calling tools. Produce your final JSON output now. Output MUST be JSON only, starting with { and ending with }.',
@@ -505,7 +581,7 @@ export async function handleAgenticGenerate(
 
         let toolResult: any;
         try {
-          const tcResult = await handleToolCall(fnName, fnArgs.operation ?? fnName, fnArgs, toolRegistry, toolsAllowed);
+          const tcResult = await handleToolCall(fnName, fnArgs.operation ?? fnName, fnArgs, toolRegistry, toolsAllowed, env);
           toolResult = tcResult.output;
           toolResults.push(tcResult);
           const preview = JSON.stringify(toolResult).slice(0, 120);
@@ -519,6 +595,9 @@ export async function handleAgenticGenerate(
             errors: [{ message: e.message }],
             meta: { tool: fnName, input: fnArgs },
           });
+          // Budget violations are terminal for the loop — the limit won't
+          // change no matter how many times the model retries.
+          if (e.budgetViolation) budgetExhausted = true;
         }
 
         // Append tool result to message history

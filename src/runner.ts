@@ -374,7 +374,7 @@ async function main() {
   };
 
   // ── Budget tracking ─────────────────────────────────────────────────
-  const budget = parseBudget(ir.policies?.constraints);
+  const budget = parseBudget(ir.policies);
 
   /** Track usage/tool calls from a trace step and check budget. Throws on violation. */
   function budgetTrack(step: any): void {
@@ -464,6 +464,7 @@ async function main() {
       const agenticResult = await handleAgenticGenerate(
         step, ir, schema, toolsOpenAI, toolRegistry, toolsAllowed,
         generateWithTools, extractJsonObject, maxToolCalls,
+        { policy: securityPolicy, budget, traceEvents: trace.steps },
       );
 
       trace.steps.push(agenticResult.result);
@@ -723,7 +724,9 @@ async function main() {
       trace.steps.push({ type: 'ExtractSignals', ok: true, meta: { state } });
 
       if (triggerDefs.length > 0) {
-        const triggerResults = evaluateTriggers(triggerDefs, state, toolRegistry, toolsAllowed);
+        const triggerResults = evaluateTriggers(triggerDefs, state, toolRegistry, toolsAllowed, {
+          policy: securityPolicy, budget, traceEvents: trace.steps,
+        });
         for (const tr of triggerResults) {
           trace.steps.push(tr.traceEntry);
           if (tr.fired && tr.target && tr.value !== undefined) {

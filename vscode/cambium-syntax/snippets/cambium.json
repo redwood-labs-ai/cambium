@@ -83,9 +83,26 @@
   "Security config": {
     "prefix": "security",
     "body": [
-      "security allow_network: ${1|true,false|}, allow_filesystem: ${2|true,false|}"
+      "security \\",
+      "  network: {",
+      "    allowlist: [${1:\"api.example.com\"}],",
+      "    denylist: [],",
+      "    block_private: true,",
+      "    block_metadata: true,",
+      "  }"
     ],
-    "description": "Tool security permissions"
+    "description": "Tool egress policy (RED-137). Add filesystem: { roots: [...] } / exec: { allowed: true } as needed."
+  },
+  "Budget config": {
+    "prefix": "budget",
+    "body": [
+      "budget \\",
+      "  per_tool: {",
+      "    ${1:tool_name}: { max_calls: ${2:5} },",
+      "  },",
+      "  per_run: { max_calls: ${3:100} }"
+    ],
+    "description": "Per-tool and per-run call budgets (RED-137)."
   },
   "Compound review": {
     "prefix": "review",

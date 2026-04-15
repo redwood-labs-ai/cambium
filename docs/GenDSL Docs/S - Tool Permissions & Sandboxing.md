@@ -1,5 +1,16 @@
 # Security: Tool Permissions & Sandboxing
 
+> **Superseded by [[S - Tool Sandboxing (RED-137)]].**
+> The flat `security allow_network: true` / `allow_filesystem: true` / `allow_exec: true`
+> / `network_hosts_allowlist: [...]` switches described below have been removed. Use
+> the nested `security network: { allowlist: [...], ... }, filesystem: { roots: [...] }, exec: { allowed: true }`
+> form. The runtime now enforces egress at fetch time (SSRF guard, DNS
+> resolution of all addresses, IP pinning) and supports per-tool call budgets via
+> the new top-level `budget` primitive.
+>
+> This doc is retained for historical context on the static-check design; the
+> tool-side declaration shape (`permissions` block in `.tool.json`) is unchanged.
+
 **Doc ID:** gen-dsl/security/tools
 
 ## Purpose
@@ -40,12 +51,17 @@ Prevent tool-enabled generation from becoming "prompt-to-RCE." Every tool declar
 
 ## Security policy (DSL)
 
+Post-RED-137 syntax — see [[S - Tool Sandboxing (RED-137)]] for the full shape:
+
 ```ruby
 class Agent < GenModel
   uses :calculator, :api_client
-  security allow_network: true, network_hosts_allowlist: ["api.example.com"]
+  security network: { allowlist: ["api.example.com"] }
 end
 ```
+
+The legacy `allow_network: true, network_hosts_allowlist: [...]` form is no
+longer accepted and will raise `ArgumentError` at compile time.
 
 ## Default policy
 Deny everything. Pure tools always pass. This is the safe default — you must explicitly opt in to network, filesystem, or exec.

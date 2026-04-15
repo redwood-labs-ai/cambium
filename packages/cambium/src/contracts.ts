@@ -67,3 +67,19 @@ export const AnalysisReport = Type.Object(
   },
   { additionalProperties: false, $id: 'AnalysisReport' }
 )
+
+export const WebResearchResult = Type.Object(
+  {
+    summary: Type.String(),
+    sources: Type.Array(
+      Type.Object(
+        {
+          title: Type.String(),
+          url: Type.String(),
+        },
+        { additionalProperties: false }
+      )
+    ),
+  },
+  { additionalProperties: false, $id: 'WebResearchResult' }
+)

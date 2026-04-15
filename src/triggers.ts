@@ -1,6 +1,6 @@
 import type { SignalState } from './signals.js';
 import { ToolRegistry } from './tools/registry.js';
-import { handleToolCall } from './step-handlers.js';
+import { handleToolCall, type ToolCallEnv } from './step-handlers.js';
 
 export type TriggerDef = {
   on: string;           // signal name to watch
@@ -26,6 +26,7 @@ export async function evaluateTriggers(
   state: SignalState,
   toolRegistry: ToolRegistry,
   toolsAllowed: string[],
+  env: ToolCallEnv = {},
 ): TriggerResult[] {
   const results: TriggerResult[] = [];
 
@@ -64,6 +65,7 @@ export async function evaluateTriggers(
         toolInput,
         toolRegistry,
         toolsAllowed,
+        env,
       );
 
       const computedValue = tcResult.output?.value;

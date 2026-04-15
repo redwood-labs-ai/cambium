@@ -138,8 +138,12 @@ const PRIMITIVE_DOCS = {
     doc: 'Controls how the runner retries when output fails validation.\n\n```ruby\nrepair max_attempts: 3, stop_on_no_improvement: true\n```\n\n`max_attempts` — max repair iterations (default: from `policies.max_repair_attempts`)\n`stop_on_no_improvement` — halt if error count doesn\'t decrease',
   },
   security: {
-    detail: 'Configures tool security permissions.',
-    doc: 'Controls filesystem and network access for tool execution.\n\n```ruby\nsecurity allow_network: true, allow_filesystem: true\n```',
+    detail: 'Configures tool-execution security policy (RED-137).',
+    doc: 'Nested blocks for network egress, filesystem access, and exec.\n\n```ruby\nsecurity \\\n  network: {\n    allowlist: ["api.tavily.com"],\n    denylist: [],\n    block_private: true,   # default\n    block_metadata: true,  # default\n  },\n  filesystem: { roots: ["./examples"] },\n  exec: { allowed: true }\n```\n\nNetwork omitted = all egress denied. `block_private` blocks RFC1918/link-local/loopback; `block_metadata` blocks cloud metadata hosts. The legacy `allow_network: true` switch is no longer accepted.',
+  },
+  budget: {
+    detail: 'Per-tool and per-run call budgets (RED-137).',
+    doc: 'Caps how many times each tool can be invoked in a run.\n\n```ruby\nbudget \\\n  per_tool: {\n    tavily: { max_calls: 5 },\n    linear: { max_calls: 20 },\n  },\n  per_run: { max_calls: 100 }\n```\n\nv1 supports `max_calls` only. Byte/token/USD budgets deferred.',
   },
   with: {
     detail: 'Passes context into a generate block.',
@@ -382,8 +386,17 @@ connection.onCompletion((params) => {
   // After "security" at start of line → suggest security keywords
   if (/^\s*security\s*$/.test(line)) {
     return [
-      { label: 'allow_network:', kind: CompletionItemKind.Property, detail: 'Allow network access for tools' },
-      { label: 'allow_filesystem:', kind: CompletionItemKind.Property, detail: 'Allow filesystem access for tools' },
+      { label: 'network:',    kind: CompletionItemKind.Property, detail: 'Network egress policy { allowlist, denylist, block_private, block_metadata }' },
+      { label: 'filesystem:', kind: CompletionItemKind.Property, detail: 'Filesystem policy { roots }' },
+      { label: 'exec:',       kind: CompletionItemKind.Property, detail: 'Exec policy { allowed }' },
+    ];
+  }
+
+  // After "budget" at start of line → suggest budget keywords
+  if (/^\s*budget\s*$/.test(line)) {
+    return [
+      { label: 'per_tool:', kind: CompletionItemKind.Property, detail: 'Per-tool limits { toolname: { max_calls } }' },
+      { label: 'per_run:',  kind: CompletionItemKind.Property, detail: 'Per-run limits { max_calls }' },
     ];
   }
 
