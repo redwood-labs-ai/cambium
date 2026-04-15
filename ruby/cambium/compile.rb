@@ -110,7 +110,8 @@ ir = {
     'correctors' => (defs[:correctors] || []),
     'constraints' => (defs[:constraints] || {}),
     'grounding' => defs[:grounding],
-    'security' => defs[:security]
+    'security' => defs[:security],
+    'budget' => defs[:budget]
   },
   'returnSchemaId' => defs[:returnSchema],
   'context' => {

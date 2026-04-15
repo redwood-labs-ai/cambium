@@ -11,7 +11,9 @@ class GaiaSolver < GenModel
   returns GaiaAnswer
 
   uses :web_search, :web_extract, :calculator, :execute_code
-  security allow_network: true, allow_exec: true
+  security \
+    network: { allowlist: ["*"] },
+    exec: { allowed: true }
 
   constrain :budget, max_tool_calls: 4, max_duration: "8m"
 
