@@ -506,6 +506,11 @@ export async function handleAgenticGenerate(
   let totalToolCalls = 0;
   let finalRaw = '';
   let finalParsed: any = undefined;
+  // RED-137: any budget violation during the loop flips this to true, which
+  // short-circuits the next turn to a final-output-only call. Avoids the
+  // denial-loop pathology where the model retries the same tool call
+  // dozens of times against a per-tool cap that's never going to change.
+  let budgetExhausted = false;
 
   const log = (msg: string) => process.stderr.write(`  ${msg}\n`);
   log(`⟳ Agentic loop started (max ${maxToolCalls} tool calls)`);
@@ -513,11 +518,13 @@ export async function handleAgenticGenerate(
   for (let turn = 0; turn < maxToolCalls + 1; turn++) {
     const turnStarted = Date.now();
 
-    // On the last allowed turn, omit tools to force the model to produce content
-    const toolsForTurn = totalToolCalls >= maxToolCalls ? [] : toolsOpenAI;
-    if (toolsForTurn.length === 0 && totalToolCalls > 0) {
-      log(`⟳ Turn ${turn + 1}: forcing final output (tool call limit reached)`);
-      // Add an explicit instruction to produce the final answer
+    // On the last allowed turn (or after a budget violation), omit tools to
+    // force the model to produce content from what it already has.
+    const forceFinal = totalToolCalls >= maxToolCalls || budgetExhausted;
+    const toolsForTurn = forceFinal ? [] : toolsOpenAI;
+    if (forceFinal && totalToolCalls > 0) {
+      const reason = budgetExhausted ? 'budget exhausted' : 'tool call limit reached';
+      log(`⟳ Turn ${turn + 1}: forcing final output (${reason})`);
       messages.push({
         role: 'user',
         content: 'You have gathered enough information. STOP calling tools. Produce your final JSON output now. Output MUST be JSON only, starting with { and ending with }.',
@@ -588,6 +595,9 @@ export async function handleAgenticGenerate(
             errors: [{ message: e.message }],
             meta: { tool: fnName, input: fnArgs },
           });
+          // Budget violations are terminal for the loop — the limit won't
+          // change no matter how many times the model retries.
+          if (e.budgetViolation) budgetExhausted = true;
         }
 
         // Append tool result to message history
