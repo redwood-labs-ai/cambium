@@ -45,6 +45,7 @@ Look at the trace (`runs/<run_id>/trace.json`) and help them tune the agent — 
 - **`grounded_in`**: citation enforcement with verbatim quote verification
 - **`mode :agentic`**: multi-turn tool-use loop (model calls tools during generation)
 - **`system`**: `:symbol` resolves to `app/systems/<name>.system.md`, string is inline
+- **`security`** / **`budget`**: tool-execution policy + per-tool/per-run call caps. Inline form (`security network: { allowlist: [...] }`) or pull a bundled pack by symbol (`security :research_defaults` → `app/policies/<name>.policy.rb`). Per-slot mixing rule: each slot is set by exactly one source. See [`docs/GenDSL Docs/S - Tool Sandboxing (RED-137).md`](docs/GenDSL%20Docs/S%20-%20Tool%20Sandboxing%20%28RED-137%29.md) and [`P - Policy Packs (RED-214)`](docs/GenDSL%20Docs/P%20-%20Policy%20Packs%20%28RED-214%29.md).
 
 ## CLI commands
 
@@ -62,6 +63,7 @@ packages/cambium/
     gens/           # GenModel DSL files (.cmb.rb)
     systems/        # System prompts (.system.md)
     tools/          # Tool definitions (.tool.json)
+    policies/       # Policy packs (.policy.rb) — bundled security + budget
   src/
     contracts.ts    # TypeBox schemas (single source of truth)
   tests/            # Vitest tests
@@ -125,6 +127,8 @@ Things that will bite you if you don't know them:
 - **Budget violations terminate agentic loops.** When `checkBeforeCall` throws mid-loop, `budgetExhausted` flips true and the next turn forces final output. Without this the model retries the refused call indefinitely.
 - **The old flat `security allow_network: true` / `allow_filesystem: true` / `allow_exec: true` / `network_hosts_allowlist: [...]` shapes are removed.** The Ruby DSL raises `ArgumentError` on them. Don't reintroduce these anywhere.
 - **`parseBudget` accepts both the new `policies.budget` shape and the legacy `policies.constraints.budget`.** Needed for back-compat with `gaia_solver`.
+- **Policy packs use per-slot mixing (RED-214).** `security` and `budget` accept either a Symbol pack name (`security :research_defaults`) or kwargs, but never both in one call. Across calls, each slot (`network` / `filesystem` / `exec` / `per_tool` / `per_run`) can be set by exactly one source — pack OR inline. The accumulator `_cambium_add_slots` is the enforcement point. The IR carries `_packs: [...]` listing contributing pack names; this is trace-only metadata — nothing on the TS side reads it for control flow.
+- **Pack file names are restricted to `/\A[a-z][a-z0-9_]*\z/`.** A symbol like `:"../foo"` would otherwise interpolate into `File.join` and escape `app/policies/`. The check lives in `PolicyPack.load`. Don't relax it.
 
 ### Tracking
 

@@ -17,6 +17,8 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[P - Compound Generation]]
 - [[P - enrich]]
 - [[P - mode]]
+- [[P - Policy Packs (RED-214)]] — named bundles for `security` + `budget`
+- [[P - Memory (design note)]] — design draft, no implementation yet (RED-215)
 
 ## Runtime + compilation
 - [[C - IR (Intermediate Representation)]]
@@ -33,7 +35,8 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[D - Packages & Workspaces (Scale-Invariant)]]
 
 ## Security model
-- [[S - Tool Permissions & Sandboxing]]
+- [[S - Tool Sandboxing (RED-137)]] — current spec: nested `security network:`, SSRF guard, IP pinning, per-tool budgets
+- [[S - Tool Permissions & Sandboxing]] — superseded by RED-137; retained for static-check design context
 - [[S - Secrets & Data Boundaries]]
 
 ## Design notes
