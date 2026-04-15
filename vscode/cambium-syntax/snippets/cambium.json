@@ -80,6 +80,13 @@
     ],
     "description": "Validation repair policy configuration"
   },
+  "Security config": {
+    "prefix": "security",
+    "body": [
+      "security allow_network: ${1|true,false|}, allow_filesystem: ${2|true,false|}"
+    ],
+    "description": "Tool security permissions"
+  },
   "Compound review": {
     "prefix": "review",
     "body": [
