@@ -1,8 +1,9 @@
 # RED-137: Tool Sandboxing — Network Egress + Budgets
 
 **Doc ID:** gen-dsl/security/sandboxing
-**Status:** Design draft
+**Status:** Shipped
 **Supersedes (extends):** [[S - Tool Permissions & Sandboxing]]
+**Related:** [[P - Policy Packs (RED-214)]] — bundles the `security` and `budget` shapes defined here into named, reusable packs.
 
 ## Problem
 

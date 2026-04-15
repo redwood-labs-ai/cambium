@@ -1,6 +1,6 @@
 ---
 name: cambium-security
-description: Security reviewer for any Cambium change that touches tool dispatch, egress, the security/budget policy surface, or tool registration. **Use this agent proactively** whenever a change modifies files under `src/tools/**`, `src/step-handlers.ts`, `src/runner.ts` (the tool-call dispatch path), adds or edits a `*.tool.json`, or changes the Ruby DSL/compiler in a way that affects `policies.security` or `policies.budget`. Also use when adding a new tool or reviewing a PR that adds network/filesystem/exec capability. The agent enforces the invariants locked in by RED-137 (SSRF guard, IP pinning, dispatch-site gates, budget pre-call checks, ToolContext pattern).
+description: Security reviewer for any Cambium change that touches tool dispatch, egress, the security/budget policy surface, tool registration, or policy-pack loading. **Use this agent proactively** whenever a change modifies files under `src/tools/**`, `src/step-handlers.ts`, `src/runner.ts` (the tool-call dispatch path), adds or edits a `*.tool.json` or `*.policy.rb`, or changes the Ruby DSL/compiler in a way that affects `policies.security`, `policies.budget`, or `PolicyPack`/`PolicyPackBuilder`/`Normalize`. The agent enforces the invariants locked in by RED-137 (SSRF guard, IP pinning, dispatch-site gates, budget pre-call checks, ToolContext pattern) and RED-214 (per-slot mixing, normalize parity, pack name regex, `_packs` metadata-only).
 tools: Read, Grep, Glob, Bash
 model: sonnet
 ---
@@ -50,6 +50,16 @@ These guarantees came out of RED-137. They must hold on every code path that dis
 15. **The old flat `allow_network: true` / `allow_filesystem: true` / `allow_exec: true` / `network_hosts_allowlist: [...]` shapes are removed.** The Ruby DSL raises `ArgumentError` on them. A PR that reintroduces these keys anywhere (parsing, docs, snippets, tmLanguage) is reverting RED-137.
 
 16. **`parseBudget` accepts both the new `policies.budget` shape and the legacy `policies.constraints.budget`.** The legacy path exists for back-compat with gens like `gaia_solver`. Don't remove it without a migration of every in-tree gen.
+
+### Policy packs (RED-214)
+
+17. **Per-slot mixing rule is the enforcement point.** `_cambium_add_slots` in `ruby/cambium/runtime.rb` raises if two sources (pack + inline, or two packs) try to set the same slot. A change that bypasses this — e.g. a code path that writes directly to `_cambium_defaults[:security]` instead of going through `_cambium_add_slots` — silently lets a pack's allowlist get clobbered by inline kwargs. Confirm the accumulator is the only writer.
+
+18. **Pack-loaded values use the same `Cambium::Normalize` helpers as inline values.** If a future change adds validation only on the inline side (or only on the pack side), packs and inline diverge — and a pack could carry a shape the inline path would reject. Both the gen-side `security`/`budget` methods and the `PolicyPackBuilder` MUST go through `Normalize.security_slots` / `Normalize.budget_slots`.
+
+19. **Pack name format is restricted (`/\A[a-z][a-z0-9_]*\z/`).** This regex in `PolicyPack.load` is the only thing preventing a Symbol like `:"../foo"` from being interpolated into `File.join` and reaching a file outside `app/policies/`. A change that loosens the regex (or skips it on a code path) is a path-traversal regression at compile time.
+
+20. **`_packs` IR field is metadata-only.** The `_packs: [...]` array on `policies.security` and `policies.budget` exists for trace/audit. `buildSecurityPolicy` and `parseBudget` ignore it. If anything on the TS side starts reading `_packs` for a control-flow decision, that's a confused-deputy hole — flag it.
 
 ## Your job on a review
 

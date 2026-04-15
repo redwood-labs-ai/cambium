@@ -360,7 +360,21 @@ async function main() {
     });
     throw new Error(`${permViolations.length} security violation(s). See trace for details.`);
   }
-  trace.steps.push({ type: 'SecurityCheck', ok: true, meta: { tools_checked: toolsAllowed, policy: securityPolicy } });
+  // Surface policy-pack provenance (RED-214) — the IR carries `_packs`
+  // arrays on policies.security/policies.budget naming any packs that
+  // contributed slots. buildSecurityPolicy strips them, so read direct
+  // from the IR for the trace.
+  const securityPacks = (ir.policies?.security?._packs as string[] | undefined) ?? [];
+  const budgetPacks   = (ir.policies?.budget?._packs   as string[] | undefined) ?? [];
+  const packsMeta = (securityPacks.length || budgetPacks.length)
+    ? { security: securityPacks, budget: budgetPacks }
+    : undefined;
+
+  trace.steps.push({
+    type: 'SecurityCheck',
+    ok: true,
+    meta: { tools_checked: toolsAllowed, policy: securityPolicy, ...(packsMeta ? { packs: packsMeta } : {}) },
+  });
 
   const correctorNames: string[] = ir.policies?.correctors ?? [];
   const maxRepairAttempts = ir.policies?.max_repair_attempts ?? 2;

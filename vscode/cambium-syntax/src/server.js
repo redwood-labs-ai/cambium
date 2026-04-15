@@ -20,6 +20,7 @@ let toolDefs = {};       // name → { path, description }
 let correctorFiles = {}; // name → path
 let schemaExports = {};  // name → { path, line }
 let signalDefs = {};     // name → line (per-file extract declarations)
+let policyPacks = {};    // name → { path, content }  -- RED-214
 
 function scanWorkspace() {
   if (!workspaceRoot) return;
@@ -33,6 +34,18 @@ function scanWorkspace() {
       const fullPath = path.join(systemsDir, f);
       const content = fs.readFileSync(fullPath, 'utf8').trim();
       systemPrompts[name] = { path: fullPath, content };
+    }
+  }
+
+  // Scan policy packs (RED-214)
+  const policiesDir = path.join(workspaceRoot, 'packages/cambium/app/policies');
+  if (fs.existsSync(policiesDir)) {
+    for (const f of fs.readdirSync(policiesDir)) {
+      if (!f.endsWith('.policy.rb')) continue;
+      const name = f.replace('.policy.rb', '');
+      const fullPath = path.join(policiesDir, f);
+      const content = fs.readFileSync(fullPath, 'utf8').trim();
+      policyPacks[name] = { path: fullPath, content };
     }
   }
 
@@ -138,12 +151,12 @@ const PRIMITIVE_DOCS = {
     doc: 'Controls how the runner retries when output fails validation.\n\n```ruby\nrepair max_attempts: 3, stop_on_no_improvement: true\n```\n\n`max_attempts` — max repair iterations (default: from `policies.max_repair_attempts`)\n`stop_on_no_improvement` — halt if error count doesn\'t decrease',
   },
   security: {
-    detail: 'Configures tool-execution security policy (RED-137).',
-    doc: 'Nested blocks for network egress, filesystem access, and exec.\n\n```ruby\nsecurity \\\n  network: {\n    allowlist: ["api.tavily.com"],\n    denylist: [],\n    block_private: true,   # default\n    block_metadata: true,  # default\n  },\n  filesystem: { roots: ["./examples"] },\n  exec: { allowed: true }\n```\n\nNetwork omitted = all egress denied. `block_private` blocks RFC1918/link-local/loopback; `block_metadata` blocks cloud metadata hosts. The legacy `allow_network: true` switch is no longer accepted.',
+    detail: 'Configures tool-execution security policy (RED-137 / RED-214).',
+    doc: 'Two forms.\n\nInline:\n```ruby\nsecurity \\\n  network: {\n    allowlist: ["api.tavily.com"],\n    block_private: true,   # default\n    block_metadata: true,  # default\n  },\n  filesystem: { roots: ["./examples"] },\n  exec: { allowed: true }\n```\n\nFrom a policy pack (RED-214) — resolves to `app/policies/<name>.policy.rb`:\n```ruby\nsecurity :research_defaults\n```\n\nMixing rule: each slot (network/filesystem/exec) can be set by exactly one source. Pack OR inline OK; both touching the same slot is a compile error.',
   },
   budget: {
-    detail: 'Per-tool and per-run call budgets (RED-137).',
-    doc: 'Caps how many times each tool can be invoked in a run.\n\n```ruby\nbudget \\\n  per_tool: {\n    tavily: { max_calls: 5 },\n    linear: { max_calls: 20 },\n  },\n  per_run: { max_calls: 100 }\n```\n\nv1 supports `max_calls` only. Byte/token/USD budgets deferred.',
+    detail: 'Per-tool and per-run call budgets (RED-137 / RED-214).',
+    doc: 'Two forms.\n\nInline:\n```ruby\nbudget \\\n  per_tool: { tavily: { max_calls: 5 } },\n  per_run:  { max_calls: 100 }\n```\n\nFrom a policy pack (RED-214):\n```ruby\nbudget :research_defaults\n```\n\nSame per-slot mixing rule as `security`. v1 supports `max_calls` only; token/USD deferred.',
   },
   with: {
     detail: 'Passes context into a generate block.',
@@ -215,6 +228,18 @@ connection.onHover((params) => {
         },
       };
     }
+
+    // Policy pack reference (RED-214) — only meaningful after `security`
+    // or `budget`; otherwise the symbol could collide with a tool/corrector.
+    if (policyPacks[word] && /^\s*(security|budget)\s+:/.test(line)) {
+      const pp = policyPacks[word];
+      return {
+        contents: {
+          kind: MarkupKind.Markdown,
+          value: `**:${word}** — Policy pack\n\n*${pp.path}*\n\n---\n\n\`\`\`ruby\n${pp.content}\n\`\`\``,
+        },
+      };
+    }
   }
 
   // Check if hovering over a schema constant (PascalCase)
@@ -256,6 +281,11 @@ connection.onDefinition((params) => {
   if (correctorFiles[word]) {
     return { uri: 'file://' + correctorFiles[word], range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } };
   }
+  // Policy pack — only when called from a `security` or `budget` line
+  // (RED-214). Other primitives can take colliding names without this.
+  if (policyPacks[word] && /^\s*(security|budget)\s+:/.test(line)) {
+    return { uri: 'file://' + policyPacks[word].path, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } };
+  }
 
   // Schema constant → contracts.ts line
   if (schemaExports[word]) {
@@ -294,6 +324,16 @@ connection.onCompletion((params) => {
       kind: CompletionItemKind.Value,
       detail: systemPrompts[name].content.slice(0, 60) + '...',
       documentation: systemPrompts[name].content,
+    }));
+  }
+
+  // After "security :" or "budget :" → suggest policy packs (RED-214)
+  if (/(security|budget)\s+:/.test(line)) {
+    return Object.keys(policyPacks).map(name => ({
+      label: name,
+      kind: CompletionItemKind.Value,
+      detail: 'policy pack',
+      documentation: policyPacks[name].content,
     }));
   }
 
