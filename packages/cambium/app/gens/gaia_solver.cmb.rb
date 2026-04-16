@@ -2,7 +2,7 @@
 # Uses agentic mode to call tools mid-generation for research + computation.
 
 class GaiaSolver < GenModel
-  model "omlx:gemma-4-31b-it-8bit"
+  model :fast
   system :gaia_solver
   mode :agentic
   temperature 0.1

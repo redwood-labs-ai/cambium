@@ -134,6 +134,18 @@ if defs[:system]
   end
 end
 
+# RED-237: load workspace model aliases. A gen can reference a model
+# or embed model by Symbol (`model :default`, `embed: :embedding`) and
+# the compiler resolves it here to a concrete provider:literal. Absent
+# file is fine — literals pass through unchanged either way.
+model_aliases = Cambium::ModelAliases.load
+
+# Resolve the primary model declaration. Literals pass through; Symbols
+# and bare-name strings resolve against the aliases file.
+if defs[:model]
+  defs[:model] = model_aliases.resolve(defs[:model], context: "#{klass.name}.model")
+end
+
 # RED-215: resolve memory declarations against named pools.
 #
 # Each `memory :x, scope: :support_team, top_k: 5` on a gen becomes
@@ -163,13 +175,24 @@ builtin_scopes  = %w[session global]
             "memory '#{m['name']}' declares strategy :semantic but no `embed:` model. " \
             "Add `embed \"omlx:bge-small-en\"` or `embed :embedding`."
     end
+    # RED-237: resolve the decl's embed reference (alias → literal).
+    if m['embed']
+      m['embed'] = model_aliases.resolve(m['embed'], context: "memory '#{m['name']}' embed")
+    end
     resolved_memory << m
   else
     # Named pool — load it (once; subsequent references hit the cache)
     # and enforce pool-owned-slot exclusivity.
     pool = (resolved_pools[scope] ||= begin
       loaded = Cambium::MemoryPool.load(scope, klass._cambium_memory_pool_search_dirs)
-      loaded.slots.dup
+      slots = loaded.slots.dup
+      # RED-237: resolve the pool's embed reference once; the resolved
+      # literal ends up in policies.memory_pools and every memory decl
+      # that merges it, so the runner never sees an unresolved alias.
+      if slots['embed']
+        slots['embed'] = model_aliases.resolve(slots['embed'], context: "memory_pool :#{scope} embed")
+      end
+      slots
     end)
 
     conflicts = Cambium::MemoryPool::POOL_OWNED_SLOTS.select { |k| m.key?(k) }

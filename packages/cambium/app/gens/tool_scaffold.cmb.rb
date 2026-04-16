@@ -8,7 +8,7 @@
 # Self-dogfooding: Cambium uses Cambium to build its own tool scaffolds.
 
 class ToolScaffold < GenModel
-  model "omlx:Qwen3.5-27B-4bit"
+  model :default
   system :tool_scaffold
   temperature 0.2
   max_tokens 1500

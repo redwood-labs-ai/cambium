@@ -2,7 +2,7 @@
 # Used as an enrichment agent by parent GenModels.
 
 class LogSummarizer < GenModel
-  model "omlx:Qwen3.5-27B-4bit"
+  model :default
   system :summarizer
   temperature 0.1
   max_tokens 800
