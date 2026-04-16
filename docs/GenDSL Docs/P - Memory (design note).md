@@ -216,7 +216,7 @@ The open questions from the original draft are resolved. Captured here so anyone
 2. ~~IR shape + Ruby DSL parsing for `memory :name, ...`, `write_memory_via :agent_name`, `reads_trace_of :agent_name`, and `app/memory_pools/<name>.pool.rb`. The TS runner tolerates the new IR fields but does not execute them yet.~~ ✅ (2026-04-16)
 3. ~~SQLite backend (via `better-sqlite3`; `sqlite-vec` extension lands with phase 5) + `:sliding_window` + `:log` strategies + `memory.read`/`memory.write`/`memory.prune` trace events + system-prompt injection + trivial-default writer.~~ ✅ (2026-04-16)
 4. ~~Retro-agent runtime wiring: `mode :retro` gens receive the primary's trace via JSON context, return `MemoryWrites`, and the primary runner applies writes tagged `written_by: 'agent:<ClassName>'`. Best-effort failure mode (trace not throw). `remember` is the standardized entry method (Rails `ActiveJob#perform` analogue).~~ ✅ (2026-04-16)
-5. `:semantic` strategy (embedding via `embed:`, coordinated with RED-237 alias resolution — loads the sqlite-vec extension into the same bucket file).
+5. ~~`:semantic` strategy via `sqlite-vec` loaded into the same bucket file alongside `entries` + a new `meta` pinning table (embed_model + embed_dim). `embedText` provider with oMLX/Ollama live + SHA-256-seeded deterministic mock under `--mock`. Memory subsystem moved to `optionalDependencies` so Cambium installs that don't use memory never pay for the native build.~~ ✅ (2026-04-16)
 6. Governance (separate ticket): retention, cross-pool isolation, workspace policy.
 
 ### Phase 2 artifacts (landed)
@@ -247,6 +247,25 @@ The open questions from the original draft are resolved. Captured here so anyone
 - `packages/cambium/app/gens/support_memory_agent.cmb.rb` + `app/systems/support_memory_agent.system.md` — first reference retro agent; serves as demo and smoke path.
 - `src/memory/retro-agent.test.ts` — 11 unit tests (class→file, resolver fallback, context builder, apply-with-agent-tag, dropped-unknown-slot, malformed-entry drop).
 - `packages/cambium/tests/retro_agent_runtime.test.ts` — 3 spawned-CLI integration tests: happy-path agent invocation, agent-not-found traced non-fatal, unknown-slot drop traced.
+
+### Phase 5 artifacts (landed)
+
+- `package.json` — `better-sqlite3` + `sqlite-vec` moved to `optionalDependencies`. A fresh `npm install cambium` never errors on failed native builds; memory is opt-in via dependency presence.
+- `src/memory/backend.ts` — dynamic import of `better-sqlite3` and `sqlite-vec` via cached module handles; clear "install with: npm install better-sqlite3 sqlite-vec" error when a memory-using gen runs without the deps. New methods: `initSemantic`, `appendSemantic`, `searchSemantic`. Extension loads are per-connection (tracked with `_vecLoaded` guard so every connection loads once, not once-ever).
+- `src/memory/runner-integration.ts` — `readMemoryForRun` is now async; dispatches `:semantic` through the embed provider → vec-search path; `commitMemoryWrites` is now async; trivial-default writer embeds content + inserts into `entries_vec` in one transaction for semantic buckets.
+- `src/providers/embed.ts` — `embedText(model, text)`: oMLX `/v1/embeddings`, Ollama `/api/embed`, mock path (SHA-256-seeded deterministic vectors, 384-dim by default to match BGE small).
+- `src/runner.ts` — awaits the two memory integration functions; no other behaviour change.
+- `packages/cambium/tests/semantic_memory.test.ts` — 2 integration tests (round-trip write+search; model-pin rejection).
+- `src/memory/backend.test.ts` — 6 new tests for semantic (initSemantic idempotence, model/dim mismatch errors, top-k roundtrip, top-k ordering, empty-bucket-returns-[]).
+- `src/providers/embed.test.ts` — 5 unit tests (mock determinism, differentiation, range, provider prefix rejection, unknown-provider rejection).
+
+### `:semantic` query source (phase 5 default + follow-up)
+
+Phase 5 uses `ctx.input` (the gen's `--arg` content) as the vector-search query. That covers the common case — "find prior entries relevant to what the user is asking now." Explicit overrides (`query: :signal_name`, `query: :output_field("...")`) are deferred to **RED-238** with a concrete sub-design covering signal-resolution ordering; file against that ticket before adding the surface.
+
+### Embed model pinning
+
+A bucket's first semantic write records the model id + vector dim into the `meta` table. Later runs validate the pin matches; a different model or dim raises a clear `CompileError` ("bucket was initialized with embed_model X — cannot now use Y"). Model changes are destructive: delete the bucket (or use a new memory `name`) to start fresh. This is a correctness invariant, not a best-effort surface — a silent accept would scramble cosine-distance semantics across mixed-model vectors.
 
 ### The `remember` method — Cambium's `ActiveJob#perform`
 

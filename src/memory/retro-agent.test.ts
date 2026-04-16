@@ -76,14 +76,14 @@ describe('buildRetroContext (RED-215 phase 4)', () => {
 });
 
 describe('applyRetroWrites (RED-215 phase 4)', () => {
-  function freshBackend(name = 'test'): { backend: SqliteMemoryBackend; path: string } {
+  async function freshBackend(name = 'test'): Promise<{ backend: SqliteMemoryBackend; path: string }> {
     const dir = mkdtempSync(join(tmpdir(), 'cambium-retro-apply-'));
     const path = join(dir, `${name}.sqlite`);
-    return { backend: new SqliteMemoryBackend(path), path };
+    return { backend: await SqliteMemoryBackend.open(path), path };
   }
 
-  it('applies a write to the matching backend and tags written_by', () => {
-    const { backend, path } = freshBackend('conversation');
+  it('applies a write to the matching backend and tags written_by', async () => {
+    const { backend, path } = await freshBackend('conversation');
     const backends = new Map([['conversation', backend]]);
     const { applied, dropped } = applyRetroWrites(
       [{ memory: 'conversation', content: 'remembered note' }],
@@ -101,8 +101,8 @@ describe('applyRetroWrites (RED-215 phase 4)', () => {
     rmSync(path, { force: true });
   });
 
-  it('drops writes naming a memory slot not on the primary (best-effort)', () => {
-    const { backend, path } = freshBackend('conversation');
+  it('drops writes naming a memory slot not on the primary (best-effort)', async () => {
+    const { backend, path } = await freshBackend('conversation');
     const backends = new Map([['conversation', backend]]);
     const { applied, dropped } = applyRetroWrites(
       [
@@ -122,8 +122,8 @@ describe('applyRetroWrites (RED-215 phase 4)', () => {
 
   // Security finding (MEDIUM): defense-in-depth against prompt-injected
   // retro agents flooding memory or smuggling control chars.
-  it('truncates content over MAX_RETRO_CONTENT_BYTES and flags truncated: true', () => {
-    const { backend, path } = freshBackend('conversation');
+  it('truncates content over MAX_RETRO_CONTENT_BYTES and flags truncated: true', async () => {
+    const { backend, path } = await freshBackend('conversation');
     const backends = new Map([['conversation', backend]]);
     const big = 'a'.repeat(MAX_RETRO_CONTENT_BYTES + 500);
     const { applied } = applyRetroWrites(
@@ -138,8 +138,8 @@ describe('applyRetroWrites (RED-215 phase 4)', () => {
     rmSync(path, { force: true });
   });
 
-  it('strips C0/DEL control characters from content before committing', () => {
-    const { backend, path } = freshBackend('conversation');
+  it('strips C0/DEL control characters from content before committing', async () => {
+    const { backend, path } = await freshBackend('conversation');
     const backends = new Map([['conversation', backend]]);
     applyRetroWrites(
       [{ memory: 'conversation', content: 'hello\x00world\x07bell\x7Fdel' }],
@@ -157,8 +157,8 @@ describe('applyRetroWrites (RED-215 phase 4)', () => {
     expect(content).toBe('line1\nline2');
   });
 
-  it('drops malformed entries (missing string fields) without crashing', () => {
-    const { backend, path } = freshBackend('conversation');
+  it('drops malformed entries (missing string fields) without crashing', async () => {
+    const { backend, path } = await freshBackend('conversation');
     const backends = new Map([['conversation', backend]]);
     const { applied, dropped } = applyRetroWrites(
       [

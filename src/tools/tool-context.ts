@@ -1,12 +1,15 @@
 /**
  * RED-137: per-invocation context handed to tool implementations.
  *
- * Tools that need the network should call `ctx.fetch(url, init)` instead of
- * the global `fetch`. When a context is provided by the runner, `ctx.fetch`
- * is bound to the gen's NetworkPolicy — SSRF-guarded, DNS-resolved-all, IP
- * pinned. When no context is provided (e.g. unit tests that call the tool
- * directly), tools should fall back to `globalThis.fetch` so they remain
- * usable in isolation.
+ * Tools that need the network MUST call `ctx.fetch(url, init)` — never
+ * `globalThis.fetch`. When provided by the runner, `ctx.fetch` is bound to
+ * the gen's NetworkPolicy (SSRF-guarded, DNS-resolved-all, IP pinned).
+ *
+ * When `ctx` or `ctx.fetch` is absent (e.g. a unit test that calls the tool
+ * directly without going through the runner), network-using tools MUST
+ * throw rather than fall back to `globalThis.fetch`. Falling back would
+ * silently re-open the SSRF surface — this is invariant #22 enforced in
+ * every framework builtin. See CLAUDE.md "Non-obvious invariants."
  *
  * Pure tools (calculator, read_file) ignore ctx entirely.
  */

@@ -14,9 +14,12 @@
   "dependencies": {
     "@sinclair/typebox": "^0.34.40",
     "ajv": "^8.17.1",
-    "better-sqlite3": "^12.9.0",
     "dotenv": "^17.4.1",
     "undici": "^8.1.0"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^12.9.0",
+    "sqlite-vec": "^0.1.6"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
