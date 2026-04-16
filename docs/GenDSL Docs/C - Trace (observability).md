@@ -28,6 +28,7 @@ A trace MUST include:
 | `Validate` | AJV schema validation. | `errors` on failure |
 | `Repair` | Repair-loop iteration. | `attempt`, `strategy`, `errors_before`, `errors_after` |
 | `ExtractSignals` / `Trigger` | Signal extraction + trigger evaluation (see [[C - Signals, State, and Triggers]]). |
+| `ActionCall` | A trigger's `action :name` side-effect handler invocation (RED-212). | `trigger`, `action`, `input`, `output`, `target` |
 | `GroundingCheck` | Citation verification. | `citations_verified`, `failures` |
 | `memory.read` | Per memory decl, before `Generate`. See RED-215 section below. | `strategy`, `scope`, `name`, `k`, `hits`, `bytes`, `embed_model?`, `embed_dim?` |
 | `memory.write` | Per writable memory decl, after `finalOk`. | `name`, `entry_id`, `bytes`, `written_by`, `strategy?`, `embed_model?` |

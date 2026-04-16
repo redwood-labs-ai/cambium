@@ -1,0 +1,29 @@
+{
+  "name": "notify_stderr",
+  "description": "Write a single line to stderr when a trigger fires. Zero-permission reference action — useful for local dev/debug and as a template for real notification actions (webhook, Slack, etc.).",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "message": {
+        "type": "string",
+        "description": "Literal text to emit. If omitted, the signal value is used."
+      },
+      "prefix": {
+        "type": "string",
+        "description": "Prefix for the emitted line. Defaults to '[cambium:action:notify_stderr]'."
+      }
+    },
+    "additionalProperties": true
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "value": { "type": "string", "description": "The line that was written." }
+    },
+    "required": ["value"],
+    "additionalProperties": false
+  },
+  "permissions": {
+    "pure": true
+  }
+}
