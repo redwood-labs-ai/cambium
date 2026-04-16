@@ -122,9 +122,10 @@ export async function readMemoryForRun(
         trace.push(zeroReadTrace(plan.decl, 'bucket empty — no semantic query run'));
         continue;
       }
-      // Embed the query (ctx.input), search, record trace.
+      // RED-238: resolve query source (literal `query:` > `arg_field:` > ctx.input default).
+      const resolved = resolveSemanticQuery(plan.decl, ctx.input);
       const embedModel = plan.decl.embed!;
-      const { vector, dim } = await embedText(embedModel, ctx.input);
+      const { vector, dim } = await embedText(embedModel, resolved.text);
       await backend.initSemantic(embedModel, dim);
       const hits = backend.searchSemantic(vector, plan.readN);
       sections.push({ decl: plan.decl, entries: hits });
@@ -141,6 +142,8 @@ export async function readMemoryForRun(
           bytes: hits.reduce((s, e) => s + Buffer.byteLength(e.content, 'utf8'), 0),
           embed_model: embedModel,
           embed_dim: dim,
+          query_source: resolved.source,
+          query_preview: truncateForTrace(resolved.text),
         },
       });
       continue;
@@ -177,6 +180,68 @@ function zeroReadTrace(decl: MemoryDecl, note: string): MemoryTraceStep {
       k: 0, hits: 0, bytes: 0, note,
     },
   };
+}
+
+/**
+ * RED-238: resolve the nearest-neighbor query text for a `:semantic`
+ * read. Three paths:
+ *   - `decl.query` set → literal string passthrough.
+ *   - `decl.arg_field` set → parse `ctx.input` as JSON and pluck the
+ *     named top-level field. Missing field or non-JSON input throws
+ *     with decl-local context so the author can see which slot failed.
+ *     Non-string field values are JSON-stringified (embedding tolerates
+ *     noise better than silently dropping them).
+ *   - Neither set → phase-5 default (`ctx.input`).
+ * Returns the resolved text and a `source` tag for trace meta.
+ * Exported for direct unit testing; the runner calls it inline.
+ */
+export function resolveSemanticQuery(
+  decl: MemoryDecl,
+  ctxInput: string,
+): { text: string; source: 'literal' | 'arg_field' | 'default' } {
+  if (decl.query !== undefined) {
+    return { text: decl.query, source: 'literal' };
+  }
+  if (decl.arg_field !== undefined) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(ctxInput);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(
+        `memory '${decl.name}' requested arg_field: '${decl.arg_field}' but ctx.input is not valid JSON (${msg}). ` +
+          `arg_field requires a JSON-shaped --arg. Switch to query: "<literal>" or pass JSON input.`,
+      );
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error(
+        `memory '${decl.name}' requested arg_field: '${decl.arg_field}' but ctx.input parsed as ${
+          Array.isArray(parsed) ? 'an array' : parsed === null ? 'null' : typeof parsed
+        }, not a JSON object.`,
+      );
+    }
+    const record = parsed as Record<string, unknown>;
+    if (!Object.prototype.hasOwnProperty.call(record, decl.arg_field)) {
+      throw new Error(
+        `memory '${decl.name}' requested arg_field: '${decl.arg_field}' which is not present in ctx.input. ` +
+          `Available top-level fields: [${Object.keys(record).join(', ')}].`,
+      );
+    }
+    const value = record[decl.arg_field];
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    return { text, source: 'arg_field' };
+  }
+  return { text: ctxInput, source: 'default' };
+}
+
+/**
+ * RED-238: trace payloads are user-facing (printed / indexed /
+ * compared). Keep the query preview bounded so a huge JSON blob
+ * doesn't balloon the trace or leak more than needed.
+ */
+function truncateForTrace(s: string): string {
+  const MAX = 200;
+  return s.length > MAX ? s.slice(0, MAX) + '…' : s;
 }
 
 /**

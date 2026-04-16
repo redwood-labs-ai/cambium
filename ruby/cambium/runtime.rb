@@ -985,11 +985,11 @@ module Cambium
       # Phase 2 (this ticket) parses + validates and emits IR under
       # policies.memory. The TS runner ignores memory entries until
       # phase 3 wires up the sqlite-vec backend.
-      def memory(name, strategy: nil, scope: nil, size: nil, top_k: nil, keyed_by: nil, embed: nil, retain: nil, **extra)
+      def memory(name, strategy: nil, scope: nil, size: nil, top_k: nil, keyed_by: nil, embed: nil, retain: nil, query: nil, arg_field: nil, **extra)
         unless extra.empty?
           raise ArgumentError,
                 "memory #{name}: unknown option(s) #{extra.keys.join(', ')}. " \
-                "Recognized: strategy, scope, size, top_k, keyed_by, embed, retain."
+                "Recognized: strategy, scope, size, top_k, keyed_by, embed, retain, query, arg_field."
         end
 
         entry = { 'name' => name.to_s, 'scope' => (scope || :session).to_s }
@@ -1009,6 +1009,49 @@ module Cambium
         entry['embed']    = embed.to_s        unless embed.nil?
         unless retain.nil?
           entry['retain'] = Cambium::Retention.parse(retain, context: "memory #{name} retain")
+        end
+
+        # RED-238: configurable query source for :semantic reads.
+        # `query:` is a literal string anchor; `arg_field:` plucks a
+        # top-level field out of ctx.input (parsed as JSON at run time).
+        # The Symbol form of `query:` (e.g. `query: :last_signal_value`)
+        # is reserved for RED-241's prior-run state accessor and raises
+        # here so an author who tries it gets a clear pointer to that
+        # ticket rather than a silent no-op.
+        if !query.nil? && !arg_field.nil?
+          raise ArgumentError,
+                "memory #{name}: `query:` and `arg_field:` are mutually exclusive — pick one. " \
+                "Both configure the nearest-neighbor query source for a :semantic read."
+        end
+        unless query.nil?
+          case query
+          when String
+            entry['query'] = query
+          when Symbol
+            raise Cambium::CompileError,
+                  "memory #{name}: symbolic `query:` values (e.g. `query: :#{query}`) are reserved " \
+                  "for prior-run state accessors (RED-241, not yet shipped). Use a literal string " \
+                  "(`query: \"...\"`) or `arg_field: :name` for now."
+          else
+            raise ArgumentError,
+                  "memory #{name}: `query:` must be a literal String (got #{query.class})."
+          end
+        end
+        unless arg_field.nil?
+          unless arg_field.is_a?(String) || arg_field.is_a?(Symbol)
+            raise ArgumentError,
+                  "memory #{name}: `arg_field:` must be a Symbol or String (got #{arg_field.class})."
+          end
+          entry['arg_field'] = arg_field.to_s
+        end
+        # Strategy-explicitly-not-semantic is a compile-time error right
+        # here. Pool-scoped decls don't know their strategy until after
+        # resolution — that check lands in compile.rb below.
+        if (!entry['query'].nil? || !entry['arg_field'].nil?) &&
+           entry['strategy'] && entry['strategy'] != 'semantic'
+          raise ArgumentError,
+                "memory #{name}: `#{entry['query'].nil? ? 'arg_field' : 'query'}:` is only " \
+                "valid on strategy :semantic (got :#{entry['strategy']})."
         end
 
         _cambium_defaults[:memory] ||= []

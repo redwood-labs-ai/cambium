@@ -209,6 +209,20 @@ builtin_scopes  = %w[session global]
   end
 end
 
+# RED-238: final check for `query:` / `arg_field:` — must run after
+# pool resolution because pool-scoped decls only learn their strategy
+# here (the pool is authoritative). The DSL catches the gen-side
+# explicit-strategy case; this catches the pool-scoped case.
+resolved_memory.each do |m|
+  next if m['query'].nil? && m['arg_field'].nil?
+  if m['strategy'] != 'semantic'
+    key = m['query'].nil? ? 'arg_field' : 'query'
+    raise Cambium::CompileError,
+          "memory '#{m['name']}': `#{key}:` is only valid on strategy :semantic " \
+          "(resolved strategy is :#{m['strategy']}#{m['scope'] && !%w[session global].include?(m['scope']) ? " via pool :#{m['scope']}" : ''})."
+  end
+end
+
 # RED-239 v2: apply workspace memory policy. Loaded from
 # app/config/memory_policy.rb (absent file = no policy, which is fine).
 # Runs AFTER memory resolution so enforcement sees the final merged

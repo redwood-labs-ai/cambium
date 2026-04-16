@@ -486,4 +486,176 @@ end
     }
     expect(stderr).toMatch(/strategy :semantic but has no .embed. model/)
   })
+
+  // RED-238: configurable query source for :semantic memory (literal + arg_field)
+  it('emits query: literal string on a :semantic decl', () => {
+    const gen = writeGen(`
+class QueryLiteralGen < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  memory :facts, strategy: :semantic, top_k: 3, embed: "omlx:bge-small-en",
+         query: "support triage anchor"
+  def go(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`)
+    const ir = compile(gen, 'go', FIXTURE_ARG)
+    expect(ir.policies.memory[0].query).toBe('support triage anchor')
+    expect(ir.policies.memory[0].arg_field).toBeUndefined()
+  })
+
+  it('emits arg_field: name on a :semantic decl', () => {
+    const gen = writeGen(`
+class ArgFieldGen < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  memory :facts, strategy: :semantic, top_k: 3, embed: "omlx:bge-small-en",
+         arg_field: :question
+  def go(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`)
+    const ir = compile(gen, 'go', FIXTURE_ARG)
+    expect(ir.policies.memory[0].arg_field).toBe('question')
+    expect(ir.policies.memory[0].query).toBeUndefined()
+  })
+
+  it('rejects query: and arg_field: set on the same decl', () => {
+    const gen = writeGen(`
+class BothQueryFormsGen < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  memory :facts, strategy: :semantic, top_k: 3, embed: "omlx:bge-small-en",
+         query: "literal", arg_field: :question
+  def go(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`)
+    const stderr = compileExpectError(gen, 'go', FIXTURE_ARG)
+    expect(stderr).toMatch(/query:.*arg_field:.*mutually exclusive/)
+  })
+
+  it('rejects query: on a non-semantic strategy (gen-side strategy)', () => {
+    const gen = writeGen(`
+class QueryOnLogGen < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  memory :x, strategy: :log, query: "literal"
+  def go(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`)
+    const stderr = compileExpectError(gen, 'go', FIXTURE_ARG)
+    expect(stderr).toMatch(/only valid on strategy :semantic/)
+  })
+
+  it('rejects arg_field: on :sliding_window', () => {
+    const gen = writeGen(`
+class ArgFieldOnSWGen < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  memory :x, strategy: :sliding_window, size: 5, arg_field: :question
+  def go(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`)
+    const stderr = compileExpectError(gen, 'go', FIXTURE_ARG)
+    expect(stderr).toMatch(/only valid on strategy :semantic/)
+  })
+
+  it('rejects symbolic query: (reserved for RED-241) with a clear pointer', () => {
+    const gen = writeGen(`
+class SymbolicQueryGen < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  memory :facts, strategy: :semantic, top_k: 3, embed: "omlx:bge-small-en",
+         query: :last_signal_value
+  def go(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`)
+    const stderr = compileExpectError(gen, 'go', FIXTURE_ARG)
+    expect(stderr).toMatch(/symbolic .query:. values.*reserved/)
+    expect(stderr).toMatch(/RED-241/)
+  })
+
+  it('rejects non-string/non-symbol arg_field:', () => {
+    const gen = writeGen(`
+class BadArgFieldTypeGen < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  memory :facts, strategy: :semantic, top_k: 3, embed: "omlx:bge-small-en",
+         arg_field: 42
+  def go(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`)
+    const stderr = compileExpectError(gen, 'go', FIXTURE_ARG)
+    expect(stderr).toMatch(/arg_field:.*must be a Symbol or String/)
+  })
+
+  it('rejects query: / arg_field: resolved via a non-semantic pool (post-resolution check)', () => {
+    // Relies on a pool where strategy != :semantic. Cambium's pool
+    // search walks two File.dirname levels up from the gen file and
+    // looks in `<pkg>/app/memory_pools/`; a gen one subdir deep under
+    // the tmpdir gives us `<tmpdir>/app/memory_pools/` as the search
+    // root so we can ship a `:log` fixture with the test.
+    const dir = mkdtempSync(join(tmpdir(), 'cambium-red238-pool-'))
+    const poolsDir = join(dir, 'app', 'memory_pools')
+    const gensDir = join(dir, 'gens')
+    require('node:fs').mkdirSync(poolsDir, { recursive: true })
+    require('node:fs').mkdirSync(gensDir, { recursive: true })
+    writeFileSync(
+      join(poolsDir, 'log_fixture.pool.rb'),
+      `strategy :log\nkeyed_by :tenant_id\n`,
+    )
+    const gen = join(gensDir, 'g.cmb.rb')
+    writeFileSync(
+      gen,
+      `
+class PoolQueryGen < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  memory :x, scope: :log_fixture, query: "literal"
+  def go(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`.trim(),
+    )
+    const stderr = compileExpectError(gen, 'go', FIXTURE_ARG)
+    expect(stderr).toMatch(/only valid on strategy :semantic/)
+    expect(stderr).toMatch(/via pool :log_fixture/)
+  })
 })
