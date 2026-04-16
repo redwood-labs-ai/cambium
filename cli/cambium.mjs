@@ -14,7 +14,7 @@ Cambium — Rails for generation engineering
 Usage:
   cambium init [name]
   cambium new <type> <Name>
-  cambium run <file.cmb.rb> --method <method> --arg <path>|- [--trace <path>] [--out <path>] [--mock]
+  cambium run <file.cmb.rb> --method <method> --arg <path>|- [--trace <path>] [--out <path>] [--mock] [--memory-key <name>=<value> ...]
   cambium doctor
   cambium test
   cambium lint
@@ -28,9 +28,12 @@ Commands:
   lint      Validate package structure and declarations
 
 Run flags:
-  --trace <path>   Write trace JSON to <path> (default: runs/<id>/trace.json)
-  --out <path>     Write output JSON to <path> (default: runs/<id>/output.json)
-  --mock           Use deterministic mock instead of live LLM
+  --trace <path>            Write trace JSON to <path> (default: runs/<id>/trace.json)
+  --out <path>              Write output JSON to <path> (default: runs/<id>/output.json)
+  --mock                    Use deterministic mock instead of live LLM
+  --memory-key <name>=<val> Value for a keyed_by slot declared by a memory/pool (repeatable).
+                            :session scope auto-generates a session id and echoes it to stderr
+                            unless CAMBIUM_SESSION_ID is set.
 
 Examples:
   cambium run packages/cambium/app/gens/analyst.cmb.rb --method analyze --arg document.txt
@@ -109,6 +112,7 @@ let arg = null;
 let traceOut = null;
 let outputOut = null;
 let mock = false;
+const memoryKeys = [];
 for (let i = 1; i < args.length; i++) {
   const a = args[i];
   if (a === '--method') method = args[++i];
@@ -116,6 +120,7 @@ for (let i = 1; i < args.length; i++) {
   else if (a === '--trace') traceOut = args[++i];
   else if (a === '--out') outputOut = args[++i];
   else if (a === '--mock') mock = true;
+  else if (a === '--memory-key') memoryKeys.push(args[++i]);
   else if (a === '--help' || a === '-h') usage();
   else usage(`Unknown flag: ${a}\nRun 'cambium run --help' for usage.`);
 }
@@ -141,6 +146,7 @@ const runnerArgs = ['--import', 'tsx', './src/runner.ts', '--ir', '-'];
 if (traceOut) runnerArgs.push('--trace', traceOut);
 if (outputOut) runnerArgs.push('--out', outputOut);
 if (mock) runnerArgs.push('--mock');
+for (const k of memoryKeys) runnerArgs.push('--memory-key', k);
 const run = spawnSync('node', runnerArgs, {
   input: irJson,
   encoding: 'utf8',
