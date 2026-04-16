@@ -16,6 +16,7 @@ Declare per-gen memory slots that persist across runs. The runtime handles SQLit
 - `:session` scope auto-addresses via `CAMBIUM_SESSION_ID` (auto-generated UUID echoed to stderr when unset). `:global` with no `keyed_by:` addresses a single workspace bucket. Named-pool scopes and `:global` with `keyed_by:` require a `--memory-key <name>=<value>` at run time.
 - Pool-owned slots (`strategy`, `embed`, `keyed_by`, `retain`) MUST be set on the pool file when scope is a named pool; any attempt to set them at the call site is a compile error.
 - `retain:` (RED-239) accepts a duration string (`"30d"`), an entries cap (`{max_entries: N}`), or both (`{ttl: "7d", max_entries: N}`). Duration values MUST be positive and MUST NOT exceed 10 years. Prune runs before every read — a bucket that isn't read keeps its entries, but a stale entry never reaches the model.
+- Workspace-level memory policy (RED-239 v2) MAY be declared at `app/config/memory_policy.rb`. When present, every memory decl + pool in the workspace is checked at compile time against: `max_ttl` / `default_ttl` / `max_entries` / `require_keyed_by_for scope:` / `ban_scope` / `allowed_pools`. Policy enforcement is hard-error (no per-gen override); defaults fill in missing `retain` before enforcement.
 - Memory writes happen only after `finalOk`; a failed validation/repair run does NOT append.
 - When `write_memory_via :Agent` is declared, the primary runner invokes the retro agent and applies its `MemoryWrites`; trivial-default writer is bypassed. Retro-agent failures emit trace steps with `ok: false` but do NOT fail the primary run (best-effort writes — the primary's output is the contract).
 - Retro agents have `mode :retro`, `reads_trace_of :primary`, `returns MemoryWrites`, and a `remember(ctx)` method. The framework always invokes them via that method name.
@@ -225,6 +226,27 @@ The open questions from the original draft are resolved. Captured here so anyone
    - `memory.prune` — `{ reason: "ttl" | "cap", count }`
 5. **Retro-agent timing:** **sync/blocking for v1.** The memory agent runs between primary output and return, so the trace has one clean story and there are no read-before-write races inside tight `:session` loops. An `:async` opt-in knob is explicitly deferred; if memory-agent latency becomes a real problem, traces will show it and we'll revisit.
 6. **Backend:** `sqlite-vec`, one file per bucket. Pluggable backends deferred.
+
+## Workspace memory policy (RED-239 v2)
+
+Per-decl `retain:` gives authors control over their own gen's memory. Workspace memory policy gives *ops/security* control over what's declarable at all. One file per workspace at `packages/cambium/app/config/memory_policy.rb`:
+
+```ruby
+max_ttl        "90d"              # enforce: no retain may exceed this
+default_ttl    "30d"              # apply: decls with no retain get this (must be ≤ max_ttl)
+max_entries    10_000             # enforce: no bucket cap may exceed this
+ban_scope      :global            # enforce: :global scope is disallowed
+require_keyed_by_for scope: :global  # enforce: :global scope must declare keyed_by
+allowed_pools  :support_team, :billing  # enforce: only these pools are referenceable
+```
+
+**Enforcement is hard-error.** There is no per-gen override. Any gen that violates the policy fails to compile with a clear error naming the offending decl/pool + the policy file it came from. If an author needs an exception, the policy file is the place to add it.
+
+**Defaults land before enforcement.** A `default_ttl` fills in `retain.ttl_seconds` on every decl that didn't declare its own, so the same `max_ttl` ceiling check applies to both. Consistency check: `default_ttl ≤ max_ttl` is validated at policy load.
+
+**Enforcement reaches into pools.** A pool-side `retain "1y"` on a workspace with `max_ttl "90d"` fails at compile — the pool file itself must respect the policy, not just the decls referencing it.
+
+A workspace with no `memory_policy.rb` runs with v1 semantics (per-decl retention only). The policy file is opt-in.
 
 ## `:semantic` query source (default + follow-up)
 

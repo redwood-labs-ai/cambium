@@ -379,6 +379,216 @@ module Cambium
     end
   end
 
+  # RED-239 v2: workspace-level memory policy. One file per workspace
+  # at `app/config/memory_policy.rb`, loaded at compile time and
+  # enforced against every memory decl + resolved pool in the IR.
+  # Parallel to RED-237's ModelAliases (workspace-wide model aliases)
+  # but for constraints rather than names.
+  #
+  # File syntax is flat directives:
+  #
+  #   max_ttl        "90d"              # enforce: no retain > 90d
+  #   default_ttl    "30d"              # apply: gens without retain get this
+  #   max_entries    10_000             # enforce: no bucket over 10k rows
+  #   require_keyed_by_for scope: :global  # enforce: global scope needs keyed_by
+  #   ban_scope      :global            # enforce: :global scope disallowed
+  #   allowed_pools  :support_team, :billing  # enforce: pool allowlist
+  #
+  # A workspace with no `app/config/memory_policy.rb` is valid — v1
+  # retention (per-decl) still works. The policy layer is opt-in.
+  #
+  # Policy is enforced at compile time only; there is no per-gen
+  # override mechanism. If an author needs an exception, they edit
+  # the policy file. This matches the RED-214 policy-pack stance:
+  # policy is policy.
+  class MemoryPolicy
+    attr_reader :source_file, :rules
+
+    def initialize(rules, source_file)
+      @rules = rules
+      @source_file = source_file
+    end
+
+    def self.search_candidates(source_file)
+      candidates = []
+      if source_file
+        pkg_dir = File.dirname(File.dirname(File.expand_path(source_file)))
+        candidates << File.join(pkg_dir, 'app', 'config', 'memory_policy.rb')
+      end
+      candidates << File.join('packages', 'cambium', 'app', 'config', 'memory_policy.rb')
+      candidates.uniq
+    end
+
+    def self.load
+      src = Cambium::CompilerState.current_source_file
+      file = search_candidates(src).find { |f| File.exist?(f) }
+      return new({}, nil) if file.nil?
+
+      builder = MemoryPolicyBuilder.new
+      begin
+        builder.instance_eval(File.read(file), file)
+      rescue CompileError
+        raise
+      rescue ScriptError, StandardError => e
+        raise CompileError,
+              "Failed to load memory policy from #{file}: #{e.class}: #{e.message}"
+      end
+
+      rules = builder.rules
+      # Cross-rule consistency: default_ttl must not exceed max_ttl.
+      if rules['default_ttl'] && rules['max_ttl'] && rules['default_ttl'] > rules['max_ttl']
+        raise CompileError,
+              "memory_policy.rb: default_ttl (#{rules['default_ttl']}s) exceeds max_ttl " \
+              "(#{rules['max_ttl']}s). A default that violates the ceiling is a contradiction."
+      end
+      new(rules, file)
+    end
+
+    # Apply enforce+default rules to the set of resolved memory decls
+    # and the pools they reference. Mutates the decls in place (to
+    # inject defaults) and raises CompileError on any violation with
+    # a precise pointer to the offending declaration.
+    def apply!(decls, pools)
+      return if @rules.empty?
+
+      # ── Defaults ────────────────────────────────────────────────
+      # default_ttl fills in retain.ttl_seconds on any decl (and any
+      # resolved pool view) that didn't declare retention at all.
+      if (default_ttl = @rules['default_ttl'])
+        decls.each do |d|
+          d['retain'] ||= { 'ttl_seconds' => default_ttl }
+        end
+      end
+
+      # ── Enforce ─────────────────────────────────────────────────
+      # Pools first: a pool-side retain violation should surface as
+      # "memory_pool :support_team retain.*" rather than the decl-level
+      # message a merged-in copy would produce. More useful error for
+      # the pool author.
+      pools.each do |name, slots|
+        enforce_on_pool!(name, slots)
+      end
+      decls.each do |d|
+        enforce_on_decl!(d)
+      end
+    end
+
+    private
+
+    def enforce_on_decl!(d)
+      name = d['name']
+      ctx = "memory '#{name}'"
+
+      if @rules['ban_scope'] && d['scope'] == @rules['ban_scope'].to_s
+        raise CompileError,
+              "#{ctx}: scope :#{d['scope']} is banned by workspace policy (#{@source_file})."
+      end
+
+      if @rules['require_keyed_by_for'] &&
+         d['scope'] == @rules['require_keyed_by_for'].to_s &&
+         d['keyed_by'].nil?
+        raise CompileError,
+              "#{ctx}: scope :#{d['scope']} requires `keyed_by:` per workspace policy (#{@source_file}). " \
+              "Declare keyed_by on the memory decl (or the pool, if scoped to one)."
+      end
+
+      if @rules['allowed_pools'] &&
+         !%w[session global].include?(d['scope']) &&
+         !@rules['allowed_pools'].include?(d['scope'])
+        raise CompileError,
+              "#{ctx}: scope :#{d['scope']} is not in the workspace pool allowlist " \
+              "[#{@rules['allowed_pools'].join(', ')}] (#{@source_file})."
+      end
+
+      check_retain_bounds!(d['retain'], ctx) if d['retain']
+    end
+
+    def enforce_on_pool!(name, slots)
+      ctx = "memory_pool :#{name}"
+      check_retain_bounds!(slots['retain'], ctx) if slots['retain']
+    end
+
+    def check_retain_bounds!(retain, ctx)
+      if (max_ttl = @rules['max_ttl']) && retain['ttl_seconds'] && retain['ttl_seconds'] > max_ttl
+        raise CompileError,
+              "#{ctx} retain.ttl_seconds (#{retain['ttl_seconds']}s) exceeds workspace " \
+              "max_ttl (#{max_ttl}s) per #{@source_file}."
+      end
+      if (max_entries = @rules['max_entries']) && retain['max_entries'] && retain['max_entries'] > max_entries
+        raise CompileError,
+              "#{ctx} retain.max_entries (#{retain['max_entries']}) exceeds workspace " \
+              "max_entries cap (#{max_entries}) per #{@source_file}."
+      end
+    end
+  end
+
+  # Eval context for `app/config/memory_policy.rb`. Each directive
+  # captures one rule into the builder. Unknown directives raise via
+  # method_missing so typos surface immediately instead of silently
+  # no-op'ing.
+  class MemoryPolicyBuilder
+    attr_reader :rules
+
+    VALID_SCOPES = %w[session global].freeze
+
+    def initialize
+      @rules = {}
+    end
+
+    def max_ttl(duration)
+      @rules['max_ttl'] = Retention.parse_duration!(duration, context: "memory_policy max_ttl")
+    end
+
+    def default_ttl(duration)
+      @rules['default_ttl'] = Retention.parse_duration!(duration, context: "memory_policy default_ttl")
+    end
+
+    def max_entries(n)
+      unless n.is_a?(Integer) && n > 0
+        raise CompileError, "memory_policy max_entries must be a positive Integer (got #{n.inspect})."
+      end
+      @rules['max_entries'] = n
+    end
+
+    def ban_scope(sym)
+      unless sym.is_a?(Symbol)
+        raise CompileError, "memory_policy ban_scope must be a Symbol (got #{sym.class})."
+      end
+      @rules['ban_scope'] = sym.to_s
+    end
+
+    def require_keyed_by_for(**opts)
+      scope = opts[:scope] || opts['scope']
+      unless scope.is_a?(Symbol)
+        raise CompileError,
+              "memory_policy require_keyed_by_for must take `scope: :<name>` (got #{opts.inspect})."
+      end
+      @rules['require_keyed_by_for'] = scope.to_s
+    end
+
+    def allowed_pools(*names)
+      if names.empty?
+        raise CompileError, "memory_policy allowed_pools requires at least one pool name."
+      end
+      @rules['allowed_pools'] = names.map { |n|
+        unless n.is_a?(Symbol)
+          raise CompileError, "memory_policy allowed_pools entries must be Symbols (got #{n.class})."
+        end
+        n.to_s
+      }
+    end
+
+    def method_missing(name, *_args, **_opts)
+      raise CompileError,
+            "memory_policy.rb: unknown directive `#{name}`. " \
+            "Allowed: max_ttl, default_ttl, max_entries, ban_scope, require_keyed_by_for, allowed_pools."
+    end
+
+    def respond_to_missing?(_name, _include_private = false)
+      false
+    end
+  end
+
   # RED-215: a loaded memory pool — read from
   # app/memory_pools/<name>.pool.rb. Named pools hold the "shared"
   # parts of a memory declaration (strategy, embed, keyed_by) so

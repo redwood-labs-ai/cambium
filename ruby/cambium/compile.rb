@@ -209,6 +209,16 @@ builtin_scopes  = %w[session global]
   end
 end
 
+# RED-239 v2: apply workspace memory policy. Loaded from
+# app/config/memory_policy.rb (absent file = no policy, which is fine).
+# Runs AFTER memory resolution so enforcement sees the final merged
+# shape — pool-inherited retain, resolved scope, etc. Defaults are
+# applied before enforcement so a default_ttl doesn't trip its own
+# max_ttl. Violations raise CompileError with a pointer to the
+# offending decl/pool and the policy file.
+memory_policy = Cambium::MemoryPolicy.load
+memory_policy.apply!(resolved_memory, resolved_pools)
+
 ir = {
   'version' => '0.2',
   'entry' => {
