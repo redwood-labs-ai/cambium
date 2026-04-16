@@ -89,6 +89,15 @@ type GenerateResult = { text: string; usage?: TokenUsage };
 async function generateText(opts: { model: string; system: string; prompt: string; max_tokens?: number; temperature?: number; jsonSchema?: any; }): Promise<GenerateResult> {
   const { provider, name } = parseModelId(opts.model);
 
+  // Force-mock path: `--mock` on the CLI sets CAMBIUM_ALLOW_MOCK=1, which
+  // MUST mean "use the deterministic stub, do not contact any model
+  // backend." Previously this was only a *fallback* on provider fetch
+  // failure, which meant a reachable oMLX/Ollama server swallowed the
+  // flag — breaking the promise of `--mock` as an offline/CI path.
+  if (process.env.CAMBIUM_ALLOW_MOCK === '1') {
+    return { text: mockGenerate(opts.prompt) };
+  }
+
   try {
     if (provider === 'ollama') {
       const body = {
