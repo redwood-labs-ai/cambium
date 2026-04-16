@@ -28,35 +28,54 @@ import {
   stripInlineToolCalls,
   type ToolCallMessage,
 } from './inline-tool-calls.js';
+import {
+  planMemory,
+  readMemoryForRun,
+  commitMemoryWrites,
+  closeBackends,
+  type MemoryPlan,
+} from './memory/runner-integration.js';
+import { parseMemoryKeys, resolveSessionId } from './memory/keys.js';
+import type { SqliteMemoryBackend } from './memory/backend.js';
 
 type IR = any;
 
-type Args = { irPath: string; traceOut?: string; outputOut?: string; mock?: boolean };
+type Args = {
+  irPath: string;
+  traceOut?: string;
+  outputOut?: string;
+  mock?: boolean;
+  memoryKeys: string[];
+};
 
 function parseArgs(argv: string[]): Args {
   let irPath: string | null = null;
   let traceOut: string | undefined;
   let outputOut: string | undefined;
   let mock = false;
+  const memoryKeys: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--ir') irPath = argv[++i];
     else if (a === '--trace') traceOut = argv[++i];
     else if (a === '--out') outputOut = argv[++i];
     else if (a === '--mock') { mock = true; process.env.CAMBIUM_ALLOW_MOCK = '1'; }
+    else if (a === '--memory-key') memoryKeys.push(argv[++i]);
     else if (a === '--help' || a === '-h') {
       console.error(`
 Cambium Runner — step-graph executor
 
 Usage:
-  node --import tsx src/runner.ts --ir <path|-  [--trace <path>] [--out <path>] [--mock]
+  node --import tsx src/runner.ts --ir <path|-> [--trace <path>] [--out <path>] [--mock]
+                                                [--memory-key <name>=<value> ...]
 
 Flags:
-  --ir <path>      IR JSON file, or '-' for stdin
-  --trace <path>   Write trace JSON to <path> (default: runs/<id>/trace.json)
-  --out <path>     Write output JSON to <path> (default: runs/<id>/output.json)
-  --mock           Use deterministic mock instead of live LLM
-  --help, -h       Show this help
+  --ir <path>               IR JSON file, or '-' for stdin
+  --trace <path>            Write trace JSON to <path> (default: runs/<id>/trace.json)
+  --out <path>              Write output JSON to <path> (default: runs/<id>/output.json)
+  --mock                    Use deterministic mock instead of live LLM
+  --memory-key <name>=<val> Value for a keyed_by slot on a memory/pool (repeatable)
+  --help, -h                Show this help
 
 Examples:
   node --import tsx src/runner.ts --ir gen.ir.json
@@ -68,7 +87,7 @@ Examples:
     else throw new Error(`Unknown flag: ${a}\nRun 'node --import tsx src/runner.ts --help' for usage.`);
   }
   if (!irPath) throw new Error('Missing --ir\nRun "node --import tsx src/runner.ts --help" for usage.');
-  return { irPath, traceOut, outputOut, mock };
+  return { irPath, traceOut, outputOut, mock, memoryKeys };
 }
 
 function nowId() {
@@ -363,7 +382,7 @@ function extractJsonObject(text: string): any {
 
 // ── Main: Step-Graph Executor ─────────────────────────────────────────
 async function main() {
-  const { irPath, traceOut, outputOut } = parseArgs(process.argv.slice(2));
+  const { irPath, traceOut, outputOut, memoryKeys } = parseArgs(process.argv.slice(2));
   const irText = irPath === '-' ? readFileSync(0, 'utf8') : readFileSync(irPath, 'utf8');
   const ir: IR = JSON.parse(irText);
 
@@ -435,6 +454,38 @@ async function main() {
     ok: true,
     meta: { tools_checked: toolsAllowed, policy: securityPolicy, ...(packsMeta ? { packs: packsMeta } : {}) },
   });
+
+  // ── Memory (RED-215 phase 3): plan + pre-generate read ──────────────
+  // Each memory decl opens its SQLite bucket, optionally reads recent
+  // entries (sliding_window), and contributes a block that is appended
+  // to the gen's system prompt. The backends are tracked in a Map that's
+  // wired to `process.once('exit', ...)` below, so every exit path —
+  // including the several `process.exit(1)` bailouts in main() — flushes
+  // WAL and closes handles. The explicit `closeBackends` call on the
+  // success path is still there so handles don't linger past the run.
+  let memoryPlans: MemoryPlan[] = [];
+  const memoryBackends: Map<string, SqliteMemoryBackend> = new Map();
+  process.once('exit', () => {
+    if (memoryBackends.size > 0) closeBackends(memoryBackends);
+  });
+  const memoryDecls = ir.policies?.memory ?? [];
+  if (memoryDecls.length > 0) {
+    const keys = parseMemoryKeys(memoryKeys);
+    const sessionId = resolveSessionId(process.env);
+    const memCtx = {
+      input: ir.context?.document ?? '',
+      sessionId,
+      keys,
+      runsRoot: join(process.cwd(), 'runs'),
+    };
+    memoryPlans = planMemory(memoryDecls, memCtx);
+    const { block, trace: readTrace, backends } = readMemoryForRun(memoryPlans);
+    for (const [name, b] of backends) memoryBackends.set(name, b);
+    for (const t of readTrace) trace.steps.push(t);
+    if (block) {
+      ir.system = ir.system ? `${ir.system}\n\n${block}` : block;
+    }
+  }
 
   const correctorNames: string[] = ir.policies?.correctors ?? [];
   const maxRepairAttempts = ir.policies?.max_repair_attempts ?? 2;
@@ -812,6 +863,41 @@ async function main() {
 
     finalParsed = parsed;
     finalOk = true;
+  }
+
+  // ── Memory (RED-215 phase 3): commit turn on success ────────────────
+  // Trivial-default write: one {input, output} entry per writable
+  // bucket. If the gen declared write_memory_via, defer to the retro
+  // agent (phase 4) — we emit a trace note so the run's memory story
+  // is visible even before the agent runtime lands.
+  if (memoryPlans.length > 0) {
+    const hasMemoryAgent = Boolean(ir.policies?.memory_write_via);
+    if (finalOk && !hasMemoryAgent) {
+      try {
+        const writeTrace = commitMemoryWrites(
+          memoryPlans, memoryBackends, ir.context?.document ?? '', finalParsed,
+        );
+        for (const t of writeTrace) trace.steps.push(t);
+      } catch (e: any) {
+        trace.steps.push({
+          type: 'memory.write',
+          id: 'memory_write_failed',
+          ok: false,
+          errors: [{ message: String(e?.message ?? e) }],
+        });
+      }
+    } else if (hasMemoryAgent) {
+      trace.steps.push({
+        type: 'memory.write',
+        id: 'memory_write_deferred',
+        ok: true,
+        meta: {
+          note: `write_memory_via :${ir.policies.memory_write_via} declared — ` +
+            'retro agent (phase 4) will handle writes; default writer skipped.',
+        },
+      });
+    }
+    closeBackends(memoryBackends);
   }
 
   // ── Write outputs ───────────────────────────────────────────────────

@@ -214,9 +214,9 @@ The open questions from the original draft are resolved. Captured here so anyone
 
 1. ~~Design note reviewed and open questions answered.~~ ✅ (2026-04-16)
 2. ~~IR shape + Ruby DSL parsing for `memory :name, ...`, `write_memory_via :agent_name`, `reads_trace_of :agent_name`, and `app/memory_pools/<name>.pool.rb`. The TS runner tolerates the new IR fields but does not execute them yet.~~ ✅ (2026-04-16)
-3. `sqlite-vec` backend skeleton + `:sliding_window` + `:log` strategies (read path + write path + three trace events).
+3. ~~SQLite backend (via `better-sqlite3`; `sqlite-vec` extension lands with phase 5) + `:sliding_window` + `:log` strategies + `memory.read`/`memory.write`/`memory.prune` trace events + system-prompt injection + trivial-default writer.~~ ✅ (2026-04-16)
 4. Retro-agent runtime wiring (`mode :retro`, `reads_trace_of`, sync-only).
-5. `:semantic` strategy (embedding via `embed:`, coordinated with RED-237 alias resolution).
+5. `:semantic` strategy (embedding via `embed:`, coordinated with RED-237 alias resolution — loads the sqlite-vec extension into the same bucket file).
 6. Governance (separate ticket): retention, cross-pool isolation, workspace policy.
 
 ### Phase 2 artifacts (landed)
@@ -224,7 +224,32 @@ The open questions from the original draft are resolved. Captured here so anyone
 - `ruby/cambium/runtime.rb` — `MemoryPool`, `MemoryPoolBuilder`, gen-side `memory`/`write_memory_via`/`reads_trace_of` DSL, plus `_cambium_memory_pool_search_dirs`.
 - `ruby/cambium/compile.rb` — resolves named pools, enforces pool-owned-slot exclusivity, emits `policies.memory` (flattened entries), `policies.memory_pools` (only the pools actually referenced), `policies.memory_write_via`, and top-level `reads_trace_of`.
 - `packages/cambium/app/memory_pools/support_team.pool.rb` — first reference pool.
-- `packages/cambium/tests/compile_memory.test.ts` — 12 compile-shell tests covering valid decls, pool resolution, pool-owned-slot conflicts, missing-pool errors, bad pool names (path-traversal guard), missing-strategy errors, missing-embed errors, unknown opts, invalid strategy symbols, and retro-mode pass-through.
+- `packages/cambium/tests/compile_memory.test.ts` — 13 compile-shell tests covering valid decls, pool resolution, pool-owned-slot conflicts, missing-pool errors, bad pool names (path-traversal guard), missing-strategy errors, missing-embed errors, unknown opts, invalid strategy symbols, duplicate-name rejection, and retro-mode pass-through.
+
+### Phase 3 artifacts (landed)
+
+- `src/memory/backend.ts` — `SqliteMemoryBackend` (via `better-sqlite3`, WAL mode). One SQLite file per bucket; phase 5 loads `sqlite-vec` into the same file alongside the `entries` table.
+- `src/memory/path.ts` — bucket path resolver. `runs/memory/<scope>/<key>/<name>.sqlite`.
+- `src/memory/keys.ts` — `--memory-key name=value` parser + `CAMBIUM_SESSION_ID` resolver (auto-gen UUID + stderr echo when unset).
+- `src/memory/prompt-block.ts` — formats read hits into the `## Memory` / `### <name> (last N entries)` block.
+- `src/memory/runner-integration.ts` — `planMemory`/`readMemoryForRun`/`commitMemoryWrites`/`closeBackends`. Rejects `:semantic` at plan time with a clear "phase 5" error rather than silently no-op'ing.
+- `src/runner.ts` — plan + read before the steps loop (appends block to `ir.system`); commit after a successful run unless `write_memory_via` is declared (then emit a `memory_write_deferred` trace step for phase 4).
+- `cli/cambium.mjs` — `--memory-key name=value` flag, passed through to the TS runner.
+- `src/memory/*.test.ts` — 28 unit tests (backend, keys, path, prompt-block).
+- `packages/cambium/tests/memory_runtime.test.ts` — 3 spawned-CLI integration tests: cross-run read/write cycle, `:log` write-only semantics, and `write_memory_via` deferral.
+
+## CLI usage
+
+```bash
+# One-off run — session id auto-generated, echoed to stderr, written to runs/memory/session/<id>/
+cambium run packages/cambium/app/gens/my_agent.cmb.rb --method analyze --arg fixtures/doc.txt
+
+# Reuse the session id to build up memory across runs
+CAMBIUM_SESSION_ID=sess-abc cambium run my_agent.cmb.rb --method analyze --arg fixtures/doc.txt
+
+# Pool-scoped memory — pass keyed_by values via --memory-key
+cambium run my_agent.cmb.rb --method analyze --arg doc.txt --memory-key team_id=redwood
+```
 
 ### IR shape emitted by phase 2
 
