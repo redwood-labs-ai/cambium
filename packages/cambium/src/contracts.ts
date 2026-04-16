@@ -84,6 +84,33 @@ export const WebResearchResult = Type.Object(
   { additionalProperties: false, $id: 'WebResearchResult' }
 )
 
+// RED-215 phase 4: retro memory-agent output. A memory agent runs
+// after the primary gen, reads its trace, and returns a list of
+// structured writes that the primary runner commits to the
+// corresponding memory buckets. The `memory` field names a slot
+// declared on the primary gen (writes naming an unknown slot are
+// dropped with a trace warning — this is a best-effort surface).
+export const MemoryWrites = Type.Object(
+  {
+    writes: Type.Array(
+      Type.Object(
+        {
+          memory: Type.String({
+            description:
+              'Name of the memory slot to append to. Must match a `memory :<name>` decl on the primary gen.',
+          }),
+          content: Type.String({
+            description:
+              'Free-form content to append. Rendered verbatim into the primary\'s Memory block on future runs.',
+          }),
+        },
+        { additionalProperties: false },
+      ),
+    ),
+  },
+  { additionalProperties: false, $id: 'MemoryWrites' },
+)
+
 // RED-216: agentic tool scaffolder output.
 // The gen produces a typed plan for a new plugin tool; the CLI writes
 // it to disk on user confirm.
