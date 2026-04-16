@@ -43,9 +43,28 @@ CAMBIUM_OMLX_API_KEY=<key> cambium run \
 cat runs/<run_id>/trace.json | jq .
 ```
 
+### 6. (Optional) Add memory
+
+Memory persists across runs. Add a slot to your agent:
+
+```ruby
+memory :conversation, strategy: :sliding_window, size: 20
+```
+
+Reuse a session id so subsequent runs see the prior entry:
+
+```bash
+export CAMBIUM_SESSION_ID=$(uuidgen)
+cambium run packages/cambium/app/gens/my_analyst.cmb.rb \
+  --method analyze --arg packages/cambium/examples/fixtures/incident.txt
+```
+
+Prior entries are injected as a `## Memory` block in the system prompt on every run. Semantic search (`strategy: :semantic, top_k: 5, embed: "omlx:bge-small-en"`) and shared pools (`app/memory_pools/<name>.pool.rb`) are documented in [[P - Memory]]. Memory deps (`better-sqlite3`, `sqlite-vec`) are optional — install them if you use memory.
+
 ## See also
 - [[01 - Core Concepts]]
 - [[P - GenModel]]
 - [[P - generate]]
+- [[P - Memory]]
 - [[C - Trace (observability)]]
 - [[C - Runner (TS runtime)]]

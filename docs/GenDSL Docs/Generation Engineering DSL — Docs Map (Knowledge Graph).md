@@ -18,7 +18,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[P - enrich]]
 - [[P - mode]]
 - [[P - Policy Packs (RED-214)]] — named bundles for `security` + `budget`
-- [[P - Memory (design note)]] — design draft, no implementation yet (RED-215)
+- [[P - Memory]] — `memory` / `write_memory_via` / `reads_trace_of` / `mode :retro` (RED-215)
 
 ## Runtime + compilation
 - [[C - IR (Intermediate Representation)]]

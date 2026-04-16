@@ -34,8 +34,10 @@ That's a complete, runnable LLM program. The compiler turns it into JSON IR. The
 - **Typed contracts** — TypeBox schemas define output shape. Validation catches bad outputs before they propagate.
 - **Repair loops** — Failed validation triggers targeted repair with configurable stop conditions.
 - **Tool use** — Declared, permissioned, logged. No surprise side effects.
+- **Tool sandboxing** — Network egress goes through an SSRF-guarded fetch with IP pinning and per-tool call budgets (RED-137). Bundles available as named policy packs (RED-214).
 - **Citation enforcement** — `grounded_in` verifies quotes exist verbatim in source documents.
 - **Agentic multi-turn** — Models that need to call tools mid-generation get a full conversation loop.
+- **Memory** — Declare `memory :conversation, strategy: :sliding_window` (or `:log`, `:semantic`) to persist across runs; the runtime handles SQLite storage, vec search, system-prompt injection, and post-run writes. Shared pools live in `app/memory_pools/*.pool.rb`; retro memory agents (`mode :retro`) can decide what to remember. Deps are optional — installs without memory don't require the native build.
 - **Full tracing** — Every run produces a `trace.json` with every step, token counts, tool calls, and timing.
 - **Correctors** — Deterministic post-processing (math, dates, currency, citations).
 - **Signals + triggers** — Extract data from outputs and fire deterministic actions.
@@ -65,6 +67,23 @@ CAMBIUM_OMLX_API_KEY=<key> cambium run \
 cat runs/<run_id>/trace.json | jq .
 ```
 
+## Memory (opt-in)
+
+Any gen can declare memory slots that persist across runs:
+
+```ruby
+class Analyst < GenModel
+  model "omlx:Qwen3.5-27B-4bit"
+  system :analyst
+  returns AnalysisReport
+
+  memory :conversation, strategy: :sliding_window, size: 20
+  memory :facts, strategy: :semantic, top_k: 5, embed: "omlx:bge-small-en"
+end
+```
+
+On each run the runtime reads prior entries from `runs/memory/<scope>/<key>/<name>.sqlite`, injects them as a `## Memory` block in the system prompt, and appends a new entry after the run succeeds. Reuse a session across runs by setting `CAMBIUM_SESSION_ID`. Memory deps (`better-sqlite3`, `sqlite-vec`) are **optional** — installs without memory use never pay for the native build.
+
 ## How it works
 
 ```
@@ -91,25 +110,35 @@ output.json + trace.json
 ```
 ├── packages/cambium/
 │   ├── app/
-│   │   ├── gens/          # GenModel definitions (.cmb.rb)
+│   │   ├── gens/          # GenModel definitions (.cmb.rb); retro memory
+│   │   │                  #   agents (mode :retro) live here too
 │   │   ├── systems/       # System prompts (.system.md)
-│   │   └── tools/         # Tool definitions (.tool.json)
+│   │   ├── tools/         # App plugin tools — paired .tool.json + .tool.ts
+│   │   ├── policies/      # Named policy packs (.policy.rb) for security + budget
+│   │   └── memory_pools/  # Named memory pools (.pool.rb) for shared strategy+embed
 │   ├── src/
 │   │   └── contracts.ts   # TypeBox schemas (source of truth)
 │   └── tests/
 ├── src/
-│   ├── runner.ts          # Core runtime (step pipeline)
-│   ├── step-handlers.ts   # Generate, validate, repair, correct
-│   ├── inline-tool-calls.ts  # Gemma/XML tool call parser
-│   ├── golden.ts          # Golden test framework
-│   ├── scripts/
-│   │   └── gaia-eval.ts   # GAIA benchmark eval runner
-│   └── correctors/        # Built-in correctors
+│   ├── runner.ts          # Core runtime (step pipeline + memory lifecycle)
+│   ├── step-handlers.ts   # Generate, validate, repair, correct, tool dispatch
+│   ├── builtin-tools/     # Framework tools — paired .tool.json + .tool.ts
+│   ├── tools/             # Tool infra (registry, ToolContext, network-guard)
+│   ├── memory/            # Memory subsystem (backend, path, keys, retro-agent)
+│   ├── providers/         # Model + embed providers (oMLX, Ollama)
+│   ├── correctors/        # Built-in correctors (math, dates, currency, citations)
+│   ├── signals.ts         # Signal extraction
+│   ├── triggers.ts        # Trigger evaluation
+│   ├── compound.ts        # Review + consensus
+│   ├── enrich.ts          # Sub-agent enrichment
+│   └── schema-describe.ts # Auto-generated schema descriptions
 ├── ruby/cambium/
 │   ├── runtime.rb         # GenModel DSL primitives
 │   └── compile.rb         # Ruby → JSON IR compiler
 ├── cli/
 │   └── cambium.mjs        # CLI entry point
+├── runs/                  # Execution artifacts (ir.json, trace.json, output.json)
+│                          # plus memory/<scope>/<key>/<name>.sqlite buckets
 ├── vscode/cambium-syntax/ # VS Code extension (syntax + LSP)
 └── docs/                  # Knowledge graph docs
 ```
