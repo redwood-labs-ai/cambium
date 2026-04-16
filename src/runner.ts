@@ -513,7 +513,7 @@ async function main() {
       runsRoot: join(process.cwd(), 'runs'),
     };
     memoryPlans = planMemory(memoryDecls, memCtx);
-    const { block, trace: readTrace, backends } = readMemoryForRun(memoryPlans);
+    const { block, trace: readTrace, backends } = await readMemoryForRun(memoryPlans, memCtx);
     for (const [name, b] of backends) memoryBackends.set(name, b);
     for (const t of readTrace) trace.steps.push(t);
     if (block) {
@@ -908,7 +908,7 @@ async function main() {
     const hasMemoryAgent = Boolean(ir.policies?.memory_write_via);
     if (finalOk && !hasMemoryAgent) {
       try {
-        const writeTrace = commitMemoryWrites(
+        const writeTrace = await commitMemoryWrites(
           memoryPlans, memoryBackends, ir.context?.document ?? '', finalParsed,
         );
         for (const t of writeTrace) trace.steps.push(t);
