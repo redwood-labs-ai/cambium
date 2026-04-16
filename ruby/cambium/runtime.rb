@@ -829,6 +829,11 @@ module Cambium
       @_actions = []
     end
 
+    # Invoke a tool handler when the signal has values. The existing
+    # post-generation trigger surface — pure/bounded computations
+    # (e.g. `tool :calculator, operation: :avg, target: "metrics.avg"`)
+    # whose return value is written back into the gen's output at
+    # `target`. Counts against the gen's tool budget.
     def tool(name, **opts)
       action = {
         'on' => @signal_name,
@@ -838,6 +843,26 @@ module Cambium
         'target' => opts[:target]&.to_s
       }.compact
       @_actions << action
+    end
+
+    # RED-212: invoke a custom action handler when the signal has
+    # values. Actions are side-effects declared at compile time
+    # (`action :notify_stderr`, `action :webhook, url: ...`) — same
+    # handler shape as tools (`execute(input, ctx)`), same
+    # permissions model, but addressed through the parallel
+    # ActionRegistry rather than the ToolRegistry. Unlike tools,
+    # actions don't need a `uses :name` allowlist — the author
+    # hard-codes which actions fire where, so there's no "did the
+    # model pick something it shouldn't" concern.
+    def action(name, **opts)
+      act = {
+        'on' => @signal_name,
+        'action' => 'action_call',
+        'name' => name.to_s,
+        'args' => stringify_keys(opts.reject { |k, _| k == :target }),
+        'target' => opts[:target]&.to_s
+      }.compact
+      @_actions << act
     end
 
     private

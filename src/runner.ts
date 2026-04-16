@@ -19,6 +19,7 @@ import {
 } from './step-handlers.js';
 import { extractSignals } from './signals.js';
 import { evaluateTriggers } from './triggers.js';
+import { ActionRegistry } from './actions/registry.js';
 import { runReview, runConsensus } from './compound.js';
 import { runEnrichment } from './enrich.js';
 import { parseBudget, trackBudgetFromTraceStep } from './budget.js';
@@ -442,11 +443,29 @@ async function main() {
   await toolRegistry.loadFromDir(join(RUNNER_DIR, 'builtin-tools'));
   await toolRegistry.loadFromDir(join(process.cwd(), 'packages/cambium/app/tools'));
 
+  // ── Load action registry (RED-212) ─────────────────────────────────
+  // Same load order as tools: framework-builtin first, app second.
+  // Actions are invoked only by triggers (never by `uses :name` on a
+  // gen), so there's no compile-time allowlist to validate against.
+  const actionRegistry = new ActionRegistry();
+  await actionRegistry.loadFromDir(join(RUNNER_DIR, 'builtin-actions'));
+  await actionRegistry.loadFromDir(join(process.cwd(), 'packages/cambium/app/actions'));
+
   const toolsAllowed: string[] = ir.policies?.tools_allowed ?? [];
   // Validate that all declared tools exist in the registry
   for (const t of toolsAllowed) {
     if (!toolRegistry.get(t)) {
       throw new Error(`Tool "${t}" declared in policies.tools_allowed but not found in registry. Available: ${toolRegistry.list().join(', ')}`);
+    }
+  }
+  // Validate that every action_call trigger references a known action.
+  // Fail fast at startup rather than at signal-fire time.
+  for (const t of (ir.triggers ?? [])) {
+    if (t.action === 'action_call' && !actionRegistry.get(t.name)) {
+      throw new Error(
+        `Trigger action "${t.name}" not found in ActionRegistry. ` +
+        `Available: [${actionRegistry.list().join(', ')}]`,
+      );
     }
   }
 
@@ -885,7 +904,7 @@ async function main() {
       if (triggerDefs.length > 0) {
         const triggerResults = await evaluateTriggers(triggerDefs, state, toolRegistry, toolsAllowed, {
           policy: securityPolicy, budget, traceEvents: trace.steps,
-        });
+        }, actionRegistry);
         for (const tr of triggerResults) {
           trace.steps.push(tr.traceEntry);
           if (tr.fired && tr.target && tr.value !== undefined) {
