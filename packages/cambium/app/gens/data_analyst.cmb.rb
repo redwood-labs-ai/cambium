@@ -3,7 +3,7 @@
 # the model itself calls the calculator tool mid-generation.
 
 class DataAnalyst < GenModel
-  model "omlx:Qwen3.5-27B-4bit"
+  model :default
   system :data_analyst
   mode :agentic
   temperature 0.2

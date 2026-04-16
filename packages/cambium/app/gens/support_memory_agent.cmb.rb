@@ -9,7 +9,7 @@
 # `remember` is the ActiveJob#perform of memory agents — the framework
 # always invokes it by that name. Don't rename.
 class SupportMemoryAgent < GenModel
-  model "omlx:Qwen3.5-27B-4bit"
+  model :default
   system :support_memory_agent
   returns MemoryWrites
   mode :retro

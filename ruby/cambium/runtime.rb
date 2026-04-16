@@ -149,6 +149,148 @@ module Cambium
     end
   end
 
+  # RED-237: workspace-configurable model aliases — one file per
+  # workspace at `app/config/models.rb` mapping symbolic names like
+  # `:default` / `:fast` / `:embedding` to literal provider:model
+  # ids. Gens and pools reference aliases by symbol
+  # (`model :default`, `embed: :embedding`); the compiler resolves
+  # them to literals before emitting IR so the runner always sees
+  # a concrete `"omlx:name"` string.
+  #
+  # File syntax is flat, same convention as `.policy.rb` and
+  # `.pool.rb` — each line is `<name> "<literal>"`:
+  #
+  #   default   "omlx:Qwen3.5-27B-4bit"
+  #   fast      "omlx:gemma-4-31b-it-8bit"
+  #   embedding "omlx:bge-small-en"
+  #
+  # A workspace with no `app/config/models.rb` is valid; gens that
+  # only reference literals (never a Symbol) work identically. Only
+  # gens that reference a Symbol require the file, and an undefined
+  # alias raises a clear CompileError listing the available names.
+  class ModelAliases
+    NAME_RE = /\A[a-z][a-z0-9_]*\z/
+
+    attr_reader :aliases, :source_file
+
+    def initialize(aliases, source_file)
+      @aliases = aliases
+      @source_file = source_file
+    end
+
+    def lookup(name)
+      @aliases[name.to_s]
+    end
+
+    def keys
+      @aliases.keys
+    end
+
+    def self.search_candidates(source_file)
+      candidates = []
+      if source_file
+        pkg_dir = File.dirname(File.dirname(File.expand_path(source_file)))
+        candidates << File.join(pkg_dir, 'app', 'config', 'models.rb')
+      end
+      candidates << File.join('packages', 'cambium', 'app', 'config', 'models.rb')
+      candidates.uniq
+    end
+
+    # Load the workspace's model aliases. Returns an empty ModelAliases
+    # if no file is present — not an error; a workspace using only
+    # literals doesn't need the file.
+    def self.load
+      src = Cambium::CompilerState.current_source_file
+      file = search_candidates(src).find { |f| File.exist?(f) }
+      return new({}, nil) if file.nil?
+
+      builder = ModelAliasesBuilder.new
+      begin
+        builder.instance_eval(File.read(file), file)
+      rescue CompileError
+        raise
+      rescue ScriptError, StandardError => e
+        raise CompileError,
+              "Failed to load model aliases from #{file}: #{e.class}: #{e.message}"
+      end
+      new(builder.aliases, file)
+    end
+
+    # Resolve a user-supplied model reference into a literal string.
+    # Rules:
+    #   - Already-literal (contains `:`) — pass through unchanged.
+    #   - String without `:` — treated as an alias name; must be defined.
+    #   - Symbol — alias name; must be defined.
+    # Raises CompileError with the available alias list on miss.
+    def resolve(ref, context:)
+      case ref
+      when Symbol
+        resolve_symbol(ref, context)
+      when String
+        ref.include?(':') ? ref : resolve_symbol(ref.to_sym, context)
+      when nil
+        nil
+      else
+        raise CompileError,
+              "#{context}: model reference must be a String or Symbol (got #{ref.class})"
+      end
+    end
+
+    private
+
+    def resolve_symbol(sym, context)
+      name = sym.to_s
+      hit = @aliases[name]
+      return hit if hit
+
+      avail = @aliases.keys.sort
+      hint = avail.empty? ? " (no aliases defined — create app/config/models.rb)" : ""
+      raise CompileError,
+            "#{context}: unknown model alias :#{name}. " \
+            "Available: [#{avail.join(', ')}]#{hint}" \
+            "#{@source_file ? " (from #{@source_file})" : ''}"
+    end
+  end
+
+  # Eval context for `app/config/models.rb`. Each top-level call like
+  # `default "omlx:..."` captures a (name, literal) pair into the
+  # builder's aliases dict. Uses method_missing so the set of alias
+  # names is open — the file owner picks them — while still enforcing
+  # the identifier-shape regex so a Symbol ref can't interpolate into
+  # anything surprising.
+  class ModelAliasesBuilder
+    attr_reader :aliases
+
+    def initialize
+      @aliases = {}
+    end
+
+    def method_missing(name, *args, **kwargs)
+      unless args.length == 1 && kwargs.empty?
+        super
+        return
+      end
+      literal = args[0]
+      unless literal.is_a?(String)
+        raise CompileError,
+              "model alias :#{name} must map to a String literal (got #{literal.class})"
+      end
+      name_str = name.to_s
+      unless name_str =~ ModelAliases::NAME_RE
+        raise CompileError,
+              "model alias name :#{name} must match #{ModelAliases::NAME_RE.inspect}"
+      end
+      if @aliases.key?(name_str)
+        raise CompileError, "duplicate model alias :#{name_str} in models.rb"
+      end
+      @aliases[name_str] = literal
+    end
+
+    def respond_to_missing?(_name, _include_private = false)
+      true
+    end
+  end
+
   # RED-215: a loaded memory pool — read from
   # app/memory_pools/<name>.pool.rb. Named pools hold the "shared"
   # parts of a memory declaration (strategy, embed, keyed_by) so

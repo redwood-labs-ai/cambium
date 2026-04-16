@@ -2,7 +2,7 @@
 # before the main generation step.
 
 class Analyst < GenModel
-  model "omlx:Qwen3.5-27B-4bit"
+  model :default
   system :analyst
   temperature 0.2
   max_tokens 1200

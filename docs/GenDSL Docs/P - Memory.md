@@ -2,7 +2,7 @@
 
 **Doc ID:** gen-dsl/primitives/memory
 **Status:** Shipped (RED-215 phases 1–5, 2026-04-16)
-**Coordinates with:** [RED-237](https://linear.app/redwood-labs/issue/RED-237) (`:default` model aliases — memory pools' `embed:` slot uses the same aliasing mechanism); [RED-238](https://linear.app/redwood-labs/issue/RED-238) (configurable query source for semantic memory)
+**Coordinates with:** [RED-237](https://linear.app/redwood-labs/issue/RED-237) *(shipped 2026-04-16 — `:default` and other model aliases resolve at compile time; pool files can now use `embed: :embedding` interchangeably with the literal form)*; [RED-238](https://linear.app/redwood-labs/issue/RED-238) (configurable query source for semantic memory)
 **Related:** [[C - Trace (observability)]], [[S - Tool Sandboxing (RED-137)]], [[P - Policy Packs (RED-214)]], [[P - mode]]
 
 ## Purpose

@@ -6,7 +6,7 @@
 # to import. See app/policies/research_defaults.policy.rb.
 
 class WebResearcher < GenModel
-  model "omlx:Qwen3.5-27B-4bit"
+  model :default
   system :web_researcher
   temperature 0.2
   max_tokens 800
