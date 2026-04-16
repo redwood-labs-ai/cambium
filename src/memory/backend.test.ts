@@ -82,6 +82,80 @@ describe('SqliteMemoryBackend (RED-215 phase 3+5)', () => {
   });
 });
 
+describe('SqliteMemoryBackend.prune (RED-239)', () => {
+  function freshBucket(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'cambium-prune-'));
+    return join(dir, 'p.sqlite');
+  }
+
+  it('drops entries older than ttl_seconds', async () => {
+    const path = freshBucket();
+    const b = await SqliteMemoryBackend.open(path);
+    // Three entries. Rewrite the two oldest to have timestamps in the past.
+    b.append('keep-new');
+    b.append('drop-old-1');
+    b.append('drop-old-2');
+    const longAgo = new Date(Date.now() - 10 * 86_400 * 1000).toISOString();
+    (b as any).db.prepare('UPDATE entries SET ts = ? WHERE content LIKE ?').run(longAgo, 'drop-old-%');
+
+    const counts = b.prune({ ttl_seconds: 7 * 86_400 });
+    expect(counts.ttl_count).toBe(2);
+    expect(counts.cap_count).toBe(0);
+
+    const remaining = b.readRecent(10).map(e => e.content);
+    expect(remaining).toEqual(['keep-new']);
+    b.close();
+    rmSync(path, { force: true });
+  });
+
+  it('keeps the newest max_entries and drops the overflow', async () => {
+    const path = freshBucket();
+    const b = await SqliteMemoryBackend.open(path);
+    for (let i = 0; i < 7; i++) b.append(`entry-${i}`);
+
+    const counts = b.prune({ max_entries: 3 });
+    expect(counts.cap_count).toBe(4);
+    expect(counts.ttl_count).toBe(0);
+
+    const remaining = b.readRecent(10).map(e => e.content);
+    expect(remaining).toEqual(['entry-4', 'entry-5', 'entry-6']);
+    b.close();
+    rmSync(path, { force: true });
+  });
+
+  it('is a no-op when neither dimension is exceeded', async () => {
+    const path = freshBucket();
+    const b = await SqliteMemoryBackend.open(path);
+    b.append('a');
+    b.append('b');
+    const counts = b.prune({ ttl_seconds: 86_400, max_entries: 10 });
+    expect(counts.ttl_count).toBe(0);
+    expect(counts.cap_count).toBe(0);
+    expect(b.readRecent(10)).toHaveLength(2);
+    b.close();
+    rmSync(path, { force: true });
+  });
+
+  it('prunes entries_vec rows alongside entries for semantic buckets', async () => {
+    const path = freshBucket();
+    const b = await SqliteMemoryBackend.open(path);
+    await b.initSemantic('mock:bge-small', MOCK_DIM);
+    b.appendSemantic('one', mockEmbed('one', MOCK_DIM));
+    b.appendSemantic('two', mockEmbed('two', MOCK_DIM));
+    b.appendSemantic('three', mockEmbed('three', MOCK_DIM));
+
+    // Cap at 1 — two vec rows should be dropped alongside entries.
+    b.prune({ max_entries: 1 });
+
+    const entriesRow = (b as any).db.prepare('SELECT COUNT(*) AS n FROM entries').get();
+    const vecRow = (b as any).db.prepare('SELECT COUNT(*) AS n FROM entries_vec').get();
+    expect(entriesRow.n).toBe(1);
+    expect(vecRow.n).toBe(1);
+    b.close();
+    rmSync(path, { force: true });
+  });
+});
+
 describe('SqliteMemoryBackend semantic (RED-215 phase 5)', () => {
   function freshBucket(): string {
     const dir = mkdtempSync(join(tmpdir(), 'cambium-sem-'));

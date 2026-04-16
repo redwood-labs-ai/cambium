@@ -208,6 +208,78 @@ export class SqliteMemoryBackend {
     return rows as Array<MemoryEntry & { score: number }>;
   }
 
+  /**
+   * RED-239: prune expired / over-cap entries in place. Called before
+   * reads so a stale bucket never injects old data into a prompt. For
+   * semantic buckets the matching `entries_vec` rows are removed in
+   * the same transaction so the vec index stays consistent.
+   *
+   * Returns per-reason counts so the caller can emit `memory.prune`
+   * trace events. Returns zero counts when nothing needed pruning —
+   * the caller decides whether a zero-count event is worth recording.
+   *
+   * The retain shape is canonical: `{ttl_seconds?, max_entries?}`
+   * (parsed on the Ruby side, so here we just read numbers). Either
+   * field absent = that dimension not enforced.
+   */
+  prune(retain: { ttl_seconds?: number; max_entries?: number }): { ttl_count: number; cap_count: number } {
+    const hasVec = this.db
+      .prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='entries_vec'`)
+      .get() !== undefined;
+
+    const deleteByIdNested = (ids: number[]): void => {
+      if (ids.length === 0) return;
+      // Batched to stay well under SQLite's default 999-parameter limit.
+      const CHUNK = 500;
+      for (let i = 0; i < ids.length; i += CHUNK) {
+        const chunk = ids.slice(i, i + CHUNK);
+        const placeholders = chunk.map(() => '?').join(',');
+        this.db.prepare(`DELETE FROM entries WHERE id IN (${placeholders})`).run(...chunk);
+        if (hasVec) {
+          this.db.prepare(`DELETE FROM entries_vec WHERE entry_id IN (${placeholders})`).run(...chunk);
+        }
+      }
+    };
+
+    // RED-239: wrap BOTH phases (TTL delete + cap delete) in a single
+    // outer transaction. better-sqlite3 uses savepoints for nested
+    // transactions, so this commits either everything or nothing — an
+    // abnormal exit between TTL and cap can't leave a partially pruned
+    // bucket. The cap SELECT sees the post-TTL row count because SQLite
+    // gives the enclosing transaction a consistent view.
+    const pruneAll = this.db.transaction(() => {
+      let ttl = 0;
+      let cap = 0;
+
+      if (typeof retain.ttl_seconds === 'number' && retain.ttl_seconds > 0) {
+        const cutoff = new Date(Date.now() - retain.ttl_seconds * 1000).toISOString();
+        const expired = this.db
+          .prepare('SELECT id FROM entries WHERE ts < ?')
+          .all(cutoff) as Array<{ id: number }>;
+        if (expired.length > 0) {
+          deleteByIdNested(expired.map(r => r.id));
+          ttl = expired.length;
+        }
+      }
+
+      if (typeof retain.max_entries === 'number' && retain.max_entries > 0) {
+        const row = this.db.prepare('SELECT COUNT(*) AS n FROM entries').get() as { n: number };
+        if (row.n > retain.max_entries) {
+          const overflow = row.n - retain.max_entries;
+          const toDrop = this.db
+            .prepare('SELECT id FROM entries ORDER BY id ASC LIMIT ?')
+            .all(overflow) as Array<{ id: number }>;
+          deleteByIdNested(toDrop.map(r => r.id));
+          cap = toDrop.length;
+        }
+      }
+
+      return { ttl_count: ttl, cap_count: cap };
+    });
+
+    return pruneAll();
+  }
+
   getMeta(key: string): string | null {
     const row = this.db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as any;
     return row ? row.value : null;

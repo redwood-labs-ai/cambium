@@ -16,6 +16,11 @@ export type MemoryDecl = {
   top_k?: number;
   keyed_by?: string;
   embed?: string;
+  /** RED-239: retention policy. Both keys optional; either-or-both enforced. */
+  retain?: {
+    ttl_seconds?: number;
+    max_entries?: number;
+  };
 };
 
 /** Resolved execution plan for one MemoryDecl — what the runner will do with it this run. */

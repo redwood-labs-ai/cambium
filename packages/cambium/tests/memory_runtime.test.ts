@@ -153,6 +153,50 @@ end
     expect(write.meta.written_by).toBe('default');
   }, 60_000);
 
+  // RED-239: retention
+  it('prunes by max_entries at read time and emits memory.prune', () => {
+    const id = 'retain-' + randomUUID();
+    sessionIds.push(id);
+
+    const { genPath } = writeGen(`
+class RetainCapGen < GenModel
+  model "omlx:Qwen3.5-27B-4bit"
+  system :analyst
+  returns AnalysisReport
+
+  memory :conversation, strategy: :sliding_window, size: 10, retain: { max_entries: 1 }
+
+  def analyze(x)
+    generate "Analyze: #{x}" do
+      returns AnalysisReport
+    end
+  end
+end
+`);
+
+    // First run writes 1 entry. No prune yet (count = 1, cap = 1).
+    const run1 = runCli(genPath, id);
+    expect([0, 1]).toContain(run1.status);
+    const trace1 = JSON.parse(readFileSync(run1.tracePath, 'utf8'));
+    expect(trace1.steps.find((s: any) => s.type === 'memory.prune')).toBeUndefined();
+
+    // Second run: bucket has 1, prune (no-op), read (1 hit), then
+    // write (2 in bucket). Third run will actually prune.
+    const run2 = runCli(genPath, id);
+    expect([0, 1]).toContain(run2.status);
+
+    // Third run: bucket has 2, prune drops the oldest → 1, read (1
+    // hit), then write (2 in bucket again).
+    const run3 = runCli(genPath, id);
+    expect([0, 1]).toContain(run3.status);
+    const trace3 = JSON.parse(readFileSync(run3.tracePath, 'utf8'));
+    const prune = trace3.steps.find((s: any) => s.type === 'memory.prune');
+    expect(prune).toBeDefined();
+    expect(prune.meta.reason).toBe('cap');
+    expect(prune.meta.count).toBe(1);
+    expect(prune.meta.max_entries).toBe(1);
+  }, 90_000);
+
   it('routes writes through the retro agent when write_memory_via is declared', () => {
     // Phase 3 stubbed this as a `memory_write_deferred` no-op. Phase 4
     // replaces that with real agent invocation; the fuller retro-flow
