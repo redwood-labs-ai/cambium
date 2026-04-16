@@ -70,6 +70,44 @@ export async function readMemoryForRun(
     const backend = await SqliteMemoryBackend.open(plan.bucketPath);
     backends.set(plan.decl.name, backend);
 
+    // RED-239: prune before reading. Retention is enforced here (not
+    // on write) because reads are what expose stale data to the model;
+    // a bucket that's never read stays fat but never injects. `:log`
+    // decls fall through to this path too — they have readN:null but
+    // still benefit from TTL/cap enforcement at run start.
+    if (plan.decl.retain) {
+      const r = plan.decl.retain;
+      const counts = backend.prune(r);
+      if (counts.ttl_count > 0) {
+        trace.push({
+          id: `memory_prune_${plan.decl.name}_ttl`,
+          type: 'memory.prune',
+          ok: true,
+          meta: {
+            scope: plan.decl.scope,
+            name: plan.decl.name,
+            reason: 'ttl',
+            count: counts.ttl_count,
+            ttl_seconds: r.ttl_seconds,
+          },
+        });
+      }
+      if (counts.cap_count > 0) {
+        trace.push({
+          id: `memory_prune_${plan.decl.name}_cap`,
+          type: 'memory.prune',
+          ok: true,
+          meta: {
+            scope: plan.decl.scope,
+            name: plan.decl.name,
+            reason: 'cap',
+            count: counts.cap_count,
+            max_entries: r.max_entries,
+          },
+        });
+      }
+    }
+
     if (plan.readN === null) {
       // :log — write-only strategy. Emit a zero-hit event for trace
       // parity so the memory.read step always appears per decl.

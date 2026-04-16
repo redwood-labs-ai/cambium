@@ -288,6 +288,136 @@ end
     expect(stderr).toMatch(/memory slot with this name is already declared/)
   })
 
+  // RED-239: retention parsing
+  it('parses retain: "30d" into ttl_seconds', () => {
+    const gen = writeGen(`
+class RetainDurationGen < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  memory :x, strategy: :sliding_window, size: 5, retain: "30d"
+  def go(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`)
+    const ir = compile(gen, 'go', FIXTURE_ARG)
+    expect(ir.policies.memory[0].retain).toEqual({ ttl_seconds: 2592000 })
+  })
+
+  it('parses retain: { max_entries: N } and retain: { ttl:, max_entries: } hash forms', () => {
+    const gen = writeGen(`
+class RetainHashGen < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  memory :cap,  strategy: :log, retain: { max_entries: 100 }
+  memory :both, strategy: :log, retain: { ttl: "7d", max_entries: 500 }
+  def go(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`)
+    const ir = compile(gen, 'go', FIXTURE_ARG)
+    expect(ir.policies.memory[0].retain).toEqual({ max_entries: 100 })
+    expect(ir.policies.memory[1].retain).toEqual({ ttl_seconds: 604800, max_entries: 500 })
+  })
+
+  it('rejects a gen-side retain when scope is a named pool (pool-owned)', () => {
+    const gen = writeGen(`
+class OverrideRetainGen < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  memory :x, scope: :support_team, retain: "1d"
+  def go(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`)
+    const stderr = compileExpectError(gen, 'go', FIXTURE_ARG)
+    expect(stderr).toMatch(/pool is the source of truth/)
+    expect(stderr).toMatch(/retain/)
+  })
+
+  it('rejects a malformed retain duration string', () => {
+    const gen = writeGen(`
+class BadRetainGen < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  memory :x, strategy: :log, retain: "thirty-days"
+  def go(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`)
+    const stderr = compileExpectError(gen, 'go', FIXTURE_ARG)
+    expect(stderr).toMatch(/must match/)
+  })
+
+  it('rejects a zero-duration retain ("0d") — silent no-op would hide the misconfiguration', () => {
+    const gen = writeGen(`
+class ZeroRetainGen < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  memory :x, strategy: :log, retain: "0d"
+  def go(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`)
+    const stderr = compileExpectError(gen, 'go', FIXTURE_ARG)
+    expect(stderr).toMatch(/must be positive/)
+  })
+
+  it('rejects a retain duration above the 10-year cap — protects TS from arithmetic overflow', () => {
+    const gen = writeGen(`
+class HugeRetainGen < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  memory :x, strategy: :log, retain: "99999d"
+  def go(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`)
+    const stderr = compileExpectError(gen, 'go', FIXTURE_ARG)
+    expect(stderr).toMatch(/exceeds the 10-year cap/)
+  })
+
+  it('rejects retain hash with unknown keys', () => {
+    const gen = writeGen(`
+class UnknownRetainKeyGen < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  memory :x, strategy: :log, retain: { forever: true }
+  def go(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`)
+    const stderr = compileExpectError(gen, 'go', FIXTURE_ARG)
+    expect(stderr).toMatch(/unknown retain key/)
+  })
+
   it('emits write_memory_via and reads_trace_of into IR', () => {
     const gen = writeGen(`
 class RetroGen < GenModel

@@ -14,7 +14,8 @@ Declare per-gen memory slots that persist across runs. The runtime handles SQLit
 - A gen MAY declare any number of `memory :name, strategy:, scope:, …` slots. Each slot maps to one SQLite file at `runs/memory/<scope>/<key>/<name>.sqlite`.
 - Three strategies MUST be supported: `:sliding_window` (read last N), `:log` (write-only), `:semantic` (vec-search against a query embedding).
 - `:session` scope auto-addresses via `CAMBIUM_SESSION_ID` (auto-generated UUID echoed to stderr when unset). `:global` with no `keyed_by:` addresses a single workspace bucket. Named-pool scopes and `:global` with `keyed_by:` require a `--memory-key <name>=<value>` at run time.
-- Pool-owned slots (`strategy`, `embed`, `keyed_by`) MUST be set on the pool file when scope is a named pool; any attempt to set them at the call site is a compile error.
+- Pool-owned slots (`strategy`, `embed`, `keyed_by`, `retain`) MUST be set on the pool file when scope is a named pool; any attempt to set them at the call site is a compile error.
+- `retain:` (RED-239) accepts a duration string (`"30d"`), an entries cap (`{max_entries: N}`), or both (`{ttl: "7d", max_entries: N}`). Duration values MUST be positive and MUST NOT exceed 10 years. Prune runs before every read — a bucket that isn't read keeps its entries, but a stale entry never reaches the model.
 - Memory writes happen only after `finalOk`; a failed validation/repair run does NOT append.
 - When `write_memory_via :Agent` is declared, the primary runner invokes the retro agent and applies its `MemoryWrites`; trivial-default writer is bypassed. Retro-agent failures emit trace steps with `ok: false` but do NOT fail the primary run (best-effort writes — the primary's output is the contract).
 - Retro agents have `mode :retro`, `reads_trace_of :primary`, `returns MemoryWrites`, and a `remember(ctx)` method. The framework always invokes them via that method name.

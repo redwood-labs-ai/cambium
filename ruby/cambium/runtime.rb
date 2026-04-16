@@ -291,6 +291,94 @@ module Cambium
     end
   end
 
+  # RED-239: parse and normalize `retain:` values into a canonical
+  # IR hash. Accepted forms:
+  #
+  #   retain: "30d"                         # duration string → ttl_seconds
+  #   retain: { max_entries: 1000 }         # entry cap only
+  #   retain: { ttl: "7d", max_entries: 500 }  # both
+  #
+  # Always emits `{ "ttl_seconds" => Integer? , "max_entries" => Integer? }`
+  # — whichever keys were set. The runner's prune path then reads one
+  # or both keys without having to re-parse duration strings.
+  module Retention
+    module_function
+
+    DURATION_RE = /\A(\d+)([smhdw])\z/
+    UNIT_SECONDS = { 's' => 1, 'm' => 60, 'h' => 3600, 'd' => 86_400, 'w' => 604_800 }.freeze
+    ALLOWED_HASH_KEYS = %w[ttl max_entries].freeze
+
+    def parse(value, context:)
+      case value
+      when nil
+        nil
+      when String
+        ttl_seconds = parse_duration!(value, context: context)
+        { 'ttl_seconds' => ttl_seconds }
+      when Integer
+        raise ArgumentError,
+              "#{context}: bare integer retain (#{value}) is ambiguous. " \
+              "Use retain: \"#{value}s\" for a TTL or retain: { max_entries: #{value} } for a cap."
+      when Hash
+        str_keys = value.transform_keys(&:to_s)
+        unknown = str_keys.keys - ALLOWED_HASH_KEYS
+        unless unknown.empty?
+          raise ArgumentError,
+                "#{context}: unknown retain key(s) #{unknown.join(', ')}. " \
+                "Allowed: #{ALLOWED_HASH_KEYS.join(', ')}."
+        end
+        out = {}
+        if str_keys['ttl']
+          out['ttl_seconds'] = parse_duration!(str_keys['ttl'], context: "#{context} ttl")
+        end
+        if (cap = str_keys['max_entries'])
+          unless cap.is_a?(Integer) && cap > 0
+            raise ArgumentError,
+                  "#{context} max_entries must be a positive Integer (got #{cap.inspect})."
+          end
+          out['max_entries'] = cap
+        end
+        raise ArgumentError, "#{context}: retain hash must set at least one of #{ALLOWED_HASH_KEYS.join(', ')}." if out.empty?
+        out
+      else
+        raise ArgumentError,
+              "#{context}: retain must be a duration string (e.g. \"30d\") or a hash " \
+              "(got #{value.class})."
+      end
+    end
+
+    # Upper bound on retain TTLs. Ten years in seconds. Protects the TS
+    # prune path — `Date.now() - ttl_seconds * 1000` exceeds
+    # Number.MAX_SAFE_INTEGER for values above ~285000 years and crashes
+    # with RangeError on `toISOString()`. Ten years is comfortably under
+    # that and covers every legitimate retention period. Tighten the cap
+    # if a stricter policy is ever needed; don't loosen without also
+    # widening the TS arithmetic.
+    MAX_TTL_SECONDS = 10 * 365 * 86_400
+
+    def parse_duration!(str, context:)
+      m = str.match(DURATION_RE)
+      unless m
+        raise ArgumentError,
+              "#{context}: duration '#{str}' must match /\\A\\d+[smhdw]\\z/ " \
+              "(e.g. \"30d\", \"7h\", \"90m\")."
+      end
+      seconds = m[1].to_i * UNIT_SECONDS[m[2]]
+      if seconds <= 0
+        raise ArgumentError,
+              "#{context}: duration '#{str}' must be positive (got #{seconds}s). " \
+              "A zero TTL would silently no-op at runtime."
+      end
+      if seconds > MAX_TTL_SECONDS
+        raise ArgumentError,
+              "#{context}: duration '#{str}' (#{seconds}s) exceeds the 10-year cap. " \
+              "Ten years is the maximum supported retention. Shorten the duration or " \
+              "delete the bucket manually for longer-term storage."
+      end
+      seconds
+    end
+  end
+
   # RED-215: a loaded memory pool — read from
   # app/memory_pools/<name>.pool.rb. Named pools hold the "shared"
   # parts of a memory declaration (strategy, embed, keyed_by) so
@@ -307,7 +395,7 @@ module Cambium
     # of these — they belong to the shared definition. Reader knobs
     # like `size` and `top_k` stay on the memory decl because they
     # vary per use site.
-    POOL_OWNED_SLOTS = %w[strategy embed keyed_by].freeze
+    POOL_OWNED_SLOTS = %w[strategy embed keyed_by retain].freeze
 
     attr_reader :name, :slots, :file
 
@@ -404,6 +492,16 @@ module Cambium
 
     def keyed_by(key)
       @pool.slots['keyed_by'] = key.to_s
+    end
+
+    # RED-239: retention policy for this pool. Accepts a duration
+    # string ("30d"), an entries cap ({max_entries: 1000}), or both
+    # ({ttl: "7d", max_entries: 500}). Normalized into a canonical
+    # `{ttl_seconds?, max_entries?}` hash at parse time so the IR
+    # carries a single shape the TS runner can act on without
+    # re-parsing.
+    def retain(value)
+      @pool.slots['retain'] = Retention.parse(value, context: "memory pool retain")
     end
   end
 
@@ -677,11 +775,11 @@ module Cambium
       # Phase 2 (this ticket) parses + validates and emits IR under
       # policies.memory. The TS runner ignores memory entries until
       # phase 3 wires up the sqlite-vec backend.
-      def memory(name, strategy: nil, scope: nil, size: nil, top_k: nil, keyed_by: nil, embed: nil, **extra)
+      def memory(name, strategy: nil, scope: nil, size: nil, top_k: nil, keyed_by: nil, embed: nil, retain: nil, **extra)
         unless extra.empty?
           raise ArgumentError,
                 "memory #{name}: unknown option(s) #{extra.keys.join(', ')}. " \
-                "Recognized: strategy, scope, size, top_k, keyed_by, embed."
+                "Recognized: strategy, scope, size, top_k, keyed_by, embed, retain."
         end
 
         entry = { 'name' => name.to_s, 'scope' => (scope || :session).to_s }
@@ -699,6 +797,9 @@ module Cambium
         entry['top_k']    = top_k             unless top_k.nil?
         entry['keyed_by'] = keyed_by.to_s     unless keyed_by.nil?
         entry['embed']    = embed.to_s        unless embed.nil?
+        unless retain.nil?
+          entry['retain'] = Cambium::Retention.parse(retain, context: "memory #{name} retain")
+        end
 
         _cambium_defaults[:memory] ||= []
         if _cambium_defaults[:memory].any? { |m| m['name'] == entry['name'] }
