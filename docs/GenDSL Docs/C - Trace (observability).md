@@ -29,6 +29,17 @@ A trace MUST include:
 | `Repair` | Repair-loop iteration. | `attempt`, `strategy`, `errors_before`, `errors_after` |
 | `ExtractSignals` / `Trigger` | Signal extraction + trigger evaluation (see [[C - Signals, State, and Triggers]]). |
 | `GroundingCheck` | Citation verification. | `citations_verified`, `failures` |
+| `memory.read` | Per memory decl, before `Generate`. See RED-215 section below. | `strategy`, `scope`, `name`, `k`, `hits`, `bytes`, `embed_model?`, `embed_dim?` |
+| `memory.write` | Per writable memory decl, after `finalOk`. | `name`, `entry_id`, `bytes`, `written_by`, `strategy?`, `embed_model?` |
+| `memory.prune` | On TTL/cap eviction (governance follow-up; wired but not yet fired). | `reason` (`"ttl"` \| `"cap"`), `count` |
+
+## Memory events (RED-215)
+
+Emitted per memory decl alongside the step pipeline. Read events run before `Generate`; write events run after the validate/repair loop succeeds (or are replaced by a retro-agent dispatch when `write_memory_via` is declared).
+
+- **`memory.read`** — fires once per decl. `hits: 0` is normal for empty buckets or `:log` strategy. For `:semantic` the meta includes the `embed_model` and `embed_dim` actually used; for `:sliding_window` it includes `k` (= `size`).
+- **`memory.write`** — fires once per writable decl on success. `written_by: "default"` for the trivial-default writer; `written_by: "agent:<ClassName>"` when a retro agent authored the write. Retro-agent failure modes emit `memory.write` with `ok: false` (`memory_write_agent_not_found`, `memory_write_agent_failed`, `memory_write_agent_dropped`) — the primary run still exits 0 (best-effort writes).
+- **`memory.prune`** — reserved for the governance ticket. Meta shape is locked (`reason`, `count`) so the governance impl lands additively.
 
 ## Tool-policy events (RED-137)
 
@@ -41,3 +52,4 @@ Events emitted under `type: "tool.*"` alongside the `ToolCall` step whenever the
 - [[N - Failure Modes & Debugging]]
 - [[C - Repair Loop]]
 - [[S - Tool Sandboxing (RED-137)]]
+- [[P - Memory]]
