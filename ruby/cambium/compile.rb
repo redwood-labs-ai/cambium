@@ -134,6 +134,58 @@ if defs[:system]
   end
 end
 
+# RED-215: resolve memory declarations against named pools.
+#
+# Each `memory :x, scope: :support_team, top_k: 5` on a gen becomes
+# an entry in policies.memory. When scope is a named pool (not :session
+# or :global), the pool's file is loaded and its authoritative slots
+# (strategy/embed/keyed_by) are merged into the entry. Attempting to
+# override a pool-owned slot at the gen site is a compile error.
+#
+# The runner (phase 3+) consumes the flattened entries plus the
+# resolved pool definitions in `policies.memory_pools` — this is the
+# same "one source of truth per slot" stance RED-214 took for policy
+# packs, adapted to the per-decl shape of memory.
+resolved_memory = []
+resolved_pools  = {}
+builtin_scopes  = %w[session global]
+
+(defs[:memory] || []).each do |m|
+  scope = m['scope']
+  if builtin_scopes.include?(scope)
+    if m['strategy'].nil?
+      raise Cambium::CompileError,
+            "memory '#{m['name']}' scope: :#{scope} needs `strategy:` " \
+            "(:sliding_window, :semantic, :log)."
+    end
+    if m['strategy'] == 'semantic' && m['embed'].nil?
+      raise Cambium::CompileError,
+            "memory '#{m['name']}' declares strategy :semantic but no `embed:` model. " \
+            "Add `embed \"omlx:bge-small-en\"` or `embed :embedding`."
+    end
+    resolved_memory << m
+  else
+    # Named pool — load it (once; subsequent references hit the cache)
+    # and enforce pool-owned-slot exclusivity.
+    pool = (resolved_pools[scope] ||= begin
+      loaded = Cambium::MemoryPool.load(scope, klass._cambium_memory_pool_search_dirs)
+      loaded.slots.dup
+    end)
+
+    conflicts = Cambium::MemoryPool::POOL_OWNED_SLOTS.select { |k| m.key?(k) }
+    unless conflicts.empty?
+      raise Cambium::CompileError,
+            "memory '#{m['name']}' scope: :#{scope} — the pool is the source of truth " \
+            "for #{Cambium::MemoryPool::POOL_OWNED_SLOTS.join(', ')}. " \
+            "Remove #{conflicts.map { |c| "`#{c}:`" }.join(' and ')} from the memory declaration " \
+            "(edit the pool instead)."
+    end
+
+    merged = pool.merge(m) # pool fills strategy/embed/keyed_by; m supplies name/scope + reader knobs
+    resolved_memory << merged
+  end
+end
+
 ir = {
   'version' => '0.2',
   'entry' => {
@@ -154,8 +206,12 @@ ir = {
     'constraints' => (defs[:constraints] || {}),
     'grounding' => defs[:grounding],
     'security' => Cambium.flatten_slot_state(defs[:security]),
-    'budget'   => Cambium.flatten_slot_state(defs[:budget])
+    'budget'   => Cambium.flatten_slot_state(defs[:budget]),
+    'memory'           => resolved_memory,
+    'memory_pools'     => resolved_pools,
+    'memory_write_via' => defs[:write_memory_via]
   },
+  'reads_trace_of' => defs[:reads_trace_of],
   'returnSchemaId' => defs[:returnSchema],
   'context' => {
     'document' => arg

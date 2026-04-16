@@ -127,26 +127,28 @@ Three scope kinds, covering all the cases `:user` / `:gen` would have covered wi
 
 ### Named pools are file-declared
 
-Each named pool is defined in its own file under `packages/cambium/app/memory_pools/<name>.pool.rb`, mirroring the [one-file-per-object invariant](../Generation%20Engineering%20DSL%20-%20Spec%20Draft.md) Cambium uses everywhere else (tools → `.tool.json`+`.tool.ts`, policies → `.policy.rb`, systems → `.system.md`). Example:
+Each named pool is defined in its own file under `packages/cambium/app/memory_pools/<name>.pool.rb`, mirroring the one-file-per-object invariant Cambium uses everywhere else (tools → `.tool.json`+`.tool.ts`, policies → `.policy.rb`, systems → `.system.md`). The filename is the pool name; the body sets the slots with flat directives, matching the `.policy.rb` shape from RED-214:
 
 ```ruby
 # packages/cambium/app/memory_pools/support_team.pool.rb
-memory_pool :support_team do
-  strategy    :semantic
-  backend     :sqlite_vec
-  embed       :embedding        # resolves via RED-237 model aliases
-  keyed_by    :team_id
-  retain      "90d"             # v1 may defer; placeholder for governance
-end
+strategy :semantic
+embed    "omlx:bge-small-en"    # literal, or an alias symbol: `:embedding` (RED-237)
+keyed_by :team_id
 ```
 
-A gen then references it by symbol:
+A gen references the pool by symbol:
 
 ```ruby
-memory :user_facts, scope: :support_team, strategy: :semantic, top_k: 5
+memory :user_facts, scope: :support_team, top_k: 5
 ```
 
-**No inline-on-first-use.** A gen referencing an undeclared pool is a compile-time error with the available pool names listed. This keeps pool definitions discoverable and avoids ordering-dependent shape drift.
+The pool is authoritative on `strategy`, `embed`, and `keyed_by` — those are the shared parts. The gen can only add reader knobs (`size`, `top_k`). Setting any pool-owned slot at the gen's call site is a compile error; if you need a different strategy or embed, define a new pool file.
+
+**No inline-on-first-use.** A gen referencing an undeclared pool is a compile-time error that names the missing pool and lists where the compiler looked. This keeps pool definitions discoverable and avoids ordering-dependent shape drift.
+
+**Out of scope for v1 pool files** (parsed in a later phase or never):
+- `backend` — phase 2 implicitly uses sqlite-vec for every pool; add the directive when a second backend exists.
+- `retain` — governance (TTL/caps) lands in the separate follow-up ticket.
 
 ### Keying: `keyed_by: <symbol>` (decided)
 
@@ -211,8 +213,37 @@ The open questions from the original draft are resolved. Captured here so anyone
 ## Implementation phases
 
 1. ~~Design note reviewed and open questions answered.~~ ✅ (2026-04-16)
-2. IR shape + Ruby DSL parsing for `memory :name, ...`, `write_memory_via :agent_name`, and `app/memory_pools/<name>.pool.rb`.
+2. ~~IR shape + Ruby DSL parsing for `memory :name, ...`, `write_memory_via :agent_name`, `reads_trace_of :agent_name`, and `app/memory_pools/<name>.pool.rb`. The TS runner tolerates the new IR fields but does not execute them yet.~~ ✅ (2026-04-16)
 3. `sqlite-vec` backend skeleton + `:sliding_window` + `:log` strategies (read path + write path + three trace events).
 4. Retro-agent runtime wiring (`mode :retro`, `reads_trace_of`, sync-only).
 5. `:semantic` strategy (embedding via `embed:`, coordinated with RED-237 alias resolution).
 6. Governance (separate ticket): retention, cross-pool isolation, workspace policy.
+
+### Phase 2 artifacts (landed)
+
+- `ruby/cambium/runtime.rb` — `MemoryPool`, `MemoryPoolBuilder`, gen-side `memory`/`write_memory_via`/`reads_trace_of` DSL, plus `_cambium_memory_pool_search_dirs`.
+- `ruby/cambium/compile.rb` — resolves named pools, enforces pool-owned-slot exclusivity, emits `policies.memory` (flattened entries), `policies.memory_pools` (only the pools actually referenced), `policies.memory_write_via`, and top-level `reads_trace_of`.
+- `packages/cambium/app/memory_pools/support_team.pool.rb` — first reference pool.
+- `packages/cambium/tests/compile_memory.test.ts` — 12 compile-shell tests covering valid decls, pool resolution, pool-owned-slot conflicts, missing-pool errors, bad pool names (path-traversal guard), missing-strategy errors, missing-embed errors, unknown opts, invalid strategy symbols, and retro-mode pass-through.
+
+### IR shape emitted by phase 2
+
+```json
+{
+  "policies": {
+    "memory": [
+      { "name": "conversation", "scope": "session", "strategy": "sliding_window", "size": 20 },
+      { "name": "user_facts",   "scope": "support_team", "strategy": "semantic",
+        "embed": "omlx:bge-small-en", "keyed_by": "team_id", "top_k": 5 }
+    ],
+    "memory_pools": {
+      "support_team": { "strategy": "semantic", "embed": "omlx:bge-small-en", "keyed_by": "team_id" }
+    },
+    "memory_write_via": "support_memory_agent"
+  },
+  "mode": "retro",
+  "reads_trace_of": "support_agent"
+}
+```
+
+Only pools actually referenced by this gen are inlined under `policies.memory_pools` — the runner doesn't need to know about pool files it isn't going to touch.

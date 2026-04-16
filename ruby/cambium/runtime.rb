@@ -149,6 +149,122 @@ module Cambium
     end
   end
 
+  # RED-215: a loaded memory pool — read from
+  # app/memory_pools/<name>.pool.rb. Named pools hold the "shared"
+  # parts of a memory declaration (strategy, embed, keyed_by) so
+  # multiple gens can opt in without duplicating the config.
+  #
+  # Per the decisions locked in the design note (doc ID
+  # gen-dsl/primitives/memory): the pool is authoritative on
+  # strategy/embed/keyed_by; referencing gens can only set reader
+  # knobs (size, top_k). Any gen-side attempt to override a
+  # pool-owned slot is a compile error. This mirrors the per-slot
+  # mixing rule from RED-214.
+  class MemoryPool
+    # Slots the pool owns. A gen referencing the pool cannot set any
+    # of these — they belong to the shared definition. Reader knobs
+    # like `size` and `top_k` stay on the memory decl because they
+    # vary per use site.
+    POOL_OWNED_SLOTS = %w[strategy embed keyed_by].freeze
+
+    attr_reader :name, :slots, :file
+
+    def initialize(name)
+      @name  = name.to_s
+      @slots = {}
+      @file  = nil
+    end
+
+    # Resolve a pool name to a file in one of the search dirs, eval
+    # it inside a MemoryPoolBuilder, return the populated MemoryPool.
+    def self.load(name, search_dirs)
+      # Same safety regex as PolicyPack.load — a Symbol like
+      # `:"../secret"` must not be interpolable into a path that
+      # escapes the memory_pools dir. Compile-time on trusted source,
+      # but cheap to harden.
+      name_str = name.to_s
+      unless name_str =~ /\A[a-z][a-z0-9_]*\z/
+        raise CompileError,
+              "Invalid memory pool name '#{name}'. Pool names must be lowercase " \
+              "identifiers matching /\\A[a-z][a-z0-9_]*\\z/ (e.g. :support_team)."
+      end
+
+      candidates = search_dirs.map { |d| File.join(d, "#{name_str}.pool.rb") }
+      file = candidates.find { |f| File.exist?(f) }
+      if file.nil?
+        raise CompileError,
+              "Memory pool '#{name}' not found. Looked for:\n  " + candidates.join("\n  ")
+      end
+
+      pool = new(name)
+      pool.instance_variable_set(:@file, file)
+      builder = MemoryPoolBuilder.new(pool)
+      begin
+        builder.instance_eval(File.read(file), file)
+      rescue CompileError
+        raise # already structured — preserve as-is
+      rescue ScriptError, StandardError => e
+        raise CompileError,
+              "Failed to load memory pool '#{name}' from #{file}: " \
+              "#{e.class}: #{e.message}"
+      end
+
+      # After eval, every pool must at least declare a strategy so we
+      # know how to read it. A semantic pool must additionally declare
+      # an embed: model (alias or literal) — without it there's
+      # nothing to embed with, and a latent error at first use is worse
+      # than a clear one at compile time.
+      if pool.slots['strategy'].nil?
+        raise CompileError,
+              "Memory pool '#{name}' at #{file} is missing `strategy`. " \
+              "One of :sliding_window, :semantic, :log is required."
+      end
+      if pool.slots['strategy'] == 'semantic' && pool.slots['embed'].nil?
+        raise CompileError,
+              "Memory pool '#{name}' at #{file} declares strategy :semantic " \
+              "but has no `embed` model. Add `embed \"omlx:bge-small-en\"` or `embed :embedding`."
+      end
+
+      pool
+    end
+  end
+
+  # Eval context for .pool.rb files. Each directive captures one slot
+  # on the MemoryPool. Mirrors PolicyPackBuilder's flat, filename-is-
+  # the-name layout so an author working in one file type knows how
+  # the other works.
+  class MemoryPoolBuilder
+    VALID_STRATEGIES = %w[sliding_window semantic log].freeze
+
+    def initialize(pool)
+      @pool = pool
+    end
+
+    def strategy(value)
+      value_str = value.to_s
+      unless VALID_STRATEGIES.include?(value_str)
+        raise CompileError,
+              "memory pool strategy must be one of #{VALID_STRATEGIES.map { |s| ":#{s}" }.join(', ')} " \
+              "(got :#{value_str})"
+      end
+      @pool.slots['strategy'] = value_str
+    end
+
+    # Embedding model reference. Can be either a provider-prefix
+    # literal (`"omlx:bge-small-en"`) or a bare symbol/string naming
+    # a RED-237 alias (`:embedding`). Both forms serialize to a
+    # string; the runner (phase 3+) resolves aliases via the model
+    # alias table, and anything containing a `:` is treated as a
+    # literal provider id.
+    def embed(model)
+      @pool.slots['embed'] = model.to_s
+    end
+
+    def keyed_by(key)
+      @pool.slots['keyed_by'] = key.to_s
+    end
+  end
+
   # Eval context for .policy.rb files. Provides `network`, `filesystem`,
   # `exec`, and `budget` directives that capture into the PolicyPack's
   # exports. Validation is delegated to Normalize so pack-side and
@@ -385,6 +501,84 @@ module Cambium
         end
         dirs << File.join('packages', 'cambium', 'app', 'policies')
         dirs.uniq
+      end
+
+      # RED-215: where to look for app/memory_pools/<name>.pool.rb.
+      # Mirrors the policy-pack search (same two-dir strategy — the
+      # gen's package first, then the workspace default).
+      def _cambium_memory_pool_search_dirs
+        dirs = []
+        if (src = Cambium::CompilerState.current_source_file)
+          pkg_dir = File.dirname(File.dirname(File.expand_path(src)))  # up from app/gens/
+          dirs << File.join(pkg_dir, 'app', 'memory_pools')
+        end
+        dirs << File.join('packages', 'cambium', 'app', 'memory_pools')
+        dirs.uniq
+      end
+
+      # RED-215: declare a memory slot the gen wants read-injected
+      # before generation (and, when a memory agent is wired up via
+      # `write_memory_via`, written to after generation).
+      #
+      #   memory :conversation, strategy: :sliding_window, size: 20
+      #   memory :activity_log, strategy: :log,            scope: :global
+      #   memory :user_facts,   scope: :support_team, top_k: 5
+      #
+      # Scope rules:
+      # - :session (default)  — per-run-chain; gen owns strategy + opts.
+      # - :global             — workspace-wide; gen owns strategy + opts.
+      # - <named pool symbol> — loaded from app/memory_pools/<name>.pool.rb;
+      #   the pool is authoritative on strategy/embed/keyed_by. Setting
+      #   any of those at the call site is a compile error (the pool is
+      #   the shared source of truth).
+      #
+      # Phase 2 (this ticket) parses + validates and emits IR under
+      # policies.memory. The TS runner ignores memory entries until
+      # phase 3 wires up the sqlite-vec backend.
+      def memory(name, strategy: nil, scope: nil, size: nil, top_k: nil, keyed_by: nil, embed: nil, **extra)
+        unless extra.empty?
+          raise ArgumentError,
+                "memory #{name}: unknown option(s) #{extra.keys.join(', ')}. " \
+                "Recognized: strategy, scope, size, top_k, keyed_by, embed."
+        end
+
+        entry = { 'name' => name.to_s, 'scope' => (scope || :session).to_s }
+        if strategy
+          s = strategy.to_s
+          unless Cambium::MemoryPoolBuilder::VALID_STRATEGIES.include?(s)
+            raise ArgumentError,
+                  "memory #{name}: strategy must be one of " \
+                  "#{Cambium::MemoryPoolBuilder::VALID_STRATEGIES.map { |v| ":#{v}" }.join(', ')} " \
+                  "(got :#{s})"
+          end
+          entry['strategy'] = s
+        end
+        entry['size']     = size              unless size.nil?
+        entry['top_k']    = top_k             unless top_k.nil?
+        entry['keyed_by'] = keyed_by.to_s     unless keyed_by.nil?
+        entry['embed']    = embed.to_s        unless embed.nil?
+
+        _cambium_defaults[:memory] ||= []
+        if _cambium_defaults[:memory].any? { |m| m['name'] == entry['name'] }
+          raise ArgumentError,
+                "memory #{name}: a memory slot with this name is already declared on this gen. " \
+                "Each memory name must be unique per gen — the runner addresses slots by name."
+        end
+        _cambium_defaults[:memory] << entry
+      end
+
+      # RED-215: declare the retro "memory agent" that runs after the
+      # primary gen and decides what to commit to memory. Value is the
+      # class name (or snake_case form) of another GenModel; phase 4
+      # wires the runtime scheduling.
+      def write_memory_via(agent_name)
+        _cambium_defaults[:write_memory_via] = agent_name.to_s
+      end
+
+      # RED-215: for a retro-mode memory agent, declare which primary
+      # gen's trace it reads. Parsed now; execution lands in phase 4.
+      def reads_trace_of(agent_name)
+        _cambium_defaults[:reads_trace_of] = agent_name.to_s
       end
 
       # Grounding: declare that outputs must be grounded in a source.
