@@ -114,8 +114,10 @@ output.json + trace.json
 │   │   │                  #   agents (mode :retro) live here too
 │   │   ├── systems/       # System prompts (.system.md)
 │   │   ├── tools/         # App plugin tools — paired .tool.json + .tool.ts
+│   │   ├── actions/       # App trigger actions — paired .action.json + .action.ts
 │   │   ├── policies/      # Named policy packs (.policy.rb) for security + budget
-│   │   └── memory_pools/  # Named memory pools (.pool.rb) for shared strategy+embed
+│   │   ├── memory_pools/  # Named memory pools (.pool.rb) for shared strategy+embed
+│   │   └── config/        # Workspace config — models.rb for RED-237 aliases
 │   ├── src/
 │   │   └── contracts.ts   # TypeBox schemas (source of truth)
 │   └── tests/
@@ -123,12 +125,14 @@ output.json + trace.json
 │   ├── runner.ts          # Core runtime (step pipeline + memory lifecycle)
 │   ├── step-handlers.ts   # Generate, validate, repair, correct, tool dispatch
 │   ├── builtin-tools/     # Framework tools — paired .tool.json + .tool.ts
+│   ├── builtin-actions/   # Framework trigger actions (notify_stderr, ...)
 │   ├── tools/             # Tool infra (registry, ToolContext, network-guard)
+│   ├── actions/           # Action registry (parallel to tools/)
 │   ├── memory/            # Memory subsystem (backend, path, keys, retro-agent)
 │   ├── providers/         # Model + embed providers (oMLX, Ollama)
 │   ├── correctors/        # Built-in correctors (math, dates, currency, citations)
 │   ├── signals.ts         # Signal extraction
-│   ├── triggers.ts        # Trigger evaluation
+│   ├── triggers.ts        # Trigger evaluation (tool_call + action_call)
 │   ├── compound.ts        # Review + consensus
 │   ├── enrich.ts          # Sub-agent enrichment
 │   └── schema-describe.ts # Auto-generated schema descriptions
