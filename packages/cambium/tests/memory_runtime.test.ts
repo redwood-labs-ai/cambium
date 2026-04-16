@@ -153,7 +153,12 @@ end
     expect(write.meta.written_by).toBe('default');
   }, 60_000);
 
-  it('defers the trivial-default write when write_memory_via is declared', () => {
+  it('routes writes through the retro agent when write_memory_via is declared', () => {
+    // Phase 3 stubbed this as a `memory_write_deferred` no-op. Phase 4
+    // replaces that with real agent invocation; the fuller retro-flow
+    // assertions live in retro_agent_runtime.test.ts. Here we just
+    // confirm the default writer DOES NOT run when write_memory_via is
+    // present — i.e. no entry with `written_by: 'default'` appears.
     const id = 'test-' + randomUUID();
     sessionIds.push(id);
 
@@ -177,17 +182,14 @@ end
     expect([0, 1]).toContain(run.status);
 
     const trace = JSON.parse(readFileSync(run.tracePath, 'utf8'));
-    const write = trace.steps.find((s: any) => s.type === 'memory.write');
-    expect(write).toBeDefined();
-    expect(write.id).toBe('memory_write_deferred');
-    expect(write.meta.note).toMatch(/retro agent \(phase 4\)/);
+    // No default-written entries: the retro agent is the only writer.
+    const defaultWrites = trace.steps.filter(
+      (s: any) => s.type === 'memory.write' && s.meta?.written_by === 'default',
+    );
+    expect(defaultWrites).toHaveLength(0);
 
-    // And the bucket should still exist (read opened it) but have no rows.
-    const bucket = join('runs', 'memory', 'session', id, 'conversation.sqlite');
-    expect(existsSync(bucket)).toBe(true);
-    const db = new Database(bucket, { readonly: true });
-    const rows = db.prepare('SELECT COUNT(*) AS n FROM entries').get() as any;
-    db.close();
-    expect(rows.n).toBe(0);
-  }, 60_000);
+    // The retro-flow assertion set is in retro_agent_runtime.test.ts.
+    // For this phase-3 test it's enough to confirm the default writer
+    // was correctly bypassed in favor of the retro agent.
+  }, 90_000);
 });

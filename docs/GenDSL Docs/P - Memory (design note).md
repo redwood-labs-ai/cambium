@@ -215,7 +215,7 @@ The open questions from the original draft are resolved. Captured here so anyone
 1. ~~Design note reviewed and open questions answered.~~ ✅ (2026-04-16)
 2. ~~IR shape + Ruby DSL parsing for `memory :name, ...`, `write_memory_via :agent_name`, `reads_trace_of :agent_name`, and `app/memory_pools/<name>.pool.rb`. The TS runner tolerates the new IR fields but does not execute them yet.~~ ✅ (2026-04-16)
 3. ~~SQLite backend (via `better-sqlite3`; `sqlite-vec` extension lands with phase 5) + `:sliding_window` + `:log` strategies + `memory.read`/`memory.write`/`memory.prune` trace events + system-prompt injection + trivial-default writer.~~ ✅ (2026-04-16)
-4. Retro-agent runtime wiring (`mode :retro`, `reads_trace_of`, sync-only).
+4. ~~Retro-agent runtime wiring: `mode :retro` gens receive the primary's trace via JSON context, return `MemoryWrites`, and the primary runner applies writes tagged `written_by: 'agent:<ClassName>'`. Best-effort failure mode (trace not throw). `remember` is the standardized entry method (Rails `ActiveJob#perform` analogue).~~ ✅ (2026-04-16)
 5. `:semantic` strategy (embedding via `embed:`, coordinated with RED-237 alias resolution — loads the sqlite-vec extension into the same bucket file).
 6. Governance (separate ticket): retention, cross-pool isolation, workspace policy.
 
@@ -237,6 +237,26 @@ The open questions from the original draft are resolved. Captured here so anyone
 - `cli/cambium.mjs` — `--memory-key name=value` flag, passed through to the TS runner.
 - `src/memory/*.test.ts` — 28 unit tests (backend, keys, path, prompt-block).
 - `packages/cambium/tests/memory_runtime.test.ts` — 3 spawned-CLI integration tests: cross-run read/write cycle, `:log` write-only semantics, and `write_memory_via` deferral.
+
+### Phase 4 artifacts (landed)
+
+- `packages/cambium/src/contracts.ts` — `MemoryWrites` schema: `{ writes: [{ memory, content }, ...] }`, closed at every level.
+- `src/memory/retro-agent.ts` — `classNameToFileBase` + `findRetroAgentFile` + `buildRetroContext` + `invokeRetroAgent` (subprocess) + `applyRetroWrites` (applies to primary's backends, drops unknown slots).
+- `src/runner.ts` — hooks at two points: (1) skip memory planning/writes when `ir.mode === 'retro'` (guards against infinite retro recursion), (2) after `finalOk`, if `write_memory_via` is set, invoke the agent and apply writes; every failure path (not-found, crash, bad output, unknown-slot) emits a trace step rather than throwing.
+- `src/runner.ts::mockGenerate` — schema-aware: returns a valid `MemoryWrites` shape when `schema.$id === 'MemoryWrites'`, so retro agents run end-to-end under `--mock`.
+- `packages/cambium/app/gens/support_memory_agent.cmb.rb` + `app/systems/support_memory_agent.system.md` — first reference retro agent; serves as demo and smoke path.
+- `src/memory/retro-agent.test.ts` — 11 unit tests (class→file, resolver fallback, context builder, apply-with-agent-tag, dropped-unknown-slot, malformed-entry drop).
+- `packages/cambium/tests/retro_agent_runtime.test.ts` — 3 spawned-CLI integration tests: happy-path agent invocation, agent-not-found traced non-fatal, unknown-slot drop traced.
+
+### The `remember` method — Cambium's `ActiveJob#perform`
+
+Every retro memory agent has `mode :retro` + `reads_trace_of :primary` + `returns MemoryWrites`, and the framework always invokes it via a method called `remember(ctx)`. This is deliberate convention-over-configuration: the agent is a specific *kind* of GenModel (like ActiveJob is a specific kind of Ruby class), and the entry method is standardized so the framework knows where to call. The agent's `ctx` is a JSON string with `primary_input`, `primary_output`, and `primary_trace`.
+
+Don't make the method name configurable. The standardization is the feature.
+
+### Best-effort writes — the graceful-degradation invariant
+
+A retro-agent failure **never** fails the primary run. The primary has already returned a valid answer; memory loss is graceful degradation, not a reason to reject the output the user is waiting on. Every failure path (`agent file missing`, `subprocess crash`, `output not parseable`, `output missing writes[]`, `unknown memory slot on primary`) emits a trace step and proceeds. Callers can detect a failure by reading `trace.steps` for any `memory_write_*` with `ok: false` — the run itself exits 0.
 
 ## CLI usage
 

@@ -37,6 +37,12 @@ import {
 } from './memory/runner-integration.js';
 import { parseMemoryKeys, resolveSessionId } from './memory/keys.js';
 import type { SqliteMemoryBackend } from './memory/backend.js';
+import {
+  findRetroAgentFile,
+  buildRetroContext,
+  invokeRetroAgent,
+  applyRetroWrites,
+} from './memory/retro-agent.js';
 
 type IR = any;
 
@@ -114,7 +120,7 @@ async function generateText(opts: { model: string; system: string; prompt: strin
   // failure, which meant a reachable oMLX/Ollama server swallowed the
   // flag — breaking the promise of `--mock` as an offline/CI path.
   if (process.env.CAMBIUM_ALLOW_MOCK === '1') {
-    return { text: mockGenerate(opts.prompt) };
+    return { text: mockGenerate(opts.prompt, opts.jsonSchema) };
   }
 
   try {
@@ -349,7 +355,27 @@ async function generateWithTools(opts: {
   };
 }
 
-function mockGenerate(prompt: string): string {
+function mockGenerate(prompt: string, schema?: { $id?: string }): string {
+  // RED-215 phase 4: retro memory agents return MemoryWrites, not the
+  // analyst shape. Branch on the schema id so both primary gens and
+  // retro agents can run end-to-end under --mock. Any new mock-
+  // incompatible schema gets its own branch here.
+  //
+  // NOTE: MemoryWrites is a framework-internal return type for retro
+  // agents. A user-authored primary gen that uses `returns MemoryWrites`
+  // would also hit this branch under --mock and receive the canned
+  // write regardless of its input — don't use MemoryWrites as a primary
+  // output schema.
+  if (schema?.$id === 'MemoryWrites') {
+    // Emit one write against a conventional memory name. Primary gens
+    // that declare `memory :conversation` will receive it; others will
+    // have it dropped at apply-time with a traced "no matching decl"
+    // reason. Both paths are exercised by integration tests.
+    return JSON.stringify({
+      writes: [{ memory: 'conversation', content: 'mock retro agent note' }],
+    });
+  }
+
   const matches = [...prompt.matchAll(/(\d+(?:\.\d+)?)\s*ms\b/gi)].map(m => Number(m[1]));
   const payload = {
     summary: 'Mock analysis (model provider not available).',
@@ -382,7 +408,7 @@ function extractJsonObject(text: string): any {
 
 // ── Main: Step-Graph Executor ─────────────────────────────────────────
 async function main() {
-  const { irPath, traceOut, outputOut, memoryKeys } = parseArgs(process.argv.slice(2));
+  const { irPath, traceOut, outputOut, mock: mockFlag, memoryKeys } = parseArgs(process.argv.slice(2));
   const irText = irPath === '-' ? readFileSync(0, 'utf8') : readFileSync(irPath, 'utf8');
   const ir: IR = JSON.parse(irText);
 
@@ -468,7 +494,15 @@ async function main() {
   process.once('exit', () => {
     if (memoryBackends.size > 0) closeBackends(memoryBackends);
   });
-  const memoryDecls = ir.policies?.memory ?? [];
+  // RED-215 phase 4: retro memory agents (mode :retro) are the MEMORY
+  // WRITERS, not primary gens with their own memory. Skip the whole
+  // memory machinery for them — a retro agent shouldn't have its own
+  // memory block injected, and it shouldn't trigger a nested retro
+  // invocation on its own write_memory_via. This guard also prevents
+  // infinite recursion if someone accidentally sets write_memory_via
+  // on a retro agent.
+  const isRetroMode = ir.mode === 'retro';
+  const memoryDecls = isRetroMode ? [] : (ir.policies?.memory ?? []);
   if (memoryDecls.length > 0) {
     const keys = parseMemoryKeys(memoryKeys);
     const sessionId = resolveSessionId(process.env);
@@ -886,16 +920,64 @@ async function main() {
           errors: [{ message: String(e?.message ?? e) }],
         });
       }
-    } else if (hasMemoryAgent) {
-      trace.steps.push({
-        type: 'memory.write',
-        id: 'memory_write_deferred',
-        ok: true,
-        meta: {
-          note: `write_memory_via :${ir.policies.memory_write_via} declared — ` +
-            'retro agent (phase 4) will handle writes; default writer skipped.',
-        },
-      });
+    } else if (finalOk && hasMemoryAgent) {
+      // RED-215 phase 4: invoke the retro memory agent. Best-effort —
+      // every failure mode (missing file, agent crash, bad output,
+      // invalid writes) is traced, not thrown. The primary already
+      // returned a valid answer; memory loss is graceful degradation.
+      const agentClass: string = ir.policies.memory_write_via;
+      const agentFile = findRetroAgentFile(agentClass, ir.entry?.source);
+      if (!agentFile) {
+        trace.steps.push({
+          type: 'memory.write',
+          id: 'memory_write_agent_not_found',
+          ok: false,
+          errors: [{
+            message:
+              `write_memory_via :${agentClass} declared but no .cmb.rb file found. ` +
+              'Searched sibling of primary and packages/cambium/app/gens/.',
+          }],
+        });
+      } else {
+        const ctx = buildRetroContext(ir.context?.document ?? '', finalParsed, trace);
+        const result = invokeRetroAgent({ agentFile, ctx, mockMode: Boolean(mockFlag) });
+        if (!result.ok) {
+          trace.steps.push({
+            type: 'memory.write',
+            id: `memory_write_agent_failed`,
+            ok: false,
+            errors: [{ message: result.reason, stderr: result.stderr?.slice(0, 500) }],
+            meta: { agent: agentClass },
+          });
+        } else {
+          const { applied, dropped } = applyRetroWrites(result.writes, memoryBackends, agentClass);
+          for (const a of applied) {
+            trace.steps.push({
+              type: 'memory.write',
+              id: `memory_write_${a.memory}_agent`,
+              ok: true,
+              meta: {
+                name: a.memory,
+                entry_id: a.entry_id,
+                bytes: a.bytes,
+                written_by: `agent:${agentClass}`,
+              },
+            });
+          }
+          if (dropped.length > 0) {
+            trace.steps.push({
+              type: 'memory.write',
+              id: 'memory_write_agent_dropped',
+              ok: true,
+              meta: {
+                agent: agentClass,
+                dropped,
+                note: 'writes naming a memory slot not declared on the primary are dropped by design (best-effort).',
+              },
+            });
+          }
+        }
+      }
     }
     closeBackends(memoryBackends);
   }
