@@ -1,8 +1,10 @@
 # Memory Primitive — Design Note
 
 **Doc ID:** gen-dsl/primitives/memory
-**Status:** Design draft (no implementation yet)
-**Related:** [[P - extract (signals)]], [[C - Trace (observability)]], [[S - Tool Sandboxing (RED-137)]]
+**Status:** Design — decisions locked, ready for implementation
+**Linear:** [RED-215](https://linear.app/redwood-labs/issue/RED-215)
+**Coordinates with:** [RED-237](https://linear.app/redwood-labs/issue/RED-237) (workspace `:default` model aliases — memory pools' `embed:` slot uses the same aliasing mechanism)
+**Related:** [[P - extract (signals)]], [[C - Trace (observability)]], [[S - Tool Sandboxing (RED-137)]], [[P - Policy Packs (RED-214)]]
 
 ## Motivation
 
@@ -19,9 +21,9 @@ you want, and the runtime should do it.
 
 ```ruby
 class SupportAgent < GenModel
-  memory :conversation, strategy: :sliding_window, size: 20
-  memory :user_facts,   strategy: :semantic, top_k: 5
-  memory :activity_log, strategy: :log
+  memory :conversation, strategy: :sliding_window, size: 20, scope: :session
+  memory :user_facts,   strategy: :semantic, top_k: 5,       scope: :support_team
+  memory :activity_log, strategy: :log,                       scope: :global
 end
 ```
 
@@ -113,34 +115,55 @@ The trivial default (for gens that don't declare a memory agent) is
 append-the-turn for `:sliding_window`/`:log`, no-op for `:semantic`.
 Explicit memory agents are the common path.
 
-## Scope (open question)
+## Scope (decided)
 
-Four natural scopes. V1 needs at least one; the shape needs to allow
-the others later without a redesign.
+Three scope kinds, covering all the cases `:user` / `:gen` would have covered without the ceremony:
 
 - `:session` — a single conversation / run-chain.
-- `:user`    — across all sessions for a user.
-- `:gen`     — across all invocations of this gen, regardless of user.
 - `:global`  — workspace-wide.
+- **Named pools** (e.g. `:support_team`, `:security_agent`) — a shared memory bucket addressable by name. Any number of gens can opt in by referencing the pool's symbol.
 
-Key/isolation consideration: how is the memory bucket addressed?
-Options:
-1. Caller passes a `memory_key` into the run (e.g. `user_id`, `session_id`).
-2. Runtime derives from ambient context (env vars, run metadata).
-3. Gen declares what keys it wants (`memory :user_facts, keyed_by: :user_id`) and the runner validates they were provided.
+`:user` is handled by `:session` + `keyed_by: :user_id`. `:gen` is handled by a named pool the gen opts into alone. Simpler grammar, same coverage.
 
-Lean: **(3)** — declarative and checkable. Matches the rest of Cambium.
+### Named pools are file-declared
 
-Scopes to support in v1: **TBD** (Steve is thinking about this).
-Likely `:session` + `:user` as the minimum interesting pair.
+Each named pool is defined in its own file under `packages/cambium/app/memory_pools/<name>.pool.rb`, mirroring the [one-file-per-object invariant](../Generation%20Engineering%20DSL%20-%20Spec%20Draft.md) Cambium uses everywhere else (tools → `.tool.json`+`.tool.ts`, policies → `.policy.rb`, systems → `.system.md`). Example:
 
-## Backend (v1 baseline)
+```ruby
+# packages/cambium/app/memory_pools/support_team.pool.rb
+memory_pool :support_team do
+  strategy    :semantic
+  backend     :sqlite_vec
+  embed       :embedding        # resolves via RED-237 model aliases
+  keyed_by    :team_id
+  retain      "90d"             # v1 may defer; placeholder for governance
+end
+```
 
-- Storage: local files under `runs/memory/<scope>/<key>/<name>.jsonl`
-  for logs; a local vector DB (e.g. lancedb, usearch, or a sqlite-vss
-  wrapper) for semantic.
-- Pluggable later: Redis, Postgres, Pinecone, whatever. The interface
-  is small enough that backend swaps shouldn't need DSL changes.
+A gen then references it by symbol:
+
+```ruby
+memory :user_facts, scope: :support_team, strategy: :semantic, top_k: 5
+```
+
+**No inline-on-first-use.** A gen referencing an undeclared pool is a compile-time error with the available pool names listed. This keeps pool definitions discoverable and avoids ordering-dependent shape drift.
+
+### Keying: `keyed_by: <symbol>` (decided)
+
+Of the three options considered, the declarative one wins: `memory :user_facts, keyed_by: :user_id` (or the same on the pool declaration). At run time the caller must provide the named key or the runner errors. Matches the rest of Cambium — declarative, checkable, doesn't rely on ambient state.
+
+## Backend (decided): sqlite-vec
+
+**v1 backend: [`sqlite-vec`](https://github.com/asg017/sqlite-vec).** One SQLite file per memory bucket, at `runs/memory/<scope>/<key>/<name>.sqlite`. The same file holds both the append-only log (ordinary SQLite rows) and the vector index (sqlite-vec virtual table). Benefits:
+
+- **One-file ops.** `cp`, `rm`, `sqlite3 inspect` — debugging is trivial.
+- **Active maintenance.** sqlite-vec replaces the abandoned sqlite-vss, same author.
+- **Small surface.** ~1 MB extension, no daemon, no port, no secrets.
+- **Single storage format** for both `:log`/`:sliding_window` (scan) and `:semantic` (vector search) — the strategy is a reader concern, not a storage concern.
+
+**Embedding model:** configured via the `embed:` slot, resolved through the RED-237 model-alias mechanism. The provider-prefix string form (`embed: "omlx:bge-small-en"`) and the alias form (`embed: :embedding`) both work; pool declarations should prefer the alias so a workspace-wide model swap is a one-line change.
+
+**Pluggable backends** (Redis, Postgres/pgvector, LanceDB, Pinecone, …) are explicitly out of scope for v1. The `MemoryBackend` interface will be narrow enough that a backend swap is a day's work when someone actually needs scale; we're not adding plugin machinery until there's a real second implementation to validate the abstraction against.
 
 ## Governance (post-RED-137 thinking)
 
@@ -171,25 +194,25 @@ These are the memory analog of RED-137's `tool.permission.denied` and
 - Cross-workspace / multi-tenant memory. v1 is single-workspace.
 - Governance (retention, isolation, allowlists) — separate ticket.
 
-## Open questions
+## Locked decisions (2026-04-16)
 
-1. **Scope set for v1** — which of the four, in what order.
-2. **Key declaration shape** — `keyed_by: :user_id` vs caller-passes vs ambient.
-3. **Embedding model** — local (e.g. a small oMLX model) vs remote API.
-   Local fits the opinionated stance; latency budget TBD.
-4. **Trace shape** — memory reads/writes should appear alongside
-   `ToolCall` in the trace. Exact event names to be settled during impl.
-5. **Retro-agent trigger semantics** — does the memory agent run
-   synchronously before the run returns, or async after? Sync is
-   simpler and more debuggable; async is faster for the caller.
-   Lean sync for v1.
+The open questions from the original draft are resolved. Captured here so anyone picking up implementation doesn't have to re-litigate.
 
-## Implementation phases (once the design lands)
+1. **Scope set:** `:session`, `:global`, and **named pools** (file-declared under `app/memory_pools/<name>.pool.rb`). `:user` and `:gen` are handled by `:session`+`keyed_by:` and named pools respectively — no separate keywords.
+2. **Key declaration:** `keyed_by: :symbol` on the gen or pool; caller-passes at run time; runner errors clearly when the key is missing.
+3. **Embedding model:** configurable per pool via `embed:`, accepting either a provider-prefix string (`"omlx:bge-small-en"`) or a RED-237 model alias (`:embedding`). Aliases preferred in shared pool declarations so workspace-wide model swaps stay one-line.
+4. **Trace events:** three events, present tense, consistent with `ToolCall`/`Generate`:
+   - `memory.read`  — `{ strategy, query?, k?, hits: [{id, score?}] }`
+   - `memory.write` — `{ entry_id, bytes }`
+   - `memory.prune` — `{ reason: "ttl" | "cap", count }`
+5. **Retro-agent timing:** **sync/blocking for v1.** The memory agent runs between primary output and return, so the trace has one clean story and there are no read-before-write races inside tight `:session` loops. An `:async` opt-in knob is explicitly deferred; if memory-agent latency becomes a real problem, traces will show it and we'll revisit.
+6. **Backend:** `sqlite-vec`, one file per bucket. Pluggable backends deferred.
 
-1. Design note (this doc) reviewed and open questions answered.
-2. IR shape + Ruby DSL parsing for `memory :name, ...` and
-   `write_memory_via :agent_name`.
-3. Append-only log backend + `:sliding_window` + `:log` strategies.
-4. Retro-agent runtime wiring (`mode :retro`, `reads_trace_of`).
-5. `:semantic` backend with a chosen embedding model.
-6. Governance (separate ticket): retention, isolation, policy.
+## Implementation phases
+
+1. ~~Design note reviewed and open questions answered.~~ ✅ (2026-04-16)
+2. IR shape + Ruby DSL parsing for `memory :name, ...`, `write_memory_via :agent_name`, and `app/memory_pools/<name>.pool.rb`.
+3. `sqlite-vec` backend skeleton + `:sliding_window` + `:log` strategies (read path + write path + three trace events).
+4. Retro-agent runtime wiring (`mode :retro`, `reads_trace_of`, sync-only).
+5. `:semantic` strategy (embedding via `embed:`, coordinated with RED-237 alias resolution).
+6. Governance (separate ticket): retention, cross-pool isolation, workspace policy.
