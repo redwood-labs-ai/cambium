@@ -21,6 +21,18 @@ export type MemoryDecl = {
     ttl_seconds?: number;
     max_entries?: number;
   };
+  /**
+   * RED-238: configurable query source for `:semantic` reads.
+   * Mutually exclusive with `arg_field`. When neither is set, the read
+   * path falls back to `ctx.input` (phase-5 default).
+   */
+  query?: string;
+  /**
+   * RED-238: pluck a top-level field out of `ctx.input` (parsed as JSON)
+   * and use it as the nearest-neighbor query. Mutually exclusive with
+   * `query`. Non-JSON `ctx.input` or a missing field raises at read time.
+   */
+  arg_field?: string;
 };
 
 /** Resolved execution plan for one MemoryDecl — what the runner will do with it this run. */

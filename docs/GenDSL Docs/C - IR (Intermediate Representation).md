@@ -32,7 +32,7 @@ Define the auditable, replayable plan that the DSL compiles to.
 | `policies.grounding` | `grounded_in :document` | citation enforcement config |
 | `policies.security` | `security network: {...}` or `security :pack` | per-slot mixing; `_packs` metadata for trace (RED-214) |
 | `policies.budget` | `budget per_run: {...}` | same per-slot mixing as security |
-| `policies.memory[]` | `memory :name, …` (one per decl) | pool-owned slots already merged in at compile (RED-215) |
+| `policies.memory[]` | `memory :name, …` (one per decl) | pool-owned slots already merged in at compile (RED-215). Optional per-decl fields on `:semantic` strategy: `query` (literal string anchor) or `arg_field` (pluck a top-level field from JSON `ctx.input`) — RED-238, mutually exclusive. |
 | `policies.memory_pools{}` | pool files | only pools actually referenced by this gen are inlined |
 | `policies.memory_write_via` | `write_memory_via :Agent` | class name; runner resolves via snake_case lookup |
 | `enrichments`, `signals`, `triggers` | `enrich`, `extract`, `on` | sub-agent context + signal → deterministic action |

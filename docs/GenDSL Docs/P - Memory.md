@@ -2,7 +2,7 @@
 
 **Doc ID:** gen-dsl/primitives/memory
 **Status:** Shipped (RED-215 phases 1–5, 2026-04-16)
-**Coordinates with:** [RED-237](https://linear.app/redwood-labs/issue/RED-237) *(shipped 2026-04-16 — `:default` and other model aliases resolve at compile time; pool files can now use `embed: :embedding` interchangeably with the literal form)*; [RED-238](https://linear.app/redwood-labs/issue/RED-238) (configurable query source for semantic memory)
+**Coordinates with:** [RED-237](https://linear.app/redwood-labs/issue/RED-237) *(shipped 2026-04-16 — `:default` and other model aliases resolve at compile time; pool files can now use `embed: :embedding` interchangeably with the literal form)*; [RED-238](https://linear.app/redwood-labs/issue/RED-238) (configurable query source for semantic memory — literal + `arg_field` forms); [RED-241](https://linear.app/redwood-labs/issue/RED-241) (prior-run state accessors — design note, reserves symbolic `query:` values)
 **Related:** [[C - Trace (observability)]], [[S - Tool Sandboxing (RED-137)]], [[P - Policy Packs (RED-214)]], [[P - mode]]
 
 ## Purpose
@@ -82,8 +82,11 @@ Rendered shape (illustrative):
 ```
 
 Retrieval happens fresh per turn, so semantic-memory queries can use
-the current user input as the query automatically. Explicit overrides
-(`memory :foo, query: :last_signal_value`) come in a later iteration.
+the current user input as the query automatically. Two explicit
+overrides land in RED-238 (`query: "literal"`, `arg_field: :name`);
+prior-run state accessors (`query: :last_signal_value` etc.) are
+scoped to RED-241 pending a design note. See the `:semantic` query
+source section below.
 
 ## Write path: retro/memory agent
 
@@ -248,9 +251,32 @@ allowed_pools  :support_team, :billing  # enforce: only these pools are referenc
 
 A workspace with no `memory_policy.rb` runs with v1 semantics (per-decl retention only). The policy file is opt-in.
 
-## `:semantic` query source (default + follow-up)
+## `:semantic` query source
 
-Phase 5 uses `ctx.input` (the gen's `--arg` content) as the vector-search query. That covers the common case — "find prior entries relevant to what the user is asking now." Explicit overrides (`query: :signal_name`, `query: :output_field("...")`) are deferred to **RED-238** with a concrete sub-design covering signal-resolution ordering; file against that ticket before adding the surface.
+Phase 5 uses `ctx.input` (the gen's `--arg` content) as the vector-search query. That covers the common case — "find prior entries relevant to what the user is asking now." Two overrides (RED-238) cover the other shovel-ready cases:
+
+```ruby
+# Pinned literal anchor — debugging, deterministic retrieval tests,
+# or a gen that always wants to retrieve against the same concept
+# regardless of what the caller passed as --arg.
+memory :facts, strategy: :semantic, top_k: 5, embed: :embedding,
+       query: "support triage anchor"
+
+# Pluck a named top-level field out of a JSON-shaped --arg. Parses
+# ctx.input on read; missing field or non-JSON input raises with
+# decl-local context. Single-level only — no dotted paths.
+memory :facts, strategy: :semantic, top_k: 5, embed: :embedding,
+       arg_field: :question
+```
+
+Rules:
+
+- `query:` and `arg_field:` are mutually exclusive. Both-set is a compile error.
+- Both are `:semantic`-only. Setting either on `:sliding_window` or `:log` is a compile error (including when the strategy comes from a pool — checked after pool resolution, so the message names the pool).
+- Neither set → default to `ctx.input` (phase-5 behavior unchanged).
+- Resolved query source appears in the `memory.read` trace step's meta (`query_source: "literal" | "arg_field" | "default"`) along with a truncated preview (`query_preview`) for observability.
+
+**Reserved:** symbolic `query:` values (e.g. `query: :last_signal_value`, `query: :output_field(:name)`) raise with a pointer to [RED-241](https://linear.app/redwood-labs/issue/RED-241). These imply "use a prior run's state" and are load-bearing enough to need their own design pass (where signals/outputs persist across runs, scope interaction, whether this collapses into inter-slot query composition). Don't back-door them in via a semantic-memory keyword in an opinionated DSL.
 
 ### Embed model pinning
 

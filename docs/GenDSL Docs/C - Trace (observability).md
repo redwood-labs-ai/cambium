@@ -30,7 +30,7 @@ A trace MUST include:
 | `ExtractSignals` / `Trigger` | Signal extraction + trigger evaluation (see [[C - Signals, State, and Triggers]]). |
 | `ActionCall` | A trigger's `action :name` side-effect handler invocation (RED-212). | `trigger`, `action`, `input`, `output`, `target` |
 | `GroundingCheck` | Citation verification. | `citations_verified`, `failures` |
-| `memory.read` | Per memory decl, before `Generate`. See RED-215 section below. | `strategy`, `scope`, `name`, `k`, `hits`, `bytes`, `embed_model?`, `embed_dim?` |
+| `memory.read` | Per memory decl, before `Generate`. See RED-215 section below. | `strategy`, `scope`, `name`, `k`, `hits`, `bytes`, `embed_model?`, `embed_dim?`, `query_source?`, `query_preview?` |
 | `memory.write` | Per writable memory decl, after `finalOk`. | `name`, `entry_id`, `bytes`, `written_by`, `strategy?`, `embed_model?` |
 | `memory.prune` | On TTL/cap eviction (governance follow-up; wired but not yet fired). | `reason` (`"ttl"` \| `"cap"`), `count` |
 
@@ -38,7 +38,7 @@ A trace MUST include:
 
 Emitted per memory decl alongside the step pipeline. Read events run before `Generate`; write events run after the validate/repair loop succeeds (or are replaced by a retro-agent dispatch when `write_memory_via` is declared).
 
-- **`memory.read`** — fires once per decl. `hits: 0` is normal for empty buckets or `:log` strategy. For `:semantic` the meta includes the `embed_model` and `embed_dim` actually used; for `:sliding_window` it includes `k` (= `size`).
+- **`memory.read`** — fires once per decl. `hits: 0` is normal for empty buckets or `:log` strategy. For `:semantic` the meta includes the `embed_model` and `embed_dim` actually used; for `:sliding_window` it includes `k` (= `size`). Semantic reads additionally surface `query_source` (`"literal" | "arg_field" | "default"`, RED-238) and `query_preview` (the resolved query text, truncated at 200 chars) so trace consumers can tell which input drove the nearest-neighbor search.
 - **`memory.write`** — fires once per writable decl on success. `written_by: "default"` for the trivial-default writer; `written_by: "agent:<ClassName>"` when a retro agent authored the write. Retro-agent failure modes emit `memory.write` with `ok: false` (`memory_write_agent_not_found`, `memory_write_agent_failed`, `memory_write_agent_dropped`) — the primary run still exits 0 (best-effort writes).
 - **`memory.prune`** — reserved for the governance ticket. Meta shape is locked (`reason`, `count`) so the governance impl lands additively.
 
