@@ -40,6 +40,37 @@ Cost: ~80 tokens. Savings: 1,000+ tokens in avoided repairs.
 - The description MUST include: field name, type, required/optional status.
 - Nested structures MUST be indented and shown inline.
 - The description is injected into both generate and repair system prompts.
+- The closing footer MUST reflect the schema's actual `additionalProperties` state per object level — it is derived from the schema, not hardcoded.
+
+## Opt-in open shape (RED-211)
+
+By convention Cambium contracts set `additionalProperties: false` on every object level. That closes the shape and the prompt footer reads:
+
+```
+No extra keys. additionalProperties is false at every level.
+```
+
+For discovery-heavy tasks (scanning, exploration, extraction where the useful set of fields isn't fully predictable) an author can opt a specific object level — or the whole root — into open shape by setting `additionalProperties: true` in the TypeBox options:
+
+```ts
+export const ExplorationReport = Type.Object(
+  {
+    summary: Type.String(),
+    metadata: Type.Object({ tag: Type.String() }, { additionalProperties: true }),
+  },
+  { additionalProperties: false, $id: 'ExplorationReport' },
+)
+```
+
+The prompt footer then becomes:
+
+```
+Extra keys allowed at: /metadata. All other object levels are strict (additionalProperties: false).
+```
+
+If the root itself is open, the footer reads `Extra keys are allowed. Add fields the schema doesn't list if they are genuinely useful for the task.` AJV honours the setting at validation time, so the model's extras pass through instead of triggering repair.
+
+**Default is strict.** Contracts without explicit `additionalProperties: false` inherit JSON Schema's permissive default — the runtime still works, but the prompt will say extras are allowed, which is usually not what you want. Existing contracts all close explicitly; new ones should too unless the task genuinely needs the opt-in.
 
 ## TypeBox as single source of truth
 One TypeBox declaration derives four things:

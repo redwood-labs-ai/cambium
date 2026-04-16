@@ -76,13 +76,70 @@ function describeArrayItem(items: any): string {
 }
 
 /**
+ * Walk an object schema and collect the additionalProperties state at every
+ * object level. `undefined` = JSON Schema default (extras allowed); `false` =
+ * closed; `true` = explicitly open. Paths are JSON-Pointer-ish ("/" = root,
+ * "/metrics" = nested, "/items[]" = array item). Used by schemaPromptBlock
+ * to tell the model the truth — the previous hard-coded "extras forbidden"
+ * footer lied when a schema opted into open shape.
+ */
+export function collectAdditionalProperties(
+  schema: any,
+  path = '',
+): Array<{ path: string; value: boolean | undefined }> {
+  const out: Array<{ path: string; value: boolean | undefined }> = [];
+  if (!schema || typeof schema !== 'object') return out;
+
+  if (schema.type === 'object' && schema.properties) {
+    out.push({ path: path || '/', value: schema.additionalProperties });
+    for (const [k, p] of Object.entries<any>(schema.properties)) {
+      out.push(...collectAdditionalProperties(p, `${path}/${k}`));
+    }
+  }
+  if (schema.type === 'array' && schema.items) {
+    out.push(...collectAdditionalProperties(schema.items, `${path}[]`));
+  }
+  // TypeBox Optional/Union wraps in anyOf/oneOf — descend without extending
+  // the path since the variants share the same logical location.
+  for (const key of ['anyOf', 'oneOf'] as const) {
+    if (Array.isArray(schema[key])) {
+      for (const v of schema[key]) {
+        out.push(...collectAdditionalProperties(v, path));
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * Generate the full schema block for injection into a system prompt.
+ *
+ * The footer reflects what the schema actually says. A schema that opts into
+ * `additionalProperties: true` (RED-211) gets a footer inviting the model to
+ * add useful fields; a mixed schema enumerates which paths are open.
  */
 export function schemaPromptBlock(schema: any): string {
   const desc = describeSchema(schema);
-  return [
-    'SCHEMA (output must match this structure exactly):',
-    desc,
-    `No extra keys. additionalProperties is false at every level.`,
-  ].join('\n');
+  const objects = collectAdditionalProperties(schema);
+
+  let closing: string;
+  if (objects.length === 0) {
+    closing = '';
+  } else {
+    const closed = objects.filter(o => o.value === false);
+    const openOrDefault = objects.filter(o => o.value !== false);
+
+    if (openOrDefault.length === 0) {
+      closing = 'No extra keys. additionalProperties is false at every level.';
+    } else if (closed.length === 0) {
+      closing = 'Extra keys are allowed. Add fields the schema doesn\'t list if they are genuinely useful for the task.';
+    } else {
+      const openPaths = openOrDefault.map(o => o.path).join(', ');
+      closing = `Extra keys allowed at: ${openPaths}. All other object levels are strict (additionalProperties: false).`;
+    }
+  }
+
+  const parts = ['SCHEMA (output must match this structure exactly):', desc];
+  if (closing) parts.push(closing);
+  return parts.join('\n');
 }
