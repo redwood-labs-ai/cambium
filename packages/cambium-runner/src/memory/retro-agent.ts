@@ -6,11 +6,14 @@ import { tmpdir } from 'node:os';
 import type { SqliteMemoryBackend } from './backend.js';
 
 // Anchor workspace-relative lookups to this module's location instead
-// of process.cwd(). The workspace root is three dirs up from
-// src/memory/retro-agent.ts, so resolution works regardless of the
-// cwd `cambium run` was invoked from (CI, Docker, subdirectory…).
+// of process.cwd(). The workspace root is five dirs up from
+// packages/cambium-runner/src/memory/retro-agent.ts, so resolution works
+// regardless of the cwd `cambium run` was invoked from (CI, Docker,
+// subdirectory…). RED-242 moved this file from src/memory/ to
+// packages/cambium-runner/src/memory/, so the climb is two dirs deeper
+// than the original.
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
-const WORKSPACE_ROOT = resolve(MODULE_DIR, '..', '..');
+const WORKSPACE_ROOT = resolve(MODULE_DIR, '..', '..', '..', '..');
 
 /**
  * RED-215 phase 4: retro memory-agent dispatch.

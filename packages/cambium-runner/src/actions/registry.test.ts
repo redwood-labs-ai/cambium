@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 describe('ActionRegistry (RED-212)', () => {
   it('loads builtin actions from src/builtin-actions/', async () => {
     const reg = new ActionRegistry();
-    await reg.loadFromDir(join(process.cwd(), 'src/builtin-actions'));
+    await reg.loadFromDir(join(process.cwd(), 'packages/cambium-runner/src/builtin-actions'));
     expect(reg.list()).toContain('notify_stderr');
     const def = reg.get('notify_stderr');
     expect(def?.permissions?.pure).toBe(true);
@@ -16,7 +16,7 @@ describe('ActionRegistry (RED-212)', () => {
 
   it('returns undefined for unknown action names', async () => {
     const reg = new ActionRegistry();
-    await reg.loadFromDir(join(process.cwd(), 'src/builtin-actions'));
+    await reg.loadFromDir(join(process.cwd(), 'packages/cambium-runner/src/builtin-actions'));
     expect(reg.get('not_an_action')).toBeUndefined();
     expect(reg.getHandler('not_an_action')).toBeUndefined();
   });
@@ -66,7 +66,7 @@ describe('ActionRegistry (RED-212)', () => {
 describe('notify_stderr action (RED-212 reference)', () => {
   it('writes to stderr and returns { value: "<line>" }', async () => {
     const reg = new ActionRegistry();
-    await reg.loadFromDir(join(process.cwd(), 'src/builtin-actions'));
+    await reg.loadFromDir(join(process.cwd(), 'packages/cambium-runner/src/builtin-actions'));
     const handler = reg.getHandler('notify_stderr')!;
 
     // Capture stderr for the assertion.
@@ -87,7 +87,7 @@ describe('notify_stderr action (RED-212 reference)', () => {
 
   it('falls back to stringified input when message is absent', async () => {
     const reg = new ActionRegistry();
-    await reg.loadFromDir(join(process.cwd(), 'src/builtin-actions'));
+    await reg.loadFromDir(join(process.cwd(), 'packages/cambium-runner/src/builtin-actions'));
     const handler = reg.getHandler('notify_stderr')!;
 
     const originalWrite = process.stderr.write.bind(process.stderr);

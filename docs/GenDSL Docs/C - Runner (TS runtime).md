@@ -41,7 +41,7 @@ Agentic mode (`mode :agentic` + tool-use loop) supports:
 
 Single-turn `generate` (no tool-use) also supports both providers via the same model-id convention.
 
-Request/response shaping for Ollama lives in `src/providers/ollama.ts` — small testable helpers that normalize Ollama's `/api/chat` shape to the canonical `{ message: { content, tool_calls }, usage }` the dispatch site expects (synthesizes missing tool-call IDs, stringifies object-shaped `function.arguments`).
+Request/response shaping for Ollama lives in `packages/cambium-runner/src/providers/ollama.ts` — small testable helpers that normalize Ollama's `/api/chat` shape to the canonical `{ message: { content, tool_calls }, usage }` the dispatch site expects (synthesizes missing tool-call IDs, stringifies object-shaped `function.arguments`).
 
 ## The runner's own network calls
 
@@ -51,7 +51,7 @@ Tool calls remain fully guarded: every tool dispatch builds a `ToolContext` with
 
 ## Optional subsystems
 
-The memory subsystem (`src/memory/`, `src/providers/embed.ts`) is gated behind dynamic imports of `better-sqlite3` and `sqlite-vec`, both in `optionalDependencies`. A gen with no `memory :...` decls never triggers the import. A gen that uses memory without the deps installed gets a clear plan-time error pointing at `npm install better-sqlite3 sqlite-vec`.
+The memory subsystem (`packages/cambium-runner/src/memory/`, `packages/cambium-runner/src/providers/embed.ts`) is gated behind dynamic imports of `better-sqlite3` and `sqlite-vec`, both in `optionalDependencies`. A gen with no `memory :...` decls never triggers the import. A gen that uses memory without the deps installed gets a clear plan-time error pointing at `npm install better-sqlite3 sqlite-vec`.
 
 ## See also
 

@@ -341,13 +341,13 @@ Only pools actually referenced by this gen are inlined under `policies.memory_po
 ## Implementation reference
 
 - **Ruby:** `ruby/cambium/runtime.rb` (`MemoryPool`, `MemoryPoolBuilder`, `memory`/`write_memory_via`/`reads_trace_of` DSL), `ruby/cambium/compile.rb` (pool resolution + IR emission).
-- **TS backend:** `src/memory/backend.ts` (dynamic-import `better-sqlite3` + `sqlite-vec`; `open`, `append`, `readRecent`, `initSemantic`, `appendSemantic`, `searchSemantic`).
-- **TS integration:** `src/memory/runner-integration.ts` (`planMemory`, `readMemoryForRun`, `commitMemoryWrites`), `src/memory/retro-agent.ts` (class→file, subprocess dispatch, apply-with-sanitization), `src/memory/path.ts` + `src/memory/keys.ts` + `src/memory/prompt-block.ts`.
-- **Embed provider:** `src/providers/embed.ts` (oMLX + Ollama + SHA-256-seeded mock).
-- **Runner hook:** `src/runner.ts` (between SecurityCheck and the steps loop; commit after `finalOk`; `process.once('exit', closeBackends)` for WAL safety).
+- **TS backend:** `packages/cambium-runner/src/memory/backend.ts` (dynamic-import `better-sqlite3` + `sqlite-vec`; `open`, `append`, `readRecent`, `initSemantic`, `appendSemantic`, `searchSemantic`).
+- **TS integration:** `packages/cambium-runner/src/memory/runner-integration.ts` (`planMemory`, `readMemoryForRun`, `commitMemoryWrites`), `packages/cambium-runner/src/memory/retro-agent.ts` (class→file, subprocess dispatch, apply-with-sanitization), `packages/cambium-runner/src/memory/path.ts` + `packages/cambium-runner/src/memory/keys.ts` + `packages/cambium-runner/src/memory/prompt-block.ts`.
+- **Embed provider:** `packages/cambium-runner/src/providers/embed.ts` (oMLX + Ollama + SHA-256-seeded mock).
+- **Runner hook:** `packages/cambium-runner/src/runner.ts` (between SecurityCheck and the steps loop; commit after `finalOk`; `process.once('exit', closeBackends)` for WAL safety).
 - **Reference agent:** `packages/cambium/app/gens/support_memory_agent.cmb.rb` + `app/systems/support_memory_agent.system.md`.
 - **Reference pool:** `packages/cambium/app/memory_pools/support_team.pool.rb`.
-- **Tests:** `src/memory/*.test.ts` (45 unit tests), `packages/cambium/tests/{compile_memory,memory_runtime,retro_agent_runtime,semantic_memory}.test.ts` (21 integration tests).
+- **Tests:** `packages/cambium-runner/src/memory/*.test.ts` (45 unit tests), `packages/cambium/tests/{compile_memory,memory_runtime,retro_agent_runtime,semantic_memory}.test.ts` (21 integration tests).
 
 ## See also
 

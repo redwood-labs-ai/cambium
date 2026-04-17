@@ -113,8 +113,8 @@ end
 For side-effect flows — notifications, webhooks, "on completion, update Linear" — declare a trigger with an `action :name` directive. Action handlers live as paired files alongside tool plugins:
 
 ```
-src/builtin-actions/notify_stderr.action.json   # schema + permissions
-src/builtin-actions/notify_stderr.action.ts     # exports execute(input, ctx)
+packages/cambium-runner/src/builtin-actions/notify_stderr.action.json   # schema + permissions
+packages/cambium-runner/src/builtin-actions/notify_stderr.action.ts     # exports execute(input, ctx)
 # or app-side at packages/cambium/app/actions/<name>.action.{json,ts}
 ```
 

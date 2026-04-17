@@ -6,14 +6,14 @@ import { join } from 'node:path'
 
 async function loadedRegistry() {
   const reg = new ToolRegistry()
-  await reg.loadFromDir(join(process.cwd(), 'src/builtin-tools'))
+  await reg.loadFromDir(join(process.cwd(), 'packages/cambium-runner/src/builtin-tools'))
   await reg.loadFromDir(join(process.cwd(), 'packages/cambium/app/tools'))
   return reg
 }
 
 async function loadedActionRegistry() {
   const reg = new ActionRegistry()
-  await reg.loadFromDir(join(process.cwd(), 'src/builtin-actions'))
+  await reg.loadFromDir(join(process.cwd(), 'packages/cambium-runner/src/builtin-actions'))
   return reg
 }
 

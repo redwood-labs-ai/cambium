@@ -121,21 +121,22 @@ output.json + trace.json
 │   ├── src/
 │   │   └── contracts.ts   # TypeBox schemas (source of truth)
 │   └── tests/
-├── src/
-│   ├── runner.ts          # Core runtime (step pipeline + memory lifecycle)
-│   ├── step-handlers.ts   # Generate, validate, repair, correct, tool dispatch
-│   ├── builtin-tools/     # Framework tools — paired .tool.json + .tool.ts
-│   ├── builtin-actions/   # Framework trigger actions (notify_stderr, ...)
-│   ├── tools/             # Tool infra (registry, ToolContext, network-guard)
-│   ├── actions/           # Action registry (parallel to tools/)
-│   ├── memory/            # Memory subsystem (backend, path, keys, retro-agent)
-│   ├── providers/         # Model + embed providers (oMLX, Ollama)
-│   ├── correctors/        # Built-in correctors (math, dates, currency, citations)
-│   ├── signals.ts         # Signal extraction
-│   ├── triggers.ts        # Trigger evaluation (tool_call + action_call)
-│   ├── compound.ts        # Review + consensus
-│   ├── enrich.ts          # Sub-agent enrichment
-│   └── schema-describe.ts # Auto-generated schema descriptions
+├── packages/cambium-runner/ # @cambium/runner — TS runtime (RED-242)
+│   └── src/
+│       ├── runner.ts          # Core runtime (step pipeline + memory lifecycle)
+│       ├── step-handlers.ts   # Generate, validate, repair, correct, tool dispatch
+│       ├── builtin-tools/     # Framework tools — paired .tool.json + .tool.ts
+│       ├── builtin-actions/   # Framework trigger actions (notify_stderr, ...)
+│       ├── tools/             # Tool infra (registry, ToolContext, network-guard)
+│       ├── actions/           # Action registry (parallel to tools/)
+│       ├── memory/            # Memory subsystem (backend, path, keys, retro-agent)
+│       ├── providers/         # Model + embed providers (oMLX, Ollama)
+│       ├── correctors/        # Built-in correctors (math, dates, currency, citations)
+│       ├── signals.ts         # Signal extraction
+│       ├── triggers.ts        # Trigger evaluation (tool_call + action_call)
+│       ├── compound.ts        # Review + consensus
+│       ├── enrich.ts          # Sub-agent enrichment
+│       └── schema-describe.ts # Auto-generated schema descriptions
 ├── ruby/cambium/
 │   ├── runtime.rb         # GenModel DSL primitives
 │   └── compile.rb         # Ruby → JSON IR compiler

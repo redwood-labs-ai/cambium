@@ -10,7 +10,7 @@ import { testOverrideHandlers } from './index.js';
 import { Budget } from '../budget.js';
 import type { SecurityPolicy } from './permissions.js';
 
-const BUILTINS = join(process.cwd(), 'src/builtin-tools');
+const BUILTINS = join(process.cwd(), 'packages/cambium-runner/src/builtin-tools');
 const APP_TOOLS = join(process.cwd(), 'packages/cambium/app/tools');
 
 // Calculator is pure — no network, no filesystem. Good probe tool for

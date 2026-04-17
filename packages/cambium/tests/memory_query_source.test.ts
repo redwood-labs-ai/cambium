@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { resolveSemanticQuery } from '../../../src/memory/runner-integration.js';
-import type { MemoryDecl } from '../../../src/memory/types.js';
+import { resolveSemanticQuery } from '../../cambium-runner/src/memory/runner-integration.js';
+import type { MemoryDecl } from '../../cambium-runner/src/memory/types.js';
 
 /**
  * RED-238: unit tests for the semantic-query resolver. This is a pure

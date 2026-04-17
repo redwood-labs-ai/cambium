@@ -95,7 +95,7 @@ function generateTool(name) {
   console.log(`\nGenerating tool: ${snake}\n`);
 
   // RED-209 layout: paired .tool.json + .tool.ts in app/tools/. The
-  // registry auto-discovers both; no edits to src/tools/index.ts.
+  // registry auto-discovers both; no edits to packages/cambium-runner/src/tools/index.ts.
   writeFile(join(PKG, 'app/tools', `${snake}.tool.json`), JSON.stringify({
     name: snake,
     description: `TODO: describe what ${snake} does`,
@@ -126,7 +126,7 @@ function generateTool(name) {
  * permissions block and use \`ctx.fetch\` here — NOT globalThis.fetch
  * (the SSRF guard lives on ctx.fetch; direct fetch bypasses it).
  */
-import type { ToolContext } from '../../../../src/tools/tool-context.js';
+import type { ToolContext } from '../../../cambium-runner/src/tools/tool-context.js';
 
 export async function execute(
   input: { input: string },
@@ -177,7 +177,7 @@ function generateCorrector(name) {
 
   console.log(`\nGenerating corrector: ${snake}\n`);
 
-  writeFile(join('src/correctors', `${snake}.ts`), `\
+  writeFile(join('packages/cambium-runner/src/correctors', `${snake}.ts`), `\
 import type { CorrectorFn, CorrectorResult, CorrectorIssue } from './types.js';
 
 export const ${snake}: CorrectorFn = (data, _context): CorrectorResult => {
@@ -196,7 +196,7 @@ export const ${snake}: CorrectorFn = (data, _context): CorrectorResult => {
 };
 `);
 
-  writeFile(join('src/correctors', `${snake}.test.ts`), `\
+  writeFile(join('packages/cambium-runner/src/correctors', `${snake}.test.ts`), `\
 import { describe, it, expect } from 'vitest'
 import { ${snake} } from './${snake}.js'
 
@@ -210,8 +210,8 @@ describe('${snake} corrector', () => {
 `);
 
   console.log(`\nNext steps:`);
-  console.log(`  1. Implement src/correctors/${snake}.ts`);
-  console.log(`  2. Register in src/correctors/index.ts: import and add to correctors map`);
+  console.log(`  1. Implement packages/cambium-runner/src/correctors/${snake}.ts`);
+  console.log(`  2. Register in packages/cambium-runner/src/correctors/index.ts: import and add to correctors map`);
   console.log(`  3. Declare in your agent: corrects :${snake}`);
 }
 
