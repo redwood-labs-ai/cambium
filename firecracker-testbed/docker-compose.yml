@@ -39,6 +39,20 @@ services:
     cap_add:
       - NET_ADMIN
 
+    # Mount kernel + rootfs artifacts read-only so smoke.sh v1 can
+    # boot a real microVM. Firecracker needs vmlinux + rootfs.ext4
+    # paths that are reachable from inside the container. If the
+    # artifact directories are empty (user hasn't built them yet),
+    # smoke.sh detects that and skips the v1 integration checks with
+    # a clear message — the v0 floor checks still run.
+    #
+    # Build instructions:
+    #   cd firecracker-testbed/kernel && ./fetch.sh
+    #   cd firecracker-testbed/rootfs && ./build.sh
+    volumes:
+      - ./kernel:/artifacts/kernel:ro
+      - ./rootfs/out:/artifacts/rootfs:ro
+
     # Rerun the smoke on every container start. Exits non-zero on
     # failure so Komodo surfaces it.
     restart: "no"
