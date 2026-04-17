@@ -24,7 +24,7 @@ Env overrides:
 | Var | Default | Notes |
 | --- | --- | --- |
 | `ARCH` | `aarch64` | Set `x86_64` for Intel/AMD hosts |
-| `KERNEL_VERSION` | `6.1.141` | Available versions depend on `FC_CI_TAG` |
+| `KERNEL_VERSION` | `6.1.102` | Available versions depend on `FC_CI_TAG` (v1.11 ships `5.10.225` and `6.1.102`) |
 | `FC_CI_TAG` | `v1.11` | Firecracker's CI release tag; bump when they cut a new reference set |
 
 ## Why S3 + not a package manager
