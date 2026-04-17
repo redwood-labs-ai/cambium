@@ -87,39 +87,14 @@ def read_frame(sock: socket.socket) -> dict:
     return json.loads(body.decode("utf-8"))
 
 
-def connect_to_uds(uds_path: str, deadline: float) -> socket.socket:
-    """
-    Retry-connect to the Firecracker parent vsock UDS. The UDS is
-    created when `PUT /vsock` lands, but the guest-side listener
-    isn't ready until the kernel boots + rootfs mounts + agent
-    runs. Boot takes a couple of seconds with a minimal kernel,
-    more with a warm cache miss.
-    """
-    last_err = None
-    while time.monotonic() < deadline:
-        try:
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            s.settimeout(2.0)
-            s.connect(uds_path)
-            return s
-        except FileNotFoundError as e:
-            last_err = e
-        except (ConnectionRefusedError, socket.timeout) as e:
-            last_err = e
-        time.sleep(0.25)
-    raise TimeoutError(
-        f"could not connect to {uds_path} within "
-        f"{CONNECT_DEADLINE_SECONDS:.1f}s: {last_err}"
-    )
-
-
 def negotiate_connect(sock: socket.socket, port: int) -> str:
     """
     Firecracker's host-initiated vsock protocol: after connecting
     to the parent UDS, send `CONNECT <port>\\n`; Firecracker
     forwards the connection to the guest listener on that port
-    and replies with `OK <backend_port>\\n` on success, or
-    something beginning with a different status on failure.
+    and replies with `OK <backend_port>\\n` on success. If no
+    guest listener exists yet, Firecracker closes the host-side
+    UDS — this surfaces as EOFError on the read below.
     """
     sock.sendall(f"CONNECT {port}\n".encode())
     line = bytearray()
@@ -138,6 +113,53 @@ def negotiate_connect(sock: socket.socket, port: int) -> str:
     if not text.startswith("OK "):
         raise RuntimeError(f"vsock CONNECT rejected: {text!r}")
     return text
+
+
+def dial_and_handshake(
+    uds_path: str, port: int, deadline: float
+) -> "tuple[socket.socket, str]":
+    """
+    Retry the full UDS-open + CONNECT handshake until it succeeds
+    or the deadline expires. Retrying just the UDS open isn't
+    enough: the parent UDS appears as soon as `PUT /vsock` lands
+    (before boot), but the guest-side vsock listener doesn't
+    come up until the kernel's finished booting, rootfs has
+    mounted, and the agent's reached its accept loop — a window
+    that's several seconds on cold Alpine. During that window
+    the UDS connects cleanly but Firecracker closes on our
+    CONNECT write, so we need to reopen + resend, not just
+    reopen.
+    """
+    last_err = None
+    while time.monotonic() < deadline:
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(2.0)
+            sock.connect(uds_path)
+            reply = negotiate_connect(sock, port)
+            return sock, reply
+        except (
+            FileNotFoundError,
+            ConnectionRefusedError,
+            EOFError,
+            RuntimeError,
+            ValueError,
+            socket.timeout,
+            OSError,
+        ) as e:
+            last_err = e
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+        time.sleep(0.5)
+    raise TimeoutError(
+        f"could not establish vsock session to {uds_path} port "
+        f"{port} within {CONNECT_DEADLINE_SECONDS:.1f}s: "
+        f"last error: {last_err!r}"
+    )
 
 
 def validate_response(resp: dict) -> None:
@@ -165,10 +187,8 @@ def validate_response(resp: dict) -> None:
 def main() -> int:
     log(f"dialing {UDS} (deadline {CONNECT_DEADLINE_SECONDS:.1f}s)")
     deadline = time.monotonic() + CONNECT_DEADLINE_SECONDS
-    sock = connect_to_uds(UDS, deadline)
+    sock, reply = dial_and_handshake(UDS, PORT, deadline)
     sock.settimeout(RESPONSE_DEADLINE_SECONDS)
-    log(f"connected; negotiating CONNECT {PORT}")
-    reply = negotiate_connect(sock, PORT)
     log(f"vsock OK: {reply}")
 
     write_frame(sock, EXEC_REQUEST)
