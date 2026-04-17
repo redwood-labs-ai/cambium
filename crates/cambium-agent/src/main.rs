@@ -1,5 +1,14 @@
-//! `cambium-agent` binary — runs inside the guest VM, waits for one
-//! request over vsock, dispatches it, writes the response, exits.
+//! `cambium-agent` binary — runs inside the guest VM, listens on
+//! vsock, dispatches requests, writes responses, then loops back
+//! to accept more.
+//!
+//! The agent never exits voluntarily. It's PID 1 inside the microVM,
+//! so returning from main() kernel-panics the guest — and on a panic
+//! Firecracker tears the VM down fast enough to race the virtio-vsock
+//! flush of whatever response we just wrote. The host decides the
+//! VM's lifecycle (via the Firecracker API) after reading the
+//! response; the agent's only job is to keep servicing requests
+//! until killed.
 //!
 //! The production target is Linux (AF_VSOCK is a Linux kernel feature).
 //! The crate compiles on macOS / Windows for development and test runs,
@@ -11,6 +20,8 @@ use std::process::ExitCode;
 #[cfg(target_os = "linux")]
 fn main() -> ExitCode {
     use cambium_agent::{handle_one, write_frame, ExecResponse, VSOCK_PORT};
+    use std::thread;
+    use std::time::Duration;
     use vsock::{VsockAddr, VsockListener, VMADDR_CID_ANY};
 
     eprintln!("cambium-agent: binding vsock CID=VMADDR_CID_ANY port={VSOCK_PORT}");
@@ -23,30 +34,37 @@ fn main() -> ExitCode {
         }
     };
 
-    // One-shot by design — the host destroys the VM after reading the
-    // response, so accepting a second connection is pointless.
-    let (mut stream, peer) = match listener.accept() {
-        Ok(x) => x,
-        Err(e) => {
-            eprintln!("cambium-agent: accept failed: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    eprintln!("cambium-agent: accepted connection from {peer:?}");
+    // Accept loop. One connection per request — the host opens a
+    // fresh CONNECT for each exec, we handle it, stream drops at
+    // end of iteration (flushing the response through virtio-vsock
+    // naturally because the process stays alive), and we loop
+    // back to accept the next one. Never returns. If accept() ever
+    // fails (shouldn't under normal operation), we log and back off
+    // briefly rather than exiting, so a flaky accept can't kill the
+    // VM.
+    loop {
+        let (mut stream, peer) = match listener.accept() {
+            Ok(x) => x,
+            Err(e) => {
+                eprintln!("cambium-agent: accept failed: {e}");
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+        };
+        eprintln!("cambium-agent: accepted connection from {peer:?}");
 
-    match handle_one(&mut stream) {
-        Ok(()) => {
-            eprintln!("cambium-agent: request handled, exiting");
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("cambium-agent: handler error: {e}");
-            // Best-effort: if the stream is still writable, send a
-            // Crashed response so the host has *something* to classify.
-            // If the transport is dead this second write will fail too
-            // and the error is just logged.
-            let _ = write_frame(&mut stream, &ExecResponse::crashed(format!("agent: {e}")));
-            ExitCode::from(1)
+        match handle_one(&mut stream) {
+            Ok(()) => {
+                eprintln!("cambium-agent: request handled");
+            }
+            Err(e) => {
+                eprintln!("cambium-agent: handler error: {e}");
+                // Best-effort: if the stream is still writable, send a
+                // Crashed response so the host has *something* to classify.
+                // If the transport is dead this second write will fail too
+                // and the error is just logged.
+                let _ = write_frame(&mut stream, &ExecResponse::crashed(format!("agent: {e}")));
+            }
         }
     }
 }
