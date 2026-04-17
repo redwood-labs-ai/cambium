@@ -21,7 +21,7 @@ Usage:
 
 Commands:
   init      Initialize a new Cambium workspace
-  new       Scaffold a new agent, tool, schema, system, or corrector
+  new       Scaffold a new engine, agent, tool, schema, system, or corrector
   run       Compile and execute a GenModel
   doctor    Check environment setup and dependencies
   test      Run the test suite
@@ -38,6 +38,7 @@ Run flags:
 Examples:
   cambium run packages/cambium/app/gens/analyst.cmb.rb --method analyze --arg document.txt
   cambium run gen.cmb.rb --method summarize --arg data.json --trace trace.json --out result.json
+  cambium new engine Summarizer
   cambium new agent BtcAnalyst
   cambium new tool price_fetcher
   cambium new schema TradeSignal
