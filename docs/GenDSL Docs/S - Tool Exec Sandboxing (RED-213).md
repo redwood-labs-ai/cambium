@@ -20,9 +20,13 @@ This is the RED-220 framing pattern again, applied to exec. Cambium ships **two 
 
 ### WASM (the default)
 
-In-process execution via [Wasmtime](https://wasmtime.dev) (the Bytecode Alliance Rust runtime) embedded in `@cambium/runner` as an npm dependency. The host needs **nothing** beyond `npm install`. JavaScript code runs inside **QuickJS-WASM** (~300KB, sub-ms cold-start, no Node APIs) — pinned as the v1 JS engine; the alternatives (V8-WASM at ~30MB) aren't realistic. Python is deferred to a v1.5 follow-up via Pyodide; v1 ships JS-only.
+In-process execution via **[`quickjs-emscripten`](https://github.com/justjake/quickjs-emscripten)** — QuickJS compiled to WebAssembly, hosted on Node's built-in `WebAssembly` support. Ships as an `optionalDependency` of `@cambium/runner`. The host needs **nothing** beyond `npm install`; there's no native binding to build and no separate WASM-runtime binary to install. JavaScript code runs inside **QuickJS-WASM** (~300KB runtime, sub-ms cold-start, no Node APIs) — pinned as the v1 JS engine; the alternatives (V8-WASM at ~30MB) aren't realistic. Python is deferred to a v1.5 follow-up via Pyodide; v1 ships JS-only.
 
-Capabilities are passed in explicitly via WASI: filesystem access only via preopens, no network, no subprocess spawn, no env. Resource caps (CPU/memory/wall-clock) enforced by Wasmtime itself. The escape surface is roughly "WASM runtime bug" — much smaller than "kernel CVE" or "container escape."
+The capability model is implicit-deny: QuickJS exposes no `fetch`, no `require('fs')`, no `child_process`, no `process.env` by default. Any guest attempt to reach these surfaces as a `ReferenceError` — which the substrate collapses into `ExecResult.status: 'completed'` with `exit_code: 1` (the guest crashed, not the substrate). No WASI preopens or capability handles in v1; filesystem capability is deferred alongside Pyodide to v1.5+.
+
+Enforced resource caps: **memory** via QuickJS's `setMemoryLimit()`, and **wall-clock timeout** via `setInterruptHandler()` polling `Date.now()`. **CPU is accepted in the DSL but NOT enforced by `:wasm`** (design decision — by the time a gen author needs CPU shares, they've outgrown engine mode; use `:firecracker`). The CPU value still ends up in the `ExecSpawned` trace meta for observability.
+
+The escape surface is roughly "QuickJS runtime bug" — much smaller than "kernel CVE" or "container escape." The RED-250 test bench locks in the eight escape categories as regression fixtures.
 
 This is the default for new gens. It handles the realistic 95th-percentile use case for `execute_code`: math, JSON transforms, string manipulation, schema validation, simple algorithmic compute. No numpy, no `fs`, no `fetch`. By design.
 
@@ -161,7 +165,7 @@ Firecracker cold-start is ~125ms; agentic loops calling `execute_code` 10–50 t
 
 ### 7. Output capture + caps — settled
 
-stdout/stderr piped from the substrate to the runner with the `maxOutputBytes` cap (default 50k, matches today's behavior). Each stream truncated independently with a clear marker (`\n[truncated at <N> chars]`); both `truncated` flags surface on `ExecResult`. Substrate-specific implementation (Wasmtime stdout pipe vs Firecracker vsock or stdio passthrough) but consistent shape.
+stdout/stderr piped from the substrate to the runner with the `maxOutputBytes` cap (default 50k, matches today's behavior). Each stream truncated independently with a clear marker (`\n[truncated at <N> chars]`); both `truncated` flags surface on `ExecResult`. Substrate-specific implementation (QuickJS `console.log`/`console.error` host-function injection vs Firecracker vsock or stdio passthrough) but consistent shape.
 
 ### 8. Trace event vocabulary — settled
 
@@ -180,7 +184,7 @@ Documented in `C - Trace (observability).md` once the impl tickets land.
 
 Three rules:
 
-- **WASM works on Linux, macOS, and Windows.** Wasmtime is cross-platform; this is the default precisely because it runs everywhere.
+- **WASM works on Linux, macOS, and Windows.** `quickjs-emscripten` runs on Node's built-in `WebAssembly` support, which is cross-platform; this is the default precisely because it runs everywhere without special setup.
 - **Firecracker works on Linux with KVM only.** When a gen declares `runtime: :firecracker` and `available()` returns a non-null reason, the runner fails at startup with that reason. No fallback. Forces the user to consciously choose between (a) running the workload on a Firecracker-capable host, (b) downgrading to WASM with the language constraints, or (c) running `:native` with the deprecation warning if they accept the dev-mode risk.
 - **`:native` works everywhere.** Stays compile-valid for the deprecation period. Emits the warning on every run.
 
@@ -205,7 +209,7 @@ Test bench per substrate. Same coverage matrix; substrate-specific assertions.
 | Subprocess spawn | `subprocess.run(['nc', ...])` fails | WASI doesn't expose process spawn | seccomp denies clone3 |
 | Fork bomb | infinite spawn loop | WASI rejects | seccomp + cgroup pid limit |
 | CPU burn | infinite loop | substrate CPU cap kicks in | cgroup CPU cap kicks in |
-| OOM | progressive allocation | Wasmtime memory cap rejects | cgroup memory cap kicks in |
+| OOM | progressive allocation | QuickJS memory cap rejects | cgroup memory cap kicks in |
 
 Lives at `packages/cambium-runner/src/builtin-tools/execute_code.escape-tests.ts` (or similar). Run as part of the regular suite; failure indicates a substrate config regression.
 
@@ -237,7 +241,7 @@ V1 ships per-call cold-start for both substrates (WASM ~1ms is free; Firecracker
 
 The decisions above settle most of the architecture. Each impl ticket below has a clear scope:
 
-1. **Adapter interface + WASM substrate.** Foundational. Defines the `ExecSubstrate` interface, ships the Wasmtime + QuickJS-WASM implementation, plumbs the `execute_code` builtin to dispatch through it. Includes the substrate-agnostic trace-event emission and the WASM-specific resource-limit + filesystem-preopen + network-deny behavior. **Largest ticket.**
+1. **Adapter interface + WASM substrate.** Foundational. Defines the `ExecSubstrate` interface, ships the `quickjs-emscripten` implementation, plumbs the `execute_code` builtin to dispatch through it. Includes the substrate-agnostic trace-event emission and the WASM-specific resource-limit + network-deny behavior. (Filesystem preopens and Pyodide Python are v1.5+; see open decisions.) **Largest ticket.**
 
 2. **DSL surface + Ruby parser.** Extends `security exec:` to accept the new shape. Preserves `{ allowed: true }` back-compat. Updates `parseSecurityPolicy` to emit the resolved `runtime`/`cpu`/`memory`/`timeout`/`network`/`filesystem` shape into `policies.security.exec`. Pack support follows from RED-214's per-slot mixing.
 
