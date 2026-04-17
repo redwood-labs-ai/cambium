@@ -13,10 +13,20 @@
 //! bringing in vsock or a real interpreter. The `cambium-agent` binary
 //! (`src/main.rs`) is a thin wrapper around the listener loop.
 
+pub mod agent;
 pub mod frame;
 pub mod protocol;
 pub mod spawn;
 
+pub use agent::handle_one;
 pub use frame::{read_frame, write_frame, MAX_FRAME_BYTES};
 pub use protocol::{ExecRequest, ExecResponse, Language, Status};
 pub use spawn::{run_exec, run_process};
+
+/// The vsock port the agent listens on inside the guest. Host side
+/// must connect to this port to hand off a request. Pinned here (not
+/// in main.rs) so both the binary and any future host-side crate can
+/// import it from the same source of truth. Value chosen arbitrarily
+/// in the 49152-65535 dynamic range — nothing magic about the number
+/// beyond "it's a constant both ends must agree on."
+pub const VSOCK_PORT: u32 = 52717;
