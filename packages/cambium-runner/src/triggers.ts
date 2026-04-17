@@ -214,6 +214,7 @@ async function dispatchAction(
     toolName: actionName,
     policy: env.policy?.network,
     execPolicy: env.policy?.exec,
+    emitStep: env.traceEvents ? (step) => env.traceEvents!.push(step) : undefined,
   });
 
   const start = Date.now();

@@ -248,6 +248,67 @@ end
   });
 });
 
+// RED-249: CAMBIUM_STRICT_EXEC=1 makes :native a hard compile error.
+describe('security exec: CAMBIUM_STRICT_EXEC=1 (RED-249)', () => {
+  function compileExpectErrorStrict(genPath: string, method: string): string {
+    try {
+      execSync(
+        `CAMBIUM_STRICT_EXEC=1 ruby ruby/cambium/compile.rb ${genPath} --method ${method} --arg ${FIXTURE_ARG}`,
+        { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] },
+      );
+      throw new Error('Expected compile to fail, but it succeeded');
+    } catch (e: any) {
+      return String(e.stderr ?? '') + String(e.message ?? '');
+    }
+  }
+
+  it('rejects legacy { allowed: true } (which resolves to :native) under strict mode', () => {
+    const gen = writeGen(`
+class StrictNative < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  security exec: { allowed: true }
+  def go(_x); generate "x" do; returns AnalysisReport; end; end
+end
+`);
+    const stderr = compileExpectErrorStrict(gen, 'go');
+    expect(stderr).toMatch(/blocked by CAMBIUM_STRICT_EXEC=1/);
+  });
+
+  it('rejects explicit runtime: :native under strict mode', () => {
+    const gen = writeGen(`
+class StrictExplicitNative < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  security exec: { runtime: :native, cpu: 1, memory: 64, timeout: 5 }
+  def go(_x); generate "x" do; returns AnalysisReport; end; end
+end
+`);
+    const stderr = compileExpectErrorStrict(gen, 'go');
+    expect(stderr).toMatch(/blocked by CAMBIUM_STRICT_EXEC=1/);
+  });
+
+  it('still accepts runtime: :wasm under strict mode', () => {
+    const gen = writeGen(`
+class StrictWasm < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  security exec: { runtime: :wasm, cpu: 0.5, memory: 128, timeout: 10 }
+  def go(_x); generate "x" do; returns AnalysisReport; end; end
+end
+`);
+    const stdout = execSync(
+      `CAMBIUM_STRICT_EXEC=1 ruby ruby/cambium/compile.rb ${gen} --method go --arg ${FIXTURE_ARG}`,
+      { encoding: 'utf8' },
+    );
+    const ir = JSON.parse(stdout);
+    expect(ir.policies.security.exec.runtime).toBe('wasm');
+  });
+});
+
 // Policy-pack support: exec can be bundled in a *.policy.rb, and the
 // per-slot mixing rule (RED-214) prohibits a gen from also declaring
 // exec when the pack contributes it.
