@@ -326,10 +326,51 @@ The function name (`summarize`) and method-signature input type are derived from
 - [x] Search-path relaxation is specified, including sentinel-aware suppression.
 - [x] Engine-folder sentinel + scaffolder mode-detection is specified.
 - [x] Ruby-as-dev-dep position is stated.
-- [ ] Each impl piece has a Linear ticket filed against it.
-- [ ] First proof-of-concept exists: a fresh Node project that is *not* the Cambium monorepo, with one engine-mode gen folder and a typed `import` calling into `@cambium/runner` end-to-end. The POC explicitly re-runs the first-attempt scenario to confirm the `app/app` trap no longer reproduces.
+- [x] Each impl piece has a Linear ticket filed against it.
+- [x] First proof-of-concept exists: a fresh Node project that is *not* the Cambium monorepo, with one engine-mode gen folder and a typed `import` calling into `@cambium/runner` end-to-end. The POC explicitly re-runs the first-attempt scenario to confirm the `app/app` trap no longer reproduces. **Lives at `/Users/stevekeider/dev/cambium-poc/`** — depends on `@cambium/runner` via `file:../cambium/packages/cambium-runner` (closest sim of `npm install @cambium/runner` until we publish for real). End-to-end output captured below.
 
-The last two items are tracked under RED-220 itself; this note is the design artefact the ticket calls for in its first acceptance bullet.
+This note is the design artefact the ticket called for in its first acceptance bullet.
+
+### POC findings
+
+The POC produced a typed, validated result on the first end-to-end attempt — **after** four design gaps were closed inline. Each gap is a real issue that would have bitten the first external user; documenting them so future contributors can see what the POC was for.
+
+1. **CLI cwd-relative paths.** `cli/compile.mjs` (and `cli/cambium.mjs` for `run`) hardcoded `./ruby/cambium/compile.rb`. Fine inside the monorepo, broken from a host project. Fix: resolve the Ruby script relative to `import.meta.url` of the CLI module. Applied to `cli/compile.mjs`; `cambium run`'s same gap is not blocking (engine-mode hosts call `runGen` directly) and remains as future work.
+
+2. **System-prompt resolver lacked engine-mode awareness.** `ruby/cambium/compile.rb`'s `system :name` resolver only walked `<pkg>/app/systems/` and the cwd-relative workspace fallback. Engine-mode gens with `system :name` referencing a sibling `<name>.system.md` would fail. Fix: extend the RED-245 discovery pattern (gen-local first, then walk-up, sentinel-aware suppression) to system prompts. The schema-existence validator (RED-210) has the same gap but is already best-effort skipping, so it doesn't block — it just means engine-mode users get no compile-time schema-name validation. Worth a future pass.
+
+3. **`runner.ts` always fired its CLI `main()` on import.** The unconditional `main().catch(...)` at module bottom fired the moment a host did `import { runGen } from '@cambium/runner'`, leading to a `Missing --ir` error before the host's code ran. Fix: gate `main()` behind an `invokedAsScript` check (`fileURLToPath(import.meta.url) === process.argv[1]`). Standard Node script-vs-library guard; we just hadn't applied it because everything in the monorepo was script-only until the engine-mode POC.
+
+4. **`opts.mock` didn't actually plumb through.** The mock branch in `generateText` is gated on `CAMBIUM_ALLOW_MOCK=1`. The CLI sets that env var when `--mock` is passed; library callers passing `mock: true` would still hit the live LLM path and 401 against the oMLX server. Fix: set the env var inside `runGen` when `opts.mock` is true, restore it in a `finally` so concurrent callers and the surrounding process aren't affected. Threading `mockFlag` down to `generateText` as an explicit parameter is cleaner long-term but requires more touch-points; the env-var bridge is sufficient for v0 with the documented "serialize concurrent calls with conflicting mock settings" caveat.
+
+A 4-test library-smoke suite (`packages/cambium/tests/run_gen_library.test.ts`) covers the import + library-call + env-var-restore + missing-schema paths so any regression on these gaps surfaces in the test suite, not at the next POC attempt.
+
+### POC end-to-end output
+
+```
+$ cd cambium-poc
+$ node ../cambium/cli/cambium.mjs new engine Summarizer
+  created: cambium/summarizer/cambium.engine.json
+  created: cambium/summarizer/CLAUDE.md
+  created: cambium/summarizer/summarizer.cmb.rb
+  created: cambium/summarizer/summarizer.system.md
+  created: cambium/summarizer/schemas.ts
+  created: cambium/summarizer/index.ts
+
+$ node ../cambium/cli/cambium.mjs compile cambium/summarizer/summarizer.cmb.rb --method analyze
+Wrote IR to cambium/summarizer/summarizer.ir.json
+
+$ npm start
+POC: calling analyze() with mock=true (no LLM)
+
+Result: {
+  "summary": "Mock analysis (model provider not available).",
+  "metrics": { "latency_ms_samples": [] },
+  "key_facts": []
+}
+```
+
+No `app/<type>/` subdirectories were ever created inside the engine folder during scaffold or compile. The first-attempt trap does not reproduce.
 
 ---
 

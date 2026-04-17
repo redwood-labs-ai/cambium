@@ -460,6 +460,19 @@ class BudgetExceededError extends Error {
 export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   const { ir, schemas: contractsMod, mock: mockFlag = false, memoryKeys = [] } = opts;
 
+  // Plumb opts.mock through to the deterministic-mock branch in
+  // generateText. That branch is gated on CAMBIUM_ALLOW_MOCK=1 — the CLI
+  // sets that env var directly, but a library caller passing `mock: true`
+  // would otherwise hit the live LLM path. Restore the previous value
+  // when runGen returns so concurrent callers and the surrounding
+  // process aren't affected. Note: the env var is process-global, so
+  // truly concurrent runGen() calls with conflicting mock settings can
+  // race — engine-mode hosts that need that should serialize calls or
+  // wait for opts.mock to be threaded down explicitly. Surfaced by
+  // the RED-220 POC.
+  const previousMockEnv = process.env.CAMBIUM_ALLOW_MOCK;
+  if (mockFlag) process.env.CAMBIUM_ALLOW_MOCK = '1';
+
   const runId = `run_${nowId()}_${Math.random().toString(16).slice(2, 8)}`;
 
   const trace: any = {
@@ -1094,6 +1107,17 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
       };
     }
     throw e;
+  } finally {
+    // Restore the previous CAMBIUM_ALLOW_MOCK so a `runGen({ mock: true })`
+    // doesn't leak the env-var override past this call. See note at
+    // mockFlag setup at the top of runGen.
+    if (mockFlag) {
+      if (previousMockEnv === undefined) {
+        delete process.env.CAMBIUM_ALLOW_MOCK;
+      } else {
+        process.env.CAMBIUM_ALLOW_MOCK = previousMockEnv;
+      }
+    }
   }
 }
 
@@ -1137,7 +1161,16 @@ function setNestedValue(obj: any, path: string, value: any): void {
   current[parts[parts.length - 1]] = value;
 }
 
-main().catch(err => {
-  console.error(err?.stack || String(err));
-  process.exit(1);
-});
+// Only run the CLI entry when this file is invoked as a script. When
+// imported as a library (engine-mode hosts: `import { runGen } from
+// '@cambium/runner'`), `main()` must NOT fire — it would parse the
+// host's argv looking for --ir, find nothing, and exit. The check
+// compares the resolved module path against process.argv[1].
+// Surfaced by the RED-220 POC.
+const invokedAsScript = fileURLToPath(import.meta.url) === process.argv[1];
+if (invokedAsScript) {
+  main().catch(err => {
+    console.error(err?.stack || String(err));
+    process.exit(1);
+  });
+}

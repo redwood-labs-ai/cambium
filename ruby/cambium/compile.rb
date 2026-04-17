@@ -118,22 +118,35 @@ if (schema_name = defs[:returnSchema])
 end
 
 # Resolve system prompt: symbol → file lookup, string → inline, nil → omit.
+#
+# Search layers mirror the RED-245 discovery pattern used by policy
+# packs and memory pools. Engine-mode authoring puts the system prompt
+# next to the gen file; app-mode keeps the existing app/systems/
+# convention; the workspace fallback covers gens invoked from the repo
+# root. When a cambium.engine.json sentinel sits next to the gen, only
+# the gen-local dir is consulted (no walk-up). Surfaced by the RED-220 POC.
 system_prompt = nil
 if defs[:system]
   raw = defs[:system]
   if raw.is_a?(Symbol) || raw.is_a?(Cambium::ConstRef)
     name = raw.to_s.downcase
-    # Look for app/systems/<name>.system.md relative to the source file's package
-    pkg_dir = File.dirname(File.dirname(File.expand_path(file)))  # up from app/gens/
-    system_file = File.join(pkg_dir, 'app', 'systems', "#{name}.system.md")
-    unless File.exist?(system_file)
-      # Also try relative to cwd
-      system_file = File.join('packages', 'cambium', 'app', 'systems', "#{name}.system.md")
-    end
-    if File.exist?(system_file)
+    gen_dir = File.dirname(File.expand_path(file))
+    candidates =
+      if File.exist?(File.join(gen_dir, 'cambium.engine.json'))
+        [File.join(gen_dir, "#{name}.system.md")]
+      else
+        [
+          File.join(gen_dir, "#{name}.system.md"),
+          File.join(File.dirname(gen_dir), 'systems', "#{name}.system.md"),
+          File.join('packages', 'cambium', 'app', 'systems', "#{name}.system.md"),
+        ].uniq
+      end
+    system_file = candidates.find { |p| File.exist?(p) }
+    if system_file
       system_prompt = File.read(system_file).strip
     else
-      raise Cambium::CompileError, "System prompt '#{name}' not found. Looked for: #{system_file}"
+      raise Cambium::CompileError,
+            "System prompt '#{name}' not found. Looked for:\n  " + candidates.join("\n  ")
     end
   else
     system_prompt = raw.to_s
