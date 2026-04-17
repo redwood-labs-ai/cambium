@@ -12,6 +12,18 @@ import { NativeSubstrate } from './native.js';
 import { WasmSubstrate } from './wasm.js';
 import { FirecrackerSubstrate } from './firecracker.js';
 
+/** Known substrate names. The list is load-bearing — see `getSubstrate`
+ *  for why we check against it explicitly rather than property-accessing
+ *  the registry directly. */
+const KNOWN_SUBSTRATES: readonly SubstrateName[] = ['wasm', 'firecracker', 'native'] as const;
+
+/** Type-guard for substrate names. Used at every policy boundary so a
+ *  tampered or malformed IR can't smuggle `'__proto__'` or `'toString'`
+ *  through the prototype chain. */
+export function isKnownSubstrate(name: string): name is SubstrateName {
+  return (KNOWN_SUBSTRATES as readonly string[]).includes(name);
+}
+
 let _registry: SubstrateRegistry | null = null;
 
 export function getSubstrateRegistry(): SubstrateRegistry {
@@ -25,12 +37,20 @@ export function getSubstrateRegistry(): SubstrateRegistry {
 }
 
 export function getSubstrate(name: SubstrateName): ExecSubstrate {
-  const reg = getSubstrateRegistry();
-  const sub = reg[name];
-  if (!sub) {
-    throw new Error(`Unknown exec substrate: "${name}". Known: ${Object.keys(reg).join(', ')}.`);
+  // Explicit allowlist check BEFORE any property access on the
+  // registry. `Object.hasOwn` would also work here, but an explicit
+  // enum check is harder to get wrong under refactor — a new substrate
+  // has to be named in KNOWN_SUBSTRATES to be lookupable. Without this
+  // guard, a value like `'__proto__'` or `'toString'` flowing in from
+  // a tampered IR would return the Object prototype / a method via
+  // the registry's property chain, sidestepping the `!sub` check.
+  if (!isKnownSubstrate(name)) {
+    throw new Error(
+      `Unknown exec substrate: "${name}". Known: ${KNOWN_SUBSTRATES.join(', ')}.`,
+    );
   }
-  return sub;
+  const reg = getSubstrateRegistry();
+  return reg[name];
 }
 
 /**

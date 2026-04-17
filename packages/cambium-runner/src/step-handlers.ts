@@ -405,10 +405,13 @@ export async function handleToolCall(
     );
   }
 
-  // Build the ToolContext (policy-bound fetch for network tools).
+  // Build the ToolContext (policy-bound fetch for network tools +
+  // exec policy for execute_code-class tools that dispatch through
+  // the substrate registry, RED-248).
   const ctx = buildToolContext({
     toolName,
     policy: env.policy?.network,
+    execPolicy: env.policy?.exec,
   });
 
   let result: any;

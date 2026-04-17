@@ -170,3 +170,22 @@ describe('FirecrackerSubstrate (stub)', () => {
     expect(reason).toMatch(/not yet implemented/);
   });
 });
+
+// RED-248 security review Finding 2: proto-safety.
+describe('getSubstrate — proto-safety', () => {
+  it('rejects "__proto__" with a clear "Unknown substrate" error', () => {
+    expect(() => getSubstrate('__proto__' as any)).toThrow(/Unknown exec substrate: "__proto__"/);
+  });
+
+  it('rejects "toString" (a method on Object.prototype) the same way', () => {
+    expect(() => getSubstrate('toString' as any)).toThrow(/Unknown exec substrate: "toString"/);
+  });
+
+  it('rejects "constructor"', () => {
+    expect(() => getSubstrate('constructor' as any)).toThrow(/Unknown exec substrate/);
+  });
+
+  it('rejects an arbitrary string', () => {
+    expect(() => getSubstrate('gvisor' as any)).toThrow(/Unknown exec substrate: "gvisor"/);
+  });
+});
