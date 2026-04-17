@@ -46,18 +46,15 @@ describe('execute_code (RED-248 dispatch)', () => {
     expect(result.stdout).toContain('hello native');
   });
 
-  it('runtime: "wasm" surfaces the stub\'s "not yet implemented" reason', async () => {
+  it('runtime: "wasm" runs the code via the real WASM substrate', async () => {
     const ctx = ctxWithExec({
       allowed: true,
       runtime: 'wasm',
       timeout: 5,
     });
-    const result = await execute({ language: 'node', code: 'console.log("irrelevant")' }, ctx);
-    expect(result.exit_code).not.toBe(0);
-    expect(result.stderr).toMatch(/WASM substrate not yet implemented/);
-    // The collapsed status tag must be visible so the model knows *why*
-    // the call failed — not just a bare nonzero exit.
-    expect(result.stderr).toMatch(/\[crashed:/);
+    const result = await execute({ language: 'node', code: 'console.log("hello from wasm")' }, ctx);
+    expect(result.exit_code).toBe(0);
+    expect(result.stdout).toContain('hello from wasm');
   });
 
   it('normalizes language "node" to "js" at the substrate boundary', async () => {
@@ -178,8 +175,7 @@ describe('execute_code — :native deprecation (RED-249)', () => {
   });
 
   it('does NOT emit tool.exec.unsandboxed for non-native runtimes', async () => {
-    // wasm substrate is a stub and returns crashed; the event should NOT
-    // fire regardless.
+    // wasm substrate runs real; the unsandboxed event fires only for :native.
     const steps: Step[] = [];
     const ctx = ctxWithExec({ allowed: true, runtime: 'wasm', timeout: 5 }, steps);
     await execute({ language: 'node', code: 'console.log("hi")' }, ctx);
