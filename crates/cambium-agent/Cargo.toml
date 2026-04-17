@@ -1,0 +1,36 @@
+[package]
+name = "cambium-agent"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "Guest agent for Cambium's :firecracker exec substrate. Runs inside the sandbox VM; listens on vsock, dispatches guest code, returns a structured response."
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "cambium-agent"
+path = "src/main.rs"
+
+[lib]
+name = "cambium_agent"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+# Kept minimal by design — the protocol + framing modules test themselves
+# with stdlib Cursor/Vec. Any dev-dep bloat on the critical guest binary
+# would pad the rootfs unnecessarily.
+
+[profile.release]
+# Tight release profile for the guest binary — strip symbols, LTO, and
+# opt-level "z" (smallest). ~3-5 MB static binary is the target; a chunky
+# agent inflates the rootfs for no gain (we're CPU-bound on exec, never
+# on agent startup).
+lto = true
+codegen-units = 1
+opt-level = "z"
+strip = "symbols"
+panic = "abort"
