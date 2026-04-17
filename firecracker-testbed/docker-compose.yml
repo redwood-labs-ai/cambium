@@ -56,8 +56,8 @@ services:
     #   cd firecracker-testbed/kernel && ./fetch.sh
     #   cd firecracker-testbed/rootfs && ./build.sh
     volumes:
-      - ./kernel:/artifacts/kernel:ro
-      - ./rootfs/out:/artifacts/rootfs:ro
+      - /home/mini/cambium/firecracker-testbed/kernel:/artifacts/kernel:ro
+      - /home/mini/cambium/firecracker-testbed/rootfs/out:/artifacts/rootfs:ro
 
     # Rerun the smoke on every container start. Exits non-zero on
     # failure so Komodo surfaces it.
