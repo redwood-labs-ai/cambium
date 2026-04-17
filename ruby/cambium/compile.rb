@@ -11,9 +11,11 @@ def usage(msg = nil)
   warn <<~TXT
 
     Usage:
-      ruby ruby/cambium/compile.rb <file.cmb.rb> --method <method> --arg <path>|-
+      ruby ruby/cambium/compile.rb <file.cmb.rb> --method <method> [--arg <path>|-]
 
-    Emits IR JSON to stdout.
+    Emits IR JSON to stdout. --arg is optional; when omitted, an empty
+    string is supplied to the gen method (the runtime caller is expected
+    to override ir.context.* fields before execution).
   TXT
   exit 2
 end
@@ -35,7 +37,9 @@ while (a = ARGV.shift)
   end
 end
 usage('Missing --method') unless method
-usage('Missing --arg') unless arg_path
+# --arg is optional (RED-244): the engine-mode `cambium compile` flow
+# produces an IR that the runtime caller will inject input into via the
+# typed wrapper. When omitted we pass an empty string to the gen method.
 
 # Allow referencing undeclared constants (like TypeBox schema IDs) by returning a ConstRef.
 orig_module_const_missing = Module.instance_method(:const_missing)
@@ -52,7 +56,9 @@ load file
 klass = Cambium::Registry.model_classes.last
 raise Cambium::CompileError, "No GenModel subclass found after loading #{file}" unless klass
 
-arg = if arg_path == '-'
+arg = if arg_path.nil?
+        ''
+      elsif arg_path == '-'
         STDIN.read
       else
         File.read(arg_path)
@@ -112,22 +118,35 @@ if (schema_name = defs[:returnSchema])
 end
 
 # Resolve system prompt: symbol → file lookup, string → inline, nil → omit.
+#
+# Search layers mirror the RED-245 discovery pattern used by policy
+# packs and memory pools. Engine-mode authoring puts the system prompt
+# next to the gen file; app-mode keeps the existing app/systems/
+# convention; the workspace fallback covers gens invoked from the repo
+# root. When a cambium.engine.json sentinel sits next to the gen, only
+# the gen-local dir is consulted (no walk-up).
 system_prompt = nil
 if defs[:system]
   raw = defs[:system]
   if raw.is_a?(Symbol) || raw.is_a?(Cambium::ConstRef)
     name = raw.to_s.downcase
-    # Look for app/systems/<name>.system.md relative to the source file's package
-    pkg_dir = File.dirname(File.dirname(File.expand_path(file)))  # up from app/gens/
-    system_file = File.join(pkg_dir, 'app', 'systems', "#{name}.system.md")
-    unless File.exist?(system_file)
-      # Also try relative to cwd
-      system_file = File.join('packages', 'cambium', 'app', 'systems', "#{name}.system.md")
-    end
-    if File.exist?(system_file)
+    gen_dir = File.dirname(File.expand_path(file))
+    candidates =
+      if File.exist?(File.join(gen_dir, 'cambium.engine.json'))
+        [File.join(gen_dir, "#{name}.system.md")]
+      else
+        [
+          File.join(gen_dir, "#{name}.system.md"),
+          File.join(File.dirname(gen_dir), 'systems', "#{name}.system.md"),
+          File.join('packages', 'cambium', 'app', 'systems', "#{name}.system.md"),
+        ].uniq
+      end
+    system_file = candidates.find { |p| File.exist?(p) }
+    if system_file
       system_prompt = File.read(system_file).strip
     else
-      raise Cambium::CompileError, "System prompt '#{name}' not found. Looked for: #{system_file}"
+      raise Cambium::CompileError,
+            "System prompt '#{name}' not found. Looked for:\n  " + candidates.join("\n  ")
     end
   else
     system_prompt = raw.to_s

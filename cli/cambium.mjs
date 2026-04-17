@@ -15,6 +15,7 @@ Usage:
   cambium init [name]
   cambium new <type> <Name>
   cambium run <file.cmb.rb> --method <method> --arg <path>|- [--trace <path>] [--out <path>] [--mock] [--memory-key <name>=<value> ...]
+  cambium compile <file.cmb.rb> --method <method> [--arg <path>|-] [-o <output>]
   cambium doctor
   cambium test
   cambium lint
@@ -23,6 +24,7 @@ Commands:
   init      Initialize a new Cambium workspace
   new       Scaffold a new engine, agent, tool, schema, system, or corrector
   run       Compile and execute a GenModel
+  compile   Compile a GenModel to IR JSON (no execution; engine-mode build step)
   doctor    Check environment setup and dependencies
   test      Run the test suite
   lint      Validate package structure and declarations
@@ -35,9 +37,15 @@ Run flags:
                             :session scope auto-generates a session id and echoes it to stderr
                             unless CAMBIUM_SESSION_ID is set.
 
+Compile flags:
+  -o <path>                 Write IR JSON to <path> (default: <basename>.ir.json next to the input)
+  --arg <path>|-            Optional fixture path. When omitted, an empty string is supplied
+                            to the gen method — the runtime caller injects real input later.
+
 Examples:
   cambium run packages/cambium/app/gens/analyst.cmb.rb --method analyze --arg document.txt
   cambium run gen.cmb.rb --method summarize --arg data.json --trace trace.json --out result.json
+  cambium compile cambium/summarizer/summarizer.cmb.rb --method analyze
   cambium new engine Summarizer
   cambium new agent BtcAnalyst
   cambium new tool price_fetcher
@@ -97,6 +105,13 @@ if (cmd === 'test') {
     encoding: 'utf8',
   });
   process.exit(result.status ?? 1);
+}
+
+// ── cambium compile ──────────────────────────────────────────────────
+if (cmd === 'compile') {
+  const { runCompile } = await import('./compile.mjs');
+  await runCompile(args);
+  process.exit(0);
 }
 
 // ── cambium run ───────────────────────────────────────────────────────
