@@ -428,7 +428,17 @@ export interface RunGenOptions {
    *  callers pass `await import('packages/cambium/src/contracts.ts')`;
    *  engine-mode callers pass their sibling `schemas.ts` module. */
   schemas: Record<string, any>;
-  /** Force the deterministic mock generator instead of a live LLM. */
+  /** Force the deterministic mock generator instead of a live LLM.
+   *
+   *  ⚠️  Concurrency caveat: `mock` is bridged to the process-global
+   *  `CAMBIUM_ALLOW_MOCK` env var inside `runGen` and restored in a
+   *  `finally`. Two overlapping `runGen` calls — one with `mock: true`,
+   *  one without — can observe each other's env-var state between the
+   *  set and the restore, causing the live call to silently take the
+   *  mock path. Safe for sequential callers; engine-mode hosts that
+   *  need true concurrency with mixed mock settings should serialize
+   *  their `runGen` calls until `mock` is threaded through to
+   *  `generateText` as an explicit parameter. */
   mock?: boolean;
   /** Values for `keyed_by` slots on memory pools. Each entry is `name=value`. */
   memoryKeys?: string[];

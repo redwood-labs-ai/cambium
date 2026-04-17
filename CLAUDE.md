@@ -53,7 +53,9 @@ Look at the trace (`runs/<run_id>/trace.json`) and help them tune the agent — 
 
 ```bash
 cambium run <file.cmb.rb> --method <method> --arg <path>   # compile + execute
-cambium new agent|tool|schema|system|corrector <Name>       # scaffold (deterministic)
+cambium compile <file.cmb.rb> --method <method> [-o <ir.json>] # emit IR JSON without executing (engine-mode build step, RED-244)
+cambium new engine|agent|tool|schema|system|corrector <Name>   # scaffold (deterministic)
+cambium new engine <Name>                                    # new engine folder under ./cambium/ (RED-246)
 cambium new tool --describe "<description>"                 # agentic tool scaffolder (RED-216)
 cambium test                                                 # run test suite
 ```
