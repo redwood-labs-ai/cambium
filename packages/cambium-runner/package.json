@@ -10,5 +10,8 @@
   "private": true,
   "files": [
     "src"
-  ]
+  ],
+  "optionalDependencies": {
+    "quickjs-emscripten": "^0.32.0"
+  }
 }

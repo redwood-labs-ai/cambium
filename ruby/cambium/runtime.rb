@@ -57,12 +57,137 @@ module Cambium
         slots['filesystem'] = { 'roots' => Array(fs[:roots] || fs['roots']) }
       end
       if (ex = opts[:exec] || opts['exec'])
-        raise ArgumentError, "security exec: must be a Hash" unless ex.is_a?(Hash)
-        slots['exec'] = { 'allowed' => ex.fetch(:allowed) { ex.fetch('allowed', false) } }
+        slots['exec'] = normalize_exec(ex)
       end
       unknown = opts.keys.map(&:to_s) - %w[network filesystem exec]
       raise ArgumentError, "unknown security keys: #{unknown.join(', ')}" unless unknown.empty?
       slots
+    end
+
+    # RED-248: Normalize the `security exec:` slot. Accepts two shapes:
+    #
+    #   Legacy (back-compat):
+    #     security exec: { allowed: true }
+    #   Resolves to { 'allowed' => true, 'runtime' => 'native' }.
+    #   The :native substrate is the deprecated fig-leaf path; gens
+    #   using this shape run unsandboxed with a stderr warning emitted
+    #   at runtime.
+    #
+    #   New (RED-213):
+    #     security exec: {
+    #       runtime: :wasm | :firecracker | :native,
+    #       cpu: 0.5,            # cores, 0.1–4.0
+    #       memory: 256,         # MB, 16–4096
+    #       timeout: 30,         # seconds, 1–600
+    #       network: :none | :inherit | { allowlist: [...] },
+    #       filesystem: :none | :inherit | { allowlist_paths: [...] },
+    #       max_output_bytes: 50_000,
+    #     }
+    #
+    # Required in the new shape: `runtime`. Everything else has defaults
+    # applied by the TS-side policy parser; compile-time validation
+    # covers the ranges and enumerations authors commonly get wrong.
+    KNOWN_EXEC_KEYS     = %w[allowed runtime cpu memory timeout network filesystem max_output_bytes].freeze
+    KNOWN_EXEC_RUNTIMES = %w[wasm firecracker native].freeze
+
+    def normalize_exec(ex)
+      raise ArgumentError, "security exec: must be a Hash" unless ex.is_a?(Hash)
+      ex_str = ex.transform_keys(&:to_s)
+      unknown = ex_str.keys - KNOWN_EXEC_KEYS
+      unless unknown.empty?
+        raise ArgumentError,
+              "unknown security exec keys: #{unknown.join(', ')} (allowed: #{KNOWN_EXEC_KEYS.join(', ')})"
+      end
+
+      out = { 'allowed' => ex_str.fetch('allowed', false) == true }
+
+      if ex_str.key?('runtime')
+        rt = ex_str['runtime'].to_s
+        unless KNOWN_EXEC_RUNTIMES.include?(rt)
+          raise ArgumentError,
+                "security exec runtime: must be one of :#{KNOWN_EXEC_RUNTIMES.join(', :')}; got :#{rt}"
+        end
+        out['runtime'] = rt
+      elsif out['allowed']
+        # Back-compat: `{ allowed: true }` with no runtime → :native.
+        # Emits a deprecation warning at runtime (RED-249).
+        out['runtime'] = 'native'
+      end
+
+      # RED-249 strict-mode flag. When CAMBIUM_STRICT_EXEC=1, resolving
+      # to :native is a hard compile error (rather than a runtime
+      # warning). Off by default; opt-in for shops that want to block
+      # the fig-leaf path across the board.
+      if out['runtime'] == 'native' && ENV['CAMBIUM_STRICT_EXEC'] == '1'
+        raise CompileError,
+              "security exec runtime: :native is blocked by CAMBIUM_STRICT_EXEC=1. " \
+              "Set runtime: :wasm or :firecracker explicitly."
+      end
+
+      if ex_str.key?('cpu')
+        cpu = ex_str['cpu']
+        unless cpu.is_a?(Numeric) && cpu >= 0.1 && cpu <= 4.0
+          raise ArgumentError,
+                "security exec cpu: must be a number in 0.1..4.0 (cores); got #{cpu.inspect}"
+        end
+        out['cpu'] = cpu.to_f
+      end
+
+      if ex_str.key?('memory')
+        mem = ex_str['memory']
+        unless mem.is_a?(Integer) && mem >= 16 && mem <= 4096
+          raise ArgumentError,
+                "security exec memory: must be an integer in 16..4096 (MB); got #{mem.inspect}"
+        end
+        out['memory'] = mem
+      end
+
+      if ex_str.key?('timeout')
+        to = ex_str['timeout']
+        # Require Integer (same as memory:) so `timeout: 30.9` doesn't
+        # silently truncate to 30. Fractional seconds aren't a pattern
+        # we expect; if they become one we can add them explicitly.
+        unless to.is_a?(Integer) && to >= 1 && to <= 600
+          raise ArgumentError,
+                "security exec timeout: must be an integer in 1..600 (seconds); got #{to.inspect}"
+        end
+        out['timeout'] = to
+      end
+
+      if ex_str.key?('network')
+        out['network'] = normalize_exec_scoped('network', ex_str['network'])
+      end
+
+      if ex_str.key?('filesystem')
+        out['filesystem'] = normalize_exec_scoped('filesystem', ex_str['filesystem'])
+      end
+
+      if ex_str.key?('max_output_bytes')
+        mob = ex_str['max_output_bytes']
+        unless mob.is_a?(Integer) && mob.positive?
+          raise ArgumentError,
+                "security exec max_output_bytes: must be a positive integer; got #{mob.inspect}"
+        end
+        out['max_output_bytes'] = mob
+      end
+
+      out
+    end
+
+    # RED-248: normalize the per-call scoped `network:` / `filesystem:`
+    # on `security exec:`. Accepts a sentinel symbol (`:inherit`, `:none`)
+    # which stays as a string, or a Hash whose keys are stringified.
+    # Inheritance resolution happens on the TS side at parse time;
+    # this just normalizes the shape.
+    def normalize_exec_scoped(field, value)
+      case value
+      when :inherit, 'inherit' then 'inherit'
+      when :none,    'none'    then 'none'
+      when Hash                then value.transform_keys(&:to_s)
+      else
+        raise ArgumentError,
+              "security exec #{field}: must be :inherit, :none, or a Hash; got #{value.inspect}"
+      end
     end
 
     # Return a hash of {slot_name => value} for the budget slots

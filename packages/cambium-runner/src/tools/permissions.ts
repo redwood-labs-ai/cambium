@@ -41,8 +41,37 @@ export type FilesystemPolicy = {
   roots: string[];
 };
 
+/** Per-call exec scope for network egress. `'inherit'` at the DSL level
+ *  is resolved at parse time into a NetworkPolicy copy of the gen's
+ *  outer `security.network` (see `buildSecurityPolicy`). After parsing
+ *  the value is either `'none'` or a concrete `NetworkPolicy`. */
+export type ExecScopedNetwork = 'none' | NetworkPolicy;
+
+/** Per-call exec scope for filesystem access. Same `:inherit` resolution
+ *  as `ExecScopedNetwork`. After parsing the value is either `'none'` or
+ *  a concrete `{ allowlist_paths: string[] }`. */
+export type ExecScopedFilesystem = 'none' | { allowlist_paths: string[] };
+
+/** RED-248 resolved exec policy.
+ *
+ *  The legacy `{ allowed: true }` DSL shape resolves on the Ruby side to
+ *  `{ allowed: true, runtime: 'native' }` at parse time — the `:native`
+ *  substrate is the deprecated fig-leaf. Runtime-side migration warnings
+ *  for that path land in RED-249.
+ *
+ *  New-shape gens provide `runtime:` explicitly (required) and any of
+ *  `cpu` / `memory` / `timeout` / `network` / `filesystem` /
+ *  `max_output_bytes` the author cares to pin. Defaults applied here
+ *  where the DSL didn't provide one. */
 export type ExecPolicy = {
   allowed: boolean;
+  runtime?: 'wasm' | 'firecracker' | 'native';
+  cpu?: number;
+  memory?: number;
+  timeout?: number;
+  network?: ExecScopedNetwork;
+  filesystem?: ExecScopedFilesystem;
+  maxOutputBytes?: number;
 };
 
 export type SecurityPolicy = {
@@ -80,10 +109,93 @@ export function buildSecurityPolicy(irPolicies: any): SecurityPolicy {
   }
 
   if (sec.exec) {
-    out.exec = { allowed: sec.exec.allowed === true };
+    out.exec = buildExecPolicy(sec.exec, out.network);
   }
 
   return out;
+}
+
+/** RED-248: resolve the IR's exec shape into an `ExecPolicy`.
+ *  Handles `:inherit` by copying the outer `NetworkPolicy` (resolved
+ *  from `security.network` above). Inheritance is wholesale — narrower-
+ *  than-outer is permitted if authors explicitly pass a Hash; widening
+ *  beyond the outer network is something the design note flagged as
+ *  intersection-semantics but v1 doesn't enforce at parse time. */
+/** Valid runtime names. Duplicated from `exec-substrate/registry.ts`'s
+ *  `KNOWN_SUBSTRATES` on purpose — that module owns runtime dispatch,
+ *  this one owns policy shape, and we don't want a cycle. A test locks
+ *  the two lists in sync. */
+const KNOWN_RUNTIMES: readonly ExecPolicy['runtime'][] = ['wasm', 'firecracker', 'native'] as const;
+
+function buildExecPolicy(
+  exec: any,
+  outerNetwork: NetworkPolicy | undefined,
+): ExecPolicy {
+  const out: ExecPolicy = { allowed: exec.allowed === true };
+
+  if (typeof exec.runtime === 'string') {
+    // Ruby side validates this; re-validate here so a tampered or
+    // hand-crafted IR (bypassing the compile step) can't smuggle an
+    // arbitrary string into `getSubstrate(name)` at dispatch time.
+    if (!(KNOWN_RUNTIMES as readonly string[]).includes(exec.runtime)) {
+      throw new Error(
+        `Invalid security.exec.runtime: "${exec.runtime}". ` +
+        `Must be one of: ${KNOWN_RUNTIMES.join(', ')}.`,
+      );
+    }
+    out.runtime = exec.runtime as ExecPolicy['runtime'];
+  }
+  if (typeof exec.cpu === 'number') out.cpu = exec.cpu;
+  if (typeof exec.memory === 'number') out.memory = exec.memory;
+  if (typeof exec.timeout === 'number') out.timeout = exec.timeout;
+  if (typeof exec.max_output_bytes === 'number') out.maxOutputBytes = exec.max_output_bytes;
+
+  if (exec.network !== undefined) {
+    out.network = resolveScopedNetwork(exec.network, outerNetwork);
+  }
+  if (exec.filesystem !== undefined) {
+    out.filesystem = resolveScopedFilesystem(exec.filesystem);
+  }
+
+  return out;
+}
+
+function resolveScopedNetwork(
+  value: any,
+  outer: NetworkPolicy | undefined,
+): ExecScopedNetwork {
+  if (value === 'none') return 'none';
+  if (value === 'inherit') {
+    // No outer network policy means `:inherit` resolves to `none` —
+    // the gen declared no network capability, so the exec sandbox
+    // inherits none. Safer default than "allow whatever."
+    return outer
+      ? { ...outer, allowlist: [...outer.allowlist], denylist: [...outer.denylist] }
+      : 'none';
+  }
+  // Hash form — normalize like the outer network (same parse shape).
+  return {
+    allowlist:      Array.isArray(value.allowlist) ? value.allowlist : [],
+    denylist:       Array.isArray(value.denylist)  ? value.denylist  : [],
+    block_private:  value.block_private  ?? true,
+    block_metadata: value.block_metadata ?? true,
+  };
+}
+
+function resolveScopedFilesystem(value: any): ExecScopedFilesystem {
+  if (value === 'none') return 'none';
+  if (value === 'inherit') {
+    // Filesystem inheritance is not yet wired. `:inherit` currently
+    // resolves to `none`; the outer `security filesystem:` primitive
+    // uses `{ roots: [...] }` which is a different shape than exec's
+    // `{ allowlist_paths: [...] }`. Bridging the two needs a design
+    // decision about whether they should unify — flagged for future
+    // work; safe default is deny.
+    return 'none';
+  }
+  return {
+    allowlist_paths: Array.isArray(value.allowlist_paths) ? value.allowlist_paths : [],
+  };
 }
 
 /**

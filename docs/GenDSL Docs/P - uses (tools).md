@@ -34,6 +34,10 @@ Plugin tools live at `packages/<pkg>/app/tools/<name>.tool.json` (schema + permi
 - **Tool needs a capability the gen's `security` block doesn't grant** — `SecurityCheck` fails at startup with a pointer to the offending tool + permission.
 - **Per-tool or per-run `budget` cap exceeded mid-loop** — the current call is refused with a `tool.budget.exceeded` trace event; the agentic loop terminates with a "force final output" turn rather than letting the model retry indefinitely.
 
+## Tool-specific trace events
+
+Most tools emit only a `ToolCall` step per dispatch. `execute_code` is the exception — because it runs LLM-supplied code inside a sandbox substrate, it emits a set of structured `Exec*` step types so the trace captures the sandbox lifecycle (RED-249). Every dispatch pushes an `ExecSpawned` step before the substrate runs, and exactly one of `ExecCompleted` / `ExecTimeout` / `ExecOOM` / `ExecEgressDenied` / `ExecCrashed` after. Gens using `runtime: :native` (the deprecated fig-leaf) additionally get a `tool.exec.unsandboxed` diagnostic step and a one-per-process stderr warning. The full meta shapes live in [[C - Trace (observability)]]'s step-types table.
+
 ## See also
 
 - [[D - Tools Registry]]

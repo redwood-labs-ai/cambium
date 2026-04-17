@@ -19,6 +19,7 @@
   },
   "optionalDependencies": {
     "better-sqlite3": "^12.9.0",
+    "quickjs-emscripten": "^0.32.0",
     "sqlite-vec": "^0.1.6"
   },
   "devDependencies": {

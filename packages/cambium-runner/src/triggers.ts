@@ -208,9 +208,13 @@ async function dispatchAction(
   // handlers.ts. Getting this wrong would silently hand guardedFetch
   // a shape-mismatched object (no allowlist/denylist fields present)
   // and bypass SSRF entirely — caught by cambium-security review.
+  // execPolicy threads through for action handlers that might dispatch
+  // exec (unlikely but possible; mirrors step-handlers.ts).
   const ctx = buildToolContext({
     toolName: actionName,
     policy: env.policy?.network,
+    execPolicy: env.policy?.exec,
+    emitStep: env.traceEvents ? (step) => env.traceEvents!.push(step) : undefined,
   });
 
   const start = Date.now();

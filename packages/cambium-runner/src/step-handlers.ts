@@ -405,10 +405,16 @@ export async function handleToolCall(
     );
   }
 
-  // Build the ToolContext (policy-bound fetch for network tools).
+  // Build the ToolContext (policy-bound fetch for network tools +
+  // exec policy for execute_code-class tools that dispatch through
+  // the substrate registry, RED-248 + emitStep for tools that push
+  // structured steps onto the runner's trace.steps — currently
+  // execute_code emitting Exec* step types per RED-249).
   const ctx = buildToolContext({
     toolName,
     policy: env.policy?.network,
+    execPolicy: env.policy?.exec,
+    emitStep: env.traceEvents ? (step) => env.traceEvents!.push(step) : undefined,
   });
 
   let result: any;
