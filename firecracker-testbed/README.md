@@ -50,5 +50,5 @@ When the Rust agent + rootfs build pipeline land, this directory gets a second s
 ## Troubleshooting
 
 - **`/dev/kvm` missing inside container** → the `devices:` passthrough in `docker-compose.yml` isn't firing. Check Docker engine version and that Komodo honors the devices array.
-- **`/dev/kvm` present but not writable** → the container's uid isn't in the host's `kvm` group. Either run the container as root, add `group_add: ["kvm"]` with the correct GID for your host, or change the host's `/dev/kvm` perms (not recommended).
+- **`/dev/kvm` present but not writable** → the container is NOT running as root for some reason (the Debian base defaults to root; Komodo or a base-image override might flip it). Either revert to root, or add `group_add: ["<numeric-kvm-gid>"]` with your host's kvm group GID (`getent group kvm | cut -d: -f3`). A named `group_add: ["kvm"]` fails because Debian's base image has no `kvm` group entry.
 - **Firecracker version mismatch** → bump `FIRECRACKER_VERSION` in `Dockerfile` to the current upstream release.

@@ -23,9 +23,12 @@ services:
     container_name: firecracker-testbed
 
     # /dev/kvm passthrough — the only way Firecracker can talk to the
-    # host's KVM subsystem from inside a container. The container
-    # process must also be able to OPEN /dev/kvm: either the process
-    # runs as root, or the host's kvm group is passed through.
+    # host's KVM subsystem from inside a container. The container runs
+    # as root (Debian base default), so it can open /dev/kvm directly
+    # regardless of the host's kvm-group permissions. A production
+    # substrate host would drop to a non-root user and use `group_add`
+    # with the host's kvm GID, but this is a testbed — simplest
+    # working path wins.
     devices:
       - /dev/kvm:/dev/kvm
 
@@ -35,12 +38,6 @@ services:
     # or privileged=true are heavier and unneeded for v0.
     cap_add:
       - NET_ADMIN
-
-    # Attach to the host's kvm group so /dev/kvm is writable without
-    # running as root. If your host's kvm group GID differs, override
-    # here or in a compose .env.
-    group_add:
-      - kvm
 
     # Rerun the smoke on every container start. Exits non-zero on
     # failure so Komodo surfaces it.
