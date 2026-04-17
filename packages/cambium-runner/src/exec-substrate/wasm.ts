@@ -27,7 +27,18 @@
  * and stdout/stderr → dispose all handles. Synchronous evaluation via
  * the release-sync variant of QuickJS.
  */
+import { createRequire } from 'node:module';
 import type { ExecSubstrate, ExecOpts, ExecResult } from './types.js';
+
+// `require.resolve` is the cheap synchronous "is this package installed"
+// probe we want for `available()`, but this file is an ESM module
+// (package.json "type": "module"), so a bare `require` is undefined
+// at module scope under Node 22+ strict ESM. Use `createRequire`
+// bound to the current module URL to get an ESM-safe `require` whose
+// `.resolve()` works as expected. Flagged by a cambium-security
+// review that caught the `require.resolve()` anti-pattern before it
+// could silently mis-report the WASM substrate unavailable in prod.
+const esmRequire = createRequire(import.meta.url);
 
 // Cached import. Lazy-loaded on first `execute()` call; `available()`
 // probes without actually loading the WASM module (fast + cheap).
@@ -52,11 +63,11 @@ export class WasmSubstrate implements ExecSubstrate {
   available(): string | null {
     if (_quickjsAvailable === 'yes') return null;
     if (_quickjsAvailable === 'no') return _unavailableReason;
-    // Probe without loading the WASM module — require.resolve-style
-    // presence check. We use dynamic import with a catch below.
+    // Probe without loading the WASM module. `esmRequire.resolve`
+    // works in ESM via createRequire(import.meta.url); a bare
+    // `require.resolve` would throw ReferenceError at module scope.
     try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      require.resolve('quickjs-emscripten');
+      esmRequire.resolve('quickjs-emscripten');
       _quickjsAvailable = 'yes';
       return null;
     } catch {
@@ -106,12 +117,25 @@ export class WasmSubstrate implements ExecSubstrate {
     const stdoutBuf: string[] = [];
     const stderrBuf: string[] = [];
 
+    // Canonical signal for "this run hit the wall-clock timeout" —
+    // set inside the interrupt handler so we don't have to re-check
+    // Date.now() after evalCode returns (which would race with GC +
+    // dispose time per cambium-security review). If this flag is set
+    // AND the error is "interrupted", we classify as timeout; no
+    // clock-reread needed.
+    let timedOut = false;
     try {
       runtime.setMemoryLimit(opts.memory * 1024 * 1024);
       // Periodic interrupt — returns true to abort evalCode when the
       // wall-clock deadline has passed. QuickJS calls this every few
       // hundred bytecode ops, so it's a quick poll; overhead is tiny.
-      runtime.setInterruptHandler(() => Date.now() > deadline);
+      runtime.setInterruptHandler(() => {
+        if (Date.now() > deadline) {
+          timedOut = true;
+          return true;
+        }
+        return false;
+      });
 
       context = runtime.newContext();
 
@@ -140,8 +164,10 @@ export class WasmSubstrate implements ExecSubstrate {
         evalResult.error.dispose();
         const errString = formatError(err);
 
-        // Timeout surfaces as an "interrupted" InternalError.
-        if (/interrupted/i.test(errString) && Date.now() >= deadline) {
+        // Timeout surfaces as an "interrupted" InternalError. Use the
+        // closure-scoped `timedOut` flag rather than re-reading the
+        // clock — see the flag's declaration for why.
+        if (timedOut && /interrupted/i.test(errString)) {
           return wasmResult('timeout', stdoutBuf, stderrBuf, opts, durationMs,
             `wall-clock timeout (${opts.timeout}s)`);
         }

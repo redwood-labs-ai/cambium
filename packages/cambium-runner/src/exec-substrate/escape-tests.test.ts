@@ -201,17 +201,23 @@ async function runCategory(sub: ExecSubstrate, c: Category): Promise<ExecResult>
 }
 
 function assertNoLeak(category: Category, result: ExecResult) {
-  // Two orthogonal guarantees:
+  // Three orthogonal guarantees:
   // 1. No forbidden marker appeared in stdout.
+  // 2. No forbidden marker appeared in stderr. Guest code could
+  //    `throw host_secret` instead of `console.log`-ing it; without
+  //    this check the exfiltration would pass silently via the
+  //    substrate's error-message capture path. Flagged by a
+  //    cambium-security review.
+  // 3. The call did NOT complete successfully while producing a
+  //    leaked value. `status: 'completed'` with `exit_code: 0` AND
+  //    forbidden-marker-free stdout+stderr is allowed (guest handled
+  //    the failure gracefully with `console.log('BLOCKED:')`). What
+  //    the sandbox must NEVER do is return `completed, exit 0` with
+  //    a leak — the loops below cover that.
   for (const forbidden of category.forbidden) {
     expect(result.stdout).not.toContain(forbidden);
+    expect(result.stderr).not.toContain(forbidden);
   }
-  // 2. The call did NOT complete successfully while producing a
-  //    leaked value. `status: 'completed'` with `exit_code: 0` AND
-  //    forbidden-marker-free stdout is allowed (guest handled the
-  //    failure gracefully with `console.log('BLOCKED:')`). What
-  //    the sandbox must NEVER do is return `completed, exit 0`
-  //    with a leak — the loop above covers that.
 }
 
 // ── WASM substrate — always runs ──────────────────────────────────────

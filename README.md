@@ -127,6 +127,7 @@ output.json + trace.json
 │       ├── step-handlers.ts   # Generate, validate, repair, correct, tool dispatch
 │       ├── builtin-tools/     # Framework tools — paired .tool.json + .tool.ts
 │       ├── builtin-actions/   # Framework trigger actions (notify_stderr, ...)
+│       ├── exec-substrate/    # ExecSubstrate adapter + :wasm/:firecracker/:native (RED-213)
 │       ├── tools/             # Tool infra (registry, ToolContext, network-guard)
 │       ├── actions/           # Action registry (parallel to tools/)
 │       ├── memory/            # Memory subsystem (backend, path, keys, retro-agent)
