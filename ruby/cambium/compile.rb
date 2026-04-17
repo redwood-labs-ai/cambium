@@ -11,9 +11,11 @@ def usage(msg = nil)
   warn <<~TXT
 
     Usage:
-      ruby ruby/cambium/compile.rb <file.cmb.rb> --method <method> --arg <path>|-
+      ruby ruby/cambium/compile.rb <file.cmb.rb> --method <method> [--arg <path>|-]
 
-    Emits IR JSON to stdout.
+    Emits IR JSON to stdout. --arg is optional; when omitted, an empty
+    string is supplied to the gen method (the runtime caller is expected
+    to override ir.context.* fields before execution).
   TXT
   exit 2
 end
@@ -35,7 +37,9 @@ while (a = ARGV.shift)
   end
 end
 usage('Missing --method') unless method
-usage('Missing --arg') unless arg_path
+# --arg is optional (RED-244): the engine-mode `cambium compile` flow
+# produces an IR that the runtime caller will inject input into via the
+# typed wrapper. When omitted we pass an empty string to the gen method.
 
 # Allow referencing undeclared constants (like TypeBox schema IDs) by returning a ConstRef.
 orig_module_const_missing = Module.instance_method(:const_missing)
@@ -52,7 +56,9 @@ load file
 klass = Cambium::Registry.model_classes.last
 raise Cambium::CompileError, "No GenModel subclass found after loading #{file}" unless klass
 
-arg = if arg_path == '-'
+arg = if arg_path.nil?
+        ''
+      elsif arg_path == '-'
         STDIN.read
       else
         File.read(arg_path)
