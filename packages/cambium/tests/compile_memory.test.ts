@@ -623,14 +623,13 @@ end
   })
 
   it('rejects query: / arg_field: resolved via a non-semantic pool (post-resolution check)', () => {
-    // Relies on a pool where strategy != :semantic. Cambium's pool
-    // search walks two File.dirname levels up from the gen file and
-    // looks in `<pkg>/app/memory_pools/`; a gen one subdir deep under
-    // the tmpdir gives us `<tmpdir>/app/memory_pools/` as the search
-    // root so we can ship a `:log` fixture with the test.
+    // Relies on a pool where strategy != :semantic. Post-RED-245 the pool
+    // search uses `<gen_dir's parent>/<subdir>/`, so we mimic the real
+    // workspace layout: gen at `<tmp>/app/gens/g.cmb.rb` makes
+    // `<tmp>/app/memory_pools/` resolve as the package-app dir.
     const dir = mkdtempSync(join(tmpdir(), 'cambium-red238-pool-'))
     const poolsDir = join(dir, 'app', 'memory_pools')
-    const gensDir = join(dir, 'gens')
+    const gensDir = join(dir, 'app', 'gens')
     require('node:fs').mkdirSync(poolsDir, { recursive: true })
     require('node:fs').mkdirSync(gensDir, { recursive: true })
     writeFileSync(

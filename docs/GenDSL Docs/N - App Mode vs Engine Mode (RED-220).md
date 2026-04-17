@@ -273,8 +273,9 @@ The RED-220 ticket lists five follow-up implementation pieces. With the decision
 2. **`cambium compile <file.cmb.rb> -o <ir.json>` subcommand.**
    - Pre-decided: just factor IR emission out of `cambium run`'s side-effect into a first-class subcommand. No design questions.
 
-3. **Relax Ruby-side discovery paths in `runtime.rb`.**
+3. **Relax Ruby-side discovery paths in `runtime.rb`.** *(Shipped in RED-245.)*
    - Pre-decided: see the sketch under "Search-path discovery" above. Add gen-local dir as first entry in both `_cambium_*_search_dirs` methods.
+   - Resolved: factored both `_cambium_*_search_dirs` methods through a shared `_cambium_discovery_dirs(subdir)` helper. Three layers in priority order — gen-local, package-app sibling (`<gen_dir's parent>/<subdir>/`), workspace fallback (`packages/cambium/app/<subdir>/`). When `cambium.engine.json` (the RED-246 sentinel) sits next to the gen, only gen-local is returned — the walk-up dirs and the workspace fallback are both suppressed so an engine cannot accidentally pick up an unrelated `<host>/policies/` or in-cwd workspace pack. Also corrected a pre-existing off-by-one in the package-app pkg_dir computation that had been silently masked by the workspace fallback. 7 new tests in `packages/cambium/tests/compile_search_paths.test.ts` cover all three layers + sentinel suppression for both policies and pools.
 
 4. **Schema co-location wiring.** *(Shipped in RED-243.)*
    - Pre-decided: caller-injected schemas (above). Implementation is one edit: `runner.ts:430` becomes a parameter read instead of a file import. The app-mode CLI gets a one-line shim that imports `contracts.ts` and passes it in, preserving today's behaviour.

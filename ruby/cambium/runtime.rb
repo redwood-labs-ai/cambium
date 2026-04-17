@@ -941,29 +941,56 @@ module Cambium
         end
       end
 
-      # Where to look for app/policies/<name>.policy.rb files. Same
-      # search strategy used for app/systems/<name>.system.md elsewhere.
-      def _cambium_policy_search_dirs
+      # Sentinel filename (RED-220 / RED-246). When present in the gen's
+      # directory it marks the gen as living inside an engine folder —
+      # discovery must stop there and not walk back up into a host project.
+      ENGINE_SENTINEL = 'cambium.engine.json'.freeze
+
+      # RED-245: shared discovery walk used by every search-dir method.
+      # Three layers, in priority order:
+      #
+      #   1. Gen-local — `<gen_dir>/<name>.<ext>`. Always tried first so
+      #      engine-mode authoring (files co-located with the gen) works
+      #      without a workspace `app/<subdir>/`.
+      #   2. Package-app — `<gen_dir>/../<subdir>/<name>.<ext>`. The
+      #      established app-mode convention: gens at `<pkg>/app/gens/`
+      #      look in `<pkg>/app/<subdir>/`.
+      #   3. Workspace fallback — `packages/cambium/app/<subdir>/`,
+      #      cwd-relative. Resolves the in-tree default package for any
+      #      gen invoked from the repo root.
+      #
+      # If `cambium.engine.json` sits next to the gen, only layer 1 is
+      # returned. The walk-up is suppressed so a sentinel-marked engine
+      # cannot accidentally pick up an unrelated `<host>/policies/` or
+      # an in-cwd `packages/cambium/app/policies/` that happens to exist.
+      def _cambium_discovery_dirs(subdir)
         dirs = []
         if (src = Cambium::CompilerState.current_source_file)
-          pkg_dir = File.dirname(File.dirname(File.expand_path(src)))  # up from app/gens/
-          dirs << File.join(pkg_dir, 'app', 'policies')
+          gen_dir = File.dirname(File.expand_path(src))
+          if File.exist?(File.join(gen_dir, ENGINE_SENTINEL))
+            return [gen_dir]
+          end
+          dirs << gen_dir
+          # The original code did File.dirname twice from the gen file
+          # (landing at <pkg>/app, then re-joining 'app' on top — net
+          # <pkg>/app/app/<subdir>, which silently missed and was rescued
+          # by layer 3). One File.dirname from gen_dir lands at the gen's
+          # parent; we then join `<subdir>` directly. For an app-mode gen
+          # at <pkg>/app/gens/<file>.cmb.rb, this resolves to <pkg>/app/<subdir>.
+          dirs << File.join(File.dirname(gen_dir), subdir)
         end
-        dirs << File.join('packages', 'cambium', 'app', 'policies')
+        dirs << File.join('packages', 'cambium', 'app', subdir)
         dirs.uniq
       end
 
+      # Where to look for app/policies/<name>.policy.rb files.
+      def _cambium_policy_search_dirs
+        _cambium_discovery_dirs('policies')
+      end
+
       # RED-215: where to look for app/memory_pools/<name>.pool.rb.
-      # Mirrors the policy-pack search (same two-dir strategy — the
-      # gen's package first, then the workspace default).
       def _cambium_memory_pool_search_dirs
-        dirs = []
-        if (src = Cambium::CompilerState.current_source_file)
-          pkg_dir = File.dirname(File.dirname(File.expand_path(src)))  # up from app/gens/
-          dirs << File.join(pkg_dir, 'app', 'memory_pools')
-        end
-        dirs << File.join('packages', 'cambium', 'app', 'memory_pools')
-        dirs.uniq
+        _cambium_discovery_dirs('memory_pools')
       end
 
       # RED-215: declare a memory slot the gen wants read-injected
