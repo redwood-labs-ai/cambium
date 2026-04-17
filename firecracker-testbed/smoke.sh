@@ -125,6 +125,17 @@ fi
 printf '  kernel:       %s (%s)\n' "${KERNEL}" "$(du -h "${KERNEL}" | cut -f1)"
 printf '  rootfs:       %s (%s)\n' "${ROOTFS}" "$(du -h "${ROOTFS}" | cut -f1)"
 
+# Stage the rootfs into /tmp so the guest can write to its own
+# filesystem. The /artifacts mount is read-only (so smoke runs
+# never dirty the source artifact on the host), but Firecracker
+# opens drive files O_RDWR when is_read_only is false — that
+# call would hit EROFS against a read-only bind mount. Copying
+# to /tmp gives the guest a writable copy scoped to this run.
+# Kernel is never written to; no staging needed for vmlinux.
+STAGED_ROOTFS=/tmp/rootfs.ext4
+cp "${ROOTFS}" "${STAGED_ROOTFS}"
+ROOTFS="${STAGED_ROOTFS}"
+
 API_SOCK=/tmp/fc-boot.sock
 VSOCK_UDS=/tmp/fc-vsock.sock
 FC_LOG=/tmp/fc.log
