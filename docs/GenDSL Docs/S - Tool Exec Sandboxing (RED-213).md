@@ -144,7 +144,7 @@ The existing `budget` primitive caps tokens / tool calls / cost — accumulated 
 When `security exec.filesystem: :inherit`, the gen's `security filesystem: { allowlist_paths: [...] }` becomes the substrate's mount/preopen list. Read-only by default; explicit `{ allowlist_paths: [...], rw: [...] }` for read-write subsets.
 
 Per-substrate translation:
-- **WASM:** WASI preopens — capability handles to specific directories. No traversal possible (the WASI runtime resolves all paths against the preopen). Read-only by default; r/w preopens are a separate capability bit.
+- **WASM:** intended future shape is WASI preopens — capability handles to specific directories, no traversal possible. *In v1 the `:wasm` substrate has no preopens and no filesystem capability at all* — `filesystem: :inherit` resolves to `'none'` at parse time. The `quickjs-emscripten` stack is emscripten-hosted and doesn't expose WASI; adding preopens is a v1.5+ follow-up (tracked alongside Pyodide).
 - **Firecracker:** rootfs image (the language interpreter + standard library) plus bind-mount overlays for the allowlist paths. Slow to rebuild per cold-start; pooling helps.
 
 ### 5. Network inheritance — settled with a v1 caveat
