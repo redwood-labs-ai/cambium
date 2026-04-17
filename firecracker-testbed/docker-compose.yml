@@ -46,6 +46,12 @@ services:
     # smoke.sh detects that and skips the v1 integration checks with
     # a clear message — the v0 floor checks still run.
     #
+    # :ro is deliberate — smoke.sh copies the rootfs into /tmp before
+    # handing it to Firecracker (which needs R/W access to the drive
+    # file), so the source artifact on the host never gets dirtied by
+    # guest-side writes. Keeping the mount read-only makes that
+    # invariant explicit at the container boundary.
+    #
     # Build instructions:
     #   cd firecracker-testbed/kernel && ./fetch.sh
     #   cd firecracker-testbed/rootfs && ./build.sh
