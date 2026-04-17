@@ -36,6 +36,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 
 ## Security model
 - [[S - Tool Sandboxing (RED-137)]] — current spec: nested `security network:`, SSRF guard, IP pinning, per-tool budgets
+- [[S - Tool Exec Sandboxing (RED-213)]] — design note: WASM-default + Firecracker-opt-in, two-substrate adapter, escape-test matrix
 - [[S - Tool Permissions & Sandboxing]] — superseded by RED-137; retained for static-check design context
 - [[S - Secrets & Data Boundaries]]
 
