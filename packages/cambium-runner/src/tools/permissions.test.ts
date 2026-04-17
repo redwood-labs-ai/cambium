@@ -122,6 +122,117 @@ describe('buildSecurityPolicy', () => {
   });
 });
 
+// RED-248: resolved ExecPolicy shape + :inherit semantics
+describe('buildSecurityPolicy — exec (RED-248)', () => {
+  it('legacy { allowed: true, runtime: "native" } carries both fields through', () => {
+    const p = buildSecurityPolicy({
+      security: { exec: { allowed: true, runtime: 'native' } },
+    });
+    expect(p.exec).toMatchObject({ allowed: true, runtime: 'native' });
+  });
+
+  it('new shape: runtime + cpu + memory + timeout + max_output_bytes all populate', () => {
+    const p = buildSecurityPolicy({
+      security: {
+        exec: {
+          runtime: 'wasm',
+          cpu: 0.5,
+          memory: 128,
+          timeout: 10,
+          max_output_bytes: 10_000,
+        },
+      },
+    });
+    expect(p.exec).toMatchObject({
+      runtime: 'wasm',
+      cpu: 0.5,
+      memory: 128,
+      timeout: 10,
+      maxOutputBytes: 10_000,
+    });
+  });
+
+  it('network: "none" resolves to the string "none" (no network capability)', () => {
+    const p = buildSecurityPolicy({
+      security: { exec: { runtime: 'wasm', network: 'none' } },
+    });
+    expect(p.exec?.network).toBe('none');
+  });
+
+  it('network: "inherit" copies the outer NetworkPolicy wholesale', () => {
+    const p = buildSecurityPolicy({
+      security: {
+        network: { allowlist: ['api.example.com'], denylist: [], block_private: true, block_metadata: true },
+        exec: { runtime: 'wasm', network: 'inherit' },
+      },
+    });
+    expect(p.exec?.network).toEqual({
+      allowlist: ['api.example.com'],
+      denylist: [],
+      block_private: true,
+      block_metadata: true,
+    });
+  });
+
+  it('network: "inherit" with no outer network resolves to "none" (safer default)', () => {
+    const p = buildSecurityPolicy({
+      security: { exec: { runtime: 'wasm', network: 'inherit' } },
+    });
+    expect(p.exec?.network).toBe('none');
+  });
+
+  it('network as a Hash resolves to a NetworkPolicy with defaults applied', () => {
+    const p = buildSecurityPolicy({
+      security: {
+        exec: { runtime: 'firecracker', network: { allowlist: ['internal.example.com'] } },
+      },
+    });
+    expect(p.exec?.network).toEqual({
+      allowlist: ['internal.example.com'],
+      denylist: [],
+      block_private: true,
+      block_metadata: true,
+    });
+  });
+
+  it('filesystem: "none" stays as "none"', () => {
+    const p = buildSecurityPolicy({
+      security: { exec: { runtime: 'wasm', filesystem: 'none' } },
+    });
+    expect(p.exec?.filesystem).toBe('none');
+  });
+
+  it('filesystem as a Hash resolves to { allowlist_paths: [...] }', () => {
+    const p = buildSecurityPolicy({
+      security: {
+        exec: { runtime: 'wasm', filesystem: { allowlist_paths: ['/data', '/sandbox/in'] } },
+      },
+    });
+    expect(p.exec?.filesystem).toEqual({
+      allowlist_paths: ['/data', '/sandbox/in'],
+    });
+  });
+
+  // RED-248 security review Finding 2: TS-side re-validates runtime so
+  // a tampered/hand-crafted IR can't smuggle an arbitrary string into
+  // getSubstrate at dispatch time.
+  it('rejects an unknown runtime string (defense-in-depth vs tampered IR)', () => {
+    expect(() =>
+      buildSecurityPolicy({
+        security: { exec: { runtime: 'gvisor' } },
+      }),
+    ).toThrow(/Invalid security\.exec\.runtime: "gvisor"/);
+  });
+
+  it('rejects "__proto__" as a runtime (proto-safety at the policy layer)', () => {
+    expect(() =>
+      buildSecurityPolicy({
+        security: { exec: { runtime: '__proto__' } },
+      }),
+    ).toThrow(/Invalid security\.exec\.runtime/);
+  });
+});
+
 describe('hostMatchesList', () => {
   it('exact match', () => {
     expect(hostMatchesList('api.example.com', ['api.example.com'])).toBe(true);

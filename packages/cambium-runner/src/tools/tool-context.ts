@@ -14,7 +14,7 @@
  * Pure tools (calculator, read_file) ignore ctx entirely.
  */
 
-import type { NetworkPolicy } from './permissions.js';
+import type { NetworkPolicy, ExecPolicy } from './permissions.js';
 import { guardedFetch } from './network-guard.js';
 
 export type ToolContext = {
@@ -28,6 +28,12 @@ export type ToolContext = {
   fetch: (url: string, init?: RequestInit) => Promise<Response>;
   /** Abort signal the caller can use to cooperatively cancel. */
   signal?: AbortSignal;
+  /** RED-248: the resolved `security.exec` policy, if the gen declared
+   *  one. The `execute_code` builtin reads this to pick the substrate
+   *  (`runtime: 'wasm' | 'firecracker' | 'native'`) and pass through
+   *  the CPU/memory/timeout/network/filesystem caps. Other tools
+   *  ignore it. */
+  execPolicy?: ExecPolicy;
 };
 
 /**
@@ -38,9 +44,10 @@ export type ToolContext = {
 export function buildToolContext(args: {
   toolName: string;
   policy?: NetworkPolicy;
+  execPolicy?: ExecPolicy;
   signal?: AbortSignal;
 }): ToolContext {
-  const { toolName, policy, signal } = args;
+  const { toolName, policy, execPolicy, signal } = args;
 
   const boundFetch = async (url: string, init?: RequestInit): Promise<Response> => {
     if (!policy) {
@@ -51,5 +58,5 @@ export function buildToolContext(args: {
     return guardedFetch(url, init, policy);
   };
 
-  return { toolName, fetch: boundFetch, signal };
+  return { toolName, fetch: boundFetch, signal, execPolicy };
 }
