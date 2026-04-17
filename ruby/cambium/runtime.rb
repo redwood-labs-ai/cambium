@@ -114,6 +114,16 @@ module Cambium
         out['runtime'] = 'native'
       end
 
+      # RED-249 strict-mode flag. When CAMBIUM_STRICT_EXEC=1, resolving
+      # to :native is a hard compile error (rather than a runtime
+      # warning). Off by default; opt-in for shops that want to block
+      # the fig-leaf path across the board.
+      if out['runtime'] == 'native' && ENV['CAMBIUM_STRICT_EXEC'] == '1'
+        raise CompileError,
+              "security exec runtime: :native is blocked by CAMBIUM_STRICT_EXEC=1. " \
+              "Set runtime: :wasm or :firecracker explicitly."
+      end
+
       if ex_str.key?('cpu')
         cpu = ex_str['cpu']
         unless cpu.is_a?(Numeric) && cpu >= 0.1 && cpu <= 4.0

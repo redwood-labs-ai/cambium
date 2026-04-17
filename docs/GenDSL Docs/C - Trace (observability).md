@@ -33,6 +33,13 @@ A trace MUST include:
 | `memory.read` | Per memory decl, before `Generate`. See RED-215 section below. | `strategy`, `scope`, `name`, `k`, `hits`, `bytes`, `embed_model?`, `embed_dim?`, `query_source?`, `query_preview?` |
 | `memory.write` | Per writable memory decl, after `finalOk`. | `name`, `entry_id`, `bytes`, `written_by`, `strategy?`, `embed_model?` |
 | `memory.prune` | On TTL/cap eviction (governance follow-up; wired but not yet fired). | `reason` (`"ttl"` \| `"cap"`), `count` |
+| `ExecSpawned` | Exec sandbox started; emitted just before the substrate runs the guest code (RED-249). | `runtime`, `language`, `cpu`, `memory`, `timeout` |
+| `ExecCompleted` | Exec finished normally (guest code exited, any `exit_code`). `ok: false` when `exit_code != 0`. | `runtime`, `language`, `duration_ms`, `exit_code`, `mem_peak_mb?`, `stdout_bytes`, `stderr_bytes`, `truncated` |
+| `ExecTimeout` | Wall-clock cap hit before the guest finished. | `runtime`, `language`, `duration_ms`, `timeout_seconds`, `reason?` |
+| `ExecOOM` | Memory cap hit. | `runtime`, `language`, `duration_ms`, `mem_peak_mb?`, `memory_limit_mb`, `reason?` |
+| `ExecEgressDenied` | Substrate refused a network or filesystem operation. | `runtime`, `language`, `duration_ms`, `reason` (future: `kind`, `target`) |
+| `ExecCrashed` | Substrate-infrastructure failure (not guest code error). | `runtime`, `language`, `duration_ms`, `reason` |
+| `tool.exec.unsandboxed` | Dispatch-time event when `runtime: :native` runs `execute_code` without isolation (deprecated; RED-249). Also surfaces as a stderr warning once per process. | `tool`, `deprecated: true` |
 
 ## Memory events (RED-215)
 

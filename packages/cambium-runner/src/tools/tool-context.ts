@@ -34,6 +34,14 @@ export type ToolContext = {
    *  the CPU/memory/timeout/network/filesystem caps. Other tools
    *  ignore it. */
   execPolicy?: ExecPolicy;
+  /** RED-249: structured step emitter. Tools push step objects onto
+   *  the runner's `trace.steps` through this callback. Used by
+   *  `execute_code` to emit `ExecSpawned`/`ExecCompleted`/`ExecTimeout`
+   *  /`ExecOOM`/`ExecEgressDenied`/`ExecCrashed` with substrate metadata.
+   *  Absent in contexts not threaded through the runner (unit tests
+   *  that call tools directly) — callers that want the events must
+   *  handle undefined. */
+  emitStep?: (step: { type: string; ok?: boolean; id?: string; meta?: any }) => void;
 };
 
 /**
@@ -46,8 +54,9 @@ export function buildToolContext(args: {
   policy?: NetworkPolicy;
   execPolicy?: ExecPolicy;
   signal?: AbortSignal;
+  emitStep?: ToolContext['emitStep'];
 }): ToolContext {
-  const { toolName, policy, execPolicy, signal } = args;
+  const { toolName, policy, execPolicy, signal, emitStep } = args;
 
   const boundFetch = async (url: string, init?: RequestInit): Promise<Response> => {
     if (!policy) {
@@ -58,5 +67,5 @@ export function buildToolContext(args: {
     return guardedFetch(url, init, policy);
   };
 
-  return { toolName, fetch: boundFetch, signal, execPolicy };
+  return { toolName, fetch: boundFetch, signal, execPolicy, emitStep };
 }
