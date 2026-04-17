@@ -18,7 +18,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 ARCH="${ARCH:-aarch64}"
-KERNEL_VERSION="${KERNEL_VERSION:-6.1.141}"
+KERNEL_VERSION="${KERNEL_VERSION:-6.1.102}"
 FC_CI_TAG="${FC_CI_TAG:-v1.11}"
 
 OUT="${HERE}/vmlinux"
