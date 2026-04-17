@@ -276,8 +276,9 @@ The RED-220 ticket lists five follow-up implementation pieces. With the decision
 3. **Relax Ruby-side discovery paths in `runtime.rb`.**
    - Pre-decided: see the sketch under "Search-path discovery" above. Add gen-local dir as first entry in both `_cambium_*_search_dirs` methods.
 
-4. **Schema co-location wiring.**
+4. **Schema co-location wiring.** *(Shipped in RED-243.)*
    - Pre-decided: caller-injected schemas (above). Implementation is one edit: `runner.ts:430` becomes a parameter read instead of a file import. The app-mode CLI gets a one-line shim that imports `contracts.ts` and passes it in, preserving today's behaviour.
+   - Resolved: `runGen(opts)` is exported from `@cambium/runner` (`packages/cambium-runner/src/index.ts`), takes `opts.schemas` (caller-injected), and returns a structured `RunGenResult` (`{ ok, output, trace, runId, schemaId, ir, errorMessage? }`). The runner no longer imports any contracts file by path. The CLI's `main()` reads argv, imports `packages/cambium/src/contracts.ts`, calls `runGen`, then handles file writes and exit code. Engine-mode callers (RED-246) will pass a sibling `schemas.ts` instead.
 
 5. **`cambium new engine <Name>` scaffolder + sentinel-aware mode detection.**
    - Pre-decided: folder shape (above), sentinel format (`cambium.engine.json`), CLAUDE.md emitted into the folder, the three-row context-detection table for `cambium new <thing>`.

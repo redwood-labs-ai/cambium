@@ -407,15 +407,60 @@ function extractJsonObject(text: string): any {
   return JSON.parse(slice);
 }
 
-// ── Main: Step-Graph Executor ─────────────────────────────────────────
-async function main() {
-  const { irPath, traceOut, outputOut, mock: mockFlag, memoryKeys } = parseArgs(process.argv.slice(2));
-  const irText = irPath === '-' ? readFileSync(0, 'utf8') : readFileSync(irPath, 'utf8');
-  const ir: IR = JSON.parse(irText);
+// ── runGen: programmatic library entry point (RED-243) ────────────────
+//
+// Replaces the all-in-one main() with a function that:
+//   - takes a parsed IR + caller-injected schemas (no `import()` of any
+//     contracts file from a hardcoded path)
+//   - returns { ok, output, trace, runId, schemaId, ir } instead of writing
+//     trace.json / output.json to disk
+//   - never calls process.exit
+//
+// The CLI's main() (further down) reads argv, parses the IR, imports the
+// app-mode contracts.ts, calls runGen, then handles the file I/O + exit
+// code + stdout/stderr printing. Engine-mode callers import runGen from
+// '@cambium/runner' and pass their own schemas object.
+
+export interface RunGenOptions {
+  /** Pre-parsed IR (the JSON the Ruby compiler emitted). */
+  ir: IR;
+  /** Schemas keyed by `$id` — must contain `ir.returnSchemaId`. App-mode
+   *  callers pass `await import('packages/cambium/src/contracts.ts')`;
+   *  engine-mode callers pass their sibling `schemas.ts` module. */
+  schemas: Record<string, any>;
+  /** Force the deterministic mock generator instead of a live LLM. */
+  mock?: boolean;
+  /** Values for `keyed_by` slots on memory pools. Each entry is `name=value`. */
+  memoryKeys?: string[];
+}
+
+export interface RunGenResult {
+  /** Final success after validation + repair. */
+  ok: boolean;
+  /** Validated output (null when !ok). */
+  output: any;
+  /** Trace object — always present, even on failure. */
+  trace: any;
+  /** Generated run id. The CLI uses this to scope `runs/<id>/`. */
+  runId: string;
+  /** Schema $id used for validation (mirrors `ir.returnSchemaId`). */
+  schemaId: string;
+  /** Possibly-mutated IR (enrichments add `<field>_enriched` entries). */
+  ir: IR;
+  /** Human-readable failure reason (budget exceeded, validation failed). */
+  errorMessage?: string;
+}
+
+class BudgetExceededError extends Error {
+  constructor(public violation: any) {
+    super(`Budget exceeded: ${violation.message}`);
+  }
+}
+
+export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
+  const { ir, schemas: contractsMod, mock: mockFlag = false, memoryKeys = [] } = opts;
 
   const runId = `run_${nowId()}_${Math.random().toString(16).slice(2, 8)}`;
-  const runDir = join(process.cwd(), 'runs', runId);
-  mkdirSync(runDir, { recursive: true });
 
   const trace: any = {
     run_id: runId,
@@ -426,10 +471,14 @@ async function main() {
     started_at: new Date().toISOString(),
   };
 
-  // ── Load contracts ──────────────────────────────────────────────────
-  const contractsMod: any = await import(join(process.cwd(), 'packages/cambium/src/contracts.ts'));
+  // ── Load contracts (caller-injected, RED-243) ───────────────────────
   const schema = contractsMod[ir.returnSchemaId];
-  if (!schema) throw new Error(`Schema not found in contracts.ts for id: ${ir.returnSchemaId}`);
+  if (!schema) {
+    throw new Error(
+      `Schema not found in injected schemas for id: ${ir.returnSchemaId}. ` +
+      `Provide it via opts.schemas (app-mode CLI passes packages/cambium/src/contracts.ts).`,
+    );
+  }
 
   const ajv = new Ajv({ allErrors: true, strict: false });
   ajv.addSchema(schema, schema.$id);
@@ -567,13 +616,16 @@ async function main() {
       });
       trace.finished_at = new Date().toISOString();
       trace.final = { ok: false, schema_id: schema.$id, usage: budget.summary(), budget_exceeded: true };
-      writeFileSync(join(runDir, 'ir.json'), JSON.stringify(ir, null, 2));
-      writeFileSync(traceOut ?? join(runDir, 'trace.json'), JSON.stringify(trace, null, 2));
-      writeFileSync(outputOut ?? join(runDir, 'output.json'), 'null');
-      console.error(`Budget exceeded: ${violation.message}. See ${traceOut ?? join('runs', runId, 'trace.json')}`);
-      process.exit(1);
+      // Bubble up — runGen's outer catch turns this into a structured
+      // RunGenResult and the CLI's main() handles file writes + exit code.
+      throw new BudgetExceededError(violation);
     }
   }
+
+  // Wrap the orchestration so BudgetExceededError thrown from budgetTrack
+  // unwinds cleanly into a `{ ok: false, ... }` result. Other exceptions
+  // propagate to the caller (CLI main() rethrows after stack-trace logging).
+  try {
 
   // ── Enrichments (pre-generate context processing) ───────────────────
   const enrichments = ir.enrichments ?? [];
@@ -1017,18 +1069,63 @@ async function main() {
   }
 
   trace.final = { ok: finalOk, schema_id: schema.$id, usage: totalUsage, budget: budget.summary() };
+  trace.finished_at = new Date().toISOString();
 
-  writeFileSync(join(runDir, 'ir.json'), JSON.stringify(ir, null, 2));
-  writeFileSync(traceOut ?? join(runDir, 'trace.json'), JSON.stringify(trace, null, 2));
-  writeFileSync(outputOut ?? join(runDir, 'output.json'), JSON.stringify(finalParsed ?? null, null, 2));
+  return {
+    ok: finalOk,
+    output: finalParsed ?? null,
+    trace,
+    runId,
+    schemaId: schema.$id,
+    ir,
+    errorMessage: finalOk ? undefined : 'Validation failed after repair attempts',
+  };
 
-  if (!finalOk) {
-    console.error(`Validation failed after repair attempts. See ${traceOut ?? join('runs', runId, 'trace.json')}`);
+  } catch (e) {
+    if (e instanceof BudgetExceededError) {
+      return {
+        ok: false,
+        output: null,
+        trace,
+        runId,
+        schemaId: schema.$id,
+        ir,
+        errorMessage: e.message,
+      };
+    }
+    throw e;
+  }
+}
+
+// ── CLI entry point ───────────────────────────────────────────────────
+//
+// argv parsing + IR file read + contracts.ts import + runGen + file writes
+// + exit code. Engine-mode callers do not go through this — they import
+// runGen directly and supply their own schemas.
+async function main() {
+  const { irPath, traceOut, outputOut, mock, memoryKeys } = parseArgs(process.argv.slice(2));
+  const irText = irPath === '-' ? readFileSync(0, 'utf8') : readFileSync(irPath, 'utf8');
+  const ir: IR = JSON.parse(irText);
+
+  const contractsMod: any = await import(join(process.cwd(), 'packages/cambium/src/contracts.ts'));
+
+  const result = await runGen({ ir, schemas: contractsMod, mock, memoryKeys });
+
+  const runDir = join(process.cwd(), 'runs', result.runId);
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(join(runDir, 'ir.json'), JSON.stringify(result.ir, null, 2));
+  writeFileSync(traceOut ?? join(runDir, 'trace.json'), JSON.stringify(result.trace, null, 2));
+  writeFileSync(outputOut ?? join(runDir, 'output.json'), JSON.stringify(result.output ?? null, null, 2));
+
+  if (!result.ok) {
+    if (result.errorMessage) {
+      console.error(`${result.errorMessage}. See ${traceOut ?? join('runs', result.runId, 'trace.json')}`);
+    }
     process.exit(1);
   }
 
-  console.log(JSON.stringify(finalParsed, null, 2));
-  console.error(`Trace: ${traceOut ?? join('runs', runId, 'trace.json')}`);
+  console.log(JSON.stringify(result.output, null, 2));
+  console.error(`Trace: ${traceOut ?? join('runs', result.runId, 'trace.json')}`);
 }
 
 function setNestedValue(obj: any, path: string, value: any): void {

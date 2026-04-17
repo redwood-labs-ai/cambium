@@ -1,13 +1,12 @@
 // Public entry point for @cambium/runner.
 //
-// RED-242 established the package boundary and moved the framework runtime
-// into packages/cambium-runner/src/. A programmatic `runGen` API is not yet
-// exposed — the CLI still launches runner.ts as a subprocess (see
-// cli/cambium.mjs). RED-243 replaces the subprocess shape with a real
-// library API (caller-injected schemas, runsRoot, etc.).
+// RED-242 established the package boundary. RED-243 exposes `runGen` —
+// the programmatic library entry point — with caller-injected schemas
+// (no hardcoded `import()` of any contracts file from a fixed path).
 //
-// Until then, this file exists so that `import { ... } from '@cambium/runner'`
-// has a target and so the package's module graph is a real thing. Consumers
-// importing from this package should wait for RED-243 to land.
+// App mode (the in-tree `cambium run` CLI) imports
+// `packages/cambium/src/contracts.ts` and passes it as `schemas`.
+// Engine mode (RED-220) will pass a sibling `schemas.ts` instead.
 
-export {};
+export { runGen } from './runner.js';
+export type { RunGenOptions, RunGenResult } from './runner.js';
