@@ -20,7 +20,7 @@ This is the RED-220 framing pattern again, applied to exec. Cambium ships **two 
 
 ### WASM (the default)
 
-In-process execution via [Wasmtime](https://wasmtime.dev) (the Bytecode Alliance Rust runtime) embedded in `@cambium/runner` as an npm dependency. The host needs **nothing** beyond `npm install`. JavaScript code runs inside QuickJS-WASM (~300KB, sub-ms cold-start, no Node APIs). Python is deferred to a follow-up — see "open" below.
+In-process execution via [Wasmtime](https://wasmtime.dev) (the Bytecode Alliance Rust runtime) embedded in `@cambium/runner` as an npm dependency. The host needs **nothing** beyond `npm install`. JavaScript code runs inside **QuickJS-WASM** (~300KB, sub-ms cold-start, no Node APIs) — pinned as the v1 JS engine; the alternatives (V8-WASM at ~30MB) aren't realistic. Python is deferred to a v1.5 follow-up via Pyodide; v1 ships JS-only.
 
 Capabilities are passed in explicitly via WASI: filesystem access only via preopens, no network, no subprocess spawn, no env. Resource caps (CPU/memory/wall-clock) enforced by Wasmtime itself. The escape surface is roughly "WASM runtime bug" — much smaller than "kernel CVE" or "container escape."
 
@@ -211,40 +211,25 @@ Lives at `packages/cambium-runner/src/builtin-tools/execute_code.escape-tests.ts
 
 ---
 
-## Open decisions (need a steve-call)
+## Resolved decisions
 
-These didn't come up in the substrate discussion but the design note exists to surface them:
+The four calls that turned the open list into settled positions:
 
-### A. Python in WASM — v1 or v1.5?
+### A. Python in WASM — v1.5 (deferred)
 
-Pyodide makes CPython work inside WASM. ~10MB cold-load, ~1s startup, no native extensions (numpy works because it's pre-compiled into Pyodide; pandas mostly works; user-installed pip packages don't). Two paths:
+V1 ships JS-only. Pyodide is its own follow-up ticket once the WASM substrate's adapter pattern is exercised in real use. Reasoning: Pyodide's ~10MB cold-load and the integration work (no native extensions, library-by-library compatibility quirks) would meaningfully expand v1 surface area. Python users in v1 get `:firecracker` as the answer; v1.5 brings Pyodide for the "I want a tiny Python compute" case.
 
-- **Ship JS-only in v1.** Smaller scope, faster to ship, proves the pattern. Python users get `:firecracker` as the answer.
-- **Ship JS + Pyodide in v1.** More work but covers the "I want a tiny Python compute" case without forcing Firecracker.
+### B. JS engine — QuickJS-WASM, pinned
 
-My lean: **JS-only in v1.** Pyodide as a follow-up ticket once the WASM substrate's adapter pattern is exercised. Reduces v1 surface area meaningfully.
+The WASM substrate's JS execution surface IS QuickJS-WASM. Not V8-WASM (too big). Not a hand-rolled interpreter. The pin is in the design note rather than left as an impl-time choice because the alternatives aren't realistic and leaving it open invites bikeshedding.
 
-### B. JS engine choice — pin QuickJS-WASM or stay open?
+### C. Firecracker rootfs image — ship a reference + document the recipe
 
-The realistic options for "JS in WASM" are:
-- **QuickJS-WASM** — small (~300KB), fast, complete ES2020. The default I'd pick.
-- **V8-WASM** — exists but enormous (~30MB), wrong tradeoff.
-- **Roll our own** — no.
+Cambium ships a best-effort reference rootfs image with Python + Node. The image is **not** a production guarantee — users are expected to build their own for production deployments and own the CVE-tracking job. The reference image's value is "you can `cambium run` an exec gen on day one without writing a Dockerfile." Documentation includes the recipe to build your own.
 
-My lean: **pin QuickJS in this design note.** The alternatives aren't realistic; pretending they're open invites bikeshedding.
+### D. Pooling — deferred to a follow-up ticket; v1 design preserves the option
 
-### C. Firecracker rootfs image strategy
-
-We need a base image with Python + Node. Options:
-- Ship a Cambium-managed image (we maintain it; users pull from a registry).
-- Document a recipe and let users build their own.
-- Both.
-
-My lean: **document a recipe + ship a reference image,** but the reference image is best-effort and users are expected to build their own for production. Avoids the "Cambium maintains a CVE-tracking job" trap.
-
-### D. Pooling design (when it ships)
-
-Out of v1 but worth flagging: per-config sandbox pool with explicit reset between calls (delete tmp files, clear in-memory state) is the cleanest model. Other options (per-gen pool, per-tool pool) leak more state.
+V1 ships per-call cold-start for both substrates (WASM ~1ms is free; Firecracker ~125ms is the noticeable cost). Pooling lands later when there's real usage data showing the cold-start is the bottleneck. The v1 adapter interface is designed so a pool can sit transparently in front of `execute()` without framework changes — when pooling ships, it'll be a substrate-internal optimization, not a DSL surface change. The pool design (per-config, explicit reset between calls) is the cleanest model; other options leak more state.
 
 ---
 
@@ -277,7 +262,7 @@ Likely **6–7 actual tickets** after splitting where useful (e.g., Pyodide in W
 - [x] Cross-platform stance.
 - [x] Migration path for existing `{ allowed: true }` gens.
 - [x] Escape-test category matrix.
-- [ ] Steve-call on the four open decisions (Python in WASM, JS engine pin, Firecracker rootfs strategy, pooling design).
+- [x] Calls made on the four formerly-open decisions (Python in WASM v1.5; QuickJS-WASM pinned; Firecracker reference image + recipe; pooling deferred).
 - [ ] Each impl piece has a Linear ticket filed against it.
 - [ ] First proof-of-concept: an `execute_code` invocation that successfully runs JS in WASM AND demonstrably fails the escape-fixture categories above.
 
