@@ -270,8 +270,9 @@ The RED-220 ticket lists five follow-up implementation pieces. With the decision
    - Pre-decided: API surface (RunGenOptions / GenResult above).
    - Resolved by RED-242: package boundary is `packages/cambium-runner/`. Everything under `packages/cambium-runner/src/` is part of the public package — `runner.ts`, `step-handlers.ts`, `correctors/`, `memory/`, `tools/` infrastructure, `triggers.ts`, `signals.ts`, `compound.ts`, `enrich.ts`, `schema-describe.ts`, `actions/`, `builtin-tools/`, `builtin-actions/`, `providers/`, `budget.ts`, `inline-tool-calls.ts`, `golden.ts`. Test files (`*.test.ts`) ship in the repo for now but will be excluded from the published artifact when RED-243 wires the schema-injection API and we cut a real `0.1.0`.
 
-2. **`cambium compile <file.cmb.rb> -o <ir.json>` subcommand.**
+2. **`cambium compile <file.cmb.rb> -o <ir.json>` subcommand.** *(Shipped in RED-244.)*
    - Pre-decided: just factor IR emission out of `cambium run`'s side-effect into a first-class subcommand. No design questions.
+   - Resolved: `cli/compile.mjs` exposes the new subcommand. Same Ruby pipeline as `cambium run`; differs only in destination (writes IR to disk instead of piping into the runner). `-o` defaults to `<basename>.ir.json` next to the input. `--arg` is now optional in `ruby/cambium/compile.rb` — when omitted, the gen method receives an empty string, on the assumption the runtime caller will inject real input via the typed wrapper. App-mode `cambium run` behaviour is unchanged. 6 new tests in `packages/cambium/tests/cambium_compile_subcommand.test.ts` cover the default + custom output paths, the optional `--arg`, missing-`--method` errors, and Ruby-side compile-error propagation.
 
 3. **Relax Ruby-side discovery paths in `runtime.rb`.** *(Shipped in RED-245.)*
    - Pre-decided: see the sketch under "Search-path discovery" above. Add gen-local dir as first entry in both `_cambium_*_search_dirs` methods.
