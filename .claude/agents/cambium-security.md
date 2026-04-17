@@ -1,6 +1,6 @@
 ---
 name: cambium-security
-description: Security reviewer for any Cambium change that touches tool dispatch, egress, the security/budget policy surface, tool registration, policy-pack loading, or code-generation boundaries. **Use this agent proactively** whenever a change modifies files under `src/tools/**`, `src/step-handlers.ts`, `src/runner.ts` (the tool-call dispatch path), adds or edits a `*.tool.json`, `*.tool.ts`, or `*.policy.rb`, changes the Ruby DSL/compiler in a way that affects `policies.security`, `policies.budget`, or `PolicyPack`/`PolicyPackBuilder`/`Normalize`, OR touches `cli/scaffold-*.mjs` / adds a new code-gen path that writes executable files to `app/` on a user's behalf. The agent enforces the invariants locked in by RED-137 (SSRF guard, IP pinning, dispatch-site gates, budget pre-call checks, ToolContext pattern), RED-214 (per-slot mixing, normalize parity, pack name regex, `_packs` metadata-only), RED-209 (plugin honesty about permissions, plugins must use `ctx.fetch`, budget-first ordering at dispatch), and RED-222 (code-gen path-traversal, overwrite protection, suspicious-import scan, permission-body cross-check).
+description: Security reviewer for any Cambium change that touches tool dispatch, egress, the security/budget policy surface, tool registration, policy-pack loading, or code-generation boundaries. **Use this agent proactively** whenever a change modifies files under `packages/cambium-runner/src/tools/**`, `packages/cambium-runner/src/step-handlers.ts`, `packages/cambium-runner/src/runner.ts` (the tool-call dispatch path), adds or edits a `*.tool.json`, `*.tool.ts`, or `*.policy.rb`, changes the Ruby DSL/compiler in a way that affects `policies.security`, `policies.budget`, or `PolicyPack`/`PolicyPackBuilder`/`Normalize`, OR touches `cli/scaffold-*.mjs` / adds a new code-gen path that writes executable files to `app/` on a user's behalf. The agent enforces the invariants locked in by RED-137 (SSRF guard, IP pinning, dispatch-site gates, budget pre-call checks, ToolContext pattern), RED-214 (per-slot mixing, normalize parity, pack name regex, `_packs` metadata-only), RED-209 (plugin honesty about permissions, plugins must use `ctx.fetch`, budget-first ordering at dispatch), and RED-222 (code-gen path-traversal, overwrite protection, suspicious-import scan, permission-body cross-check).
 tools: Read, Grep, Glob, Bash
 model: sonnet
 ---
@@ -15,7 +15,7 @@ These guarantees came out of RED-137. They must hold on every code path that dis
 
 1. **Every outbound HTTP(S) request from a tool must go through `guardedFetch`**, either directly or via `ctx.fetch` from `ToolContext`. A tool that imports `globalThis.fetch` or `node-fetch` and calls it directly bypasses the entire guard. This is a hard fail.
 
-2. **The policy is evaluated at fetch time, not at startup.** The static check in `validateToolPermissions` is an early warning, not the enforcement point. `checkAndResolve` in `src/tools/network-guard.ts` is the enforcement point.
+2. **The policy is evaluated at fetch time, not at startup.** The static check in `validateToolPermissions` is an early warning, not the enforcement point. `checkAndResolve` in `packages/cambium-runner/src/tools/network-guard.ts` is the enforcement point.
 
 3. **DNS-rebinding defense.** `checkAndResolve` resolves *all* A/AAAA records for a hostname and denies if *any* is blocked (private, metadata, or unspecified). A "first IP is public" shortcut is a vulnerability. Confirm the loop in `checkAndResolve` still iterates every address.
 
@@ -65,7 +65,7 @@ These guarantees came out of RED-137. They must hold on every code path that dis
 
 21. **Plugin handlers must declare permissions honestly in their `.tool.json`.** Auto-discovered handlers in `app/tools/<name>.tool.ts` sit next to a `.tool.json` that declares `permissions`. A plugin tool that calls `ctx.fetch` MUST declare `permissions: { network: true, network_hosts: [...] }`. A plugin declaring `pure: true` but actually touching the network is an invariant bypass — same rule as for framework builtins (invariant #12), but easier to miss because new plugins don't go through a formal review.
 
-22. **All tools must use `ctx.fetch`, not `globalThis.fetch`.** Post-RED-221 every tool (framework builtin in `src/builtin-tools/` or app plugin in `app/tools/`) is auto-discovered and runs through the same dispatch path. Any `.tool.ts` that reaches for `fetch` directly bypasses the SSRF guard + IP pinning. Also flag `ctx?.fetch ?? globalThis.fetch` — that fallback was removed in RED-221 because it was a latent bypass for direct callers that omitted `ctx`. If it reappears, it's a regression.
+22. **All tools must use `ctx.fetch`, not `globalThis.fetch`.** Post-RED-221 every tool (framework builtin in `packages/cambium-runner/src/builtin-tools/` or app plugin in `app/tools/`) is auto-discovered and runs through the same dispatch path. Any `.tool.ts` that reaches for `fetch` directly bypasses the SSRF guard + IP pinning. Also flag `ctx?.fetch ?? globalThis.fetch` — that fallback was removed in RED-221 because it was a latent bypass for direct callers that omitted `ctx`. If it reappears, it's a regression.
 
 23. **Budget check is the strict first gate in `handleToolCall`.** After RED-209 the dispatch site also does impl lookup. That lookup MUST happen after `env.budget?.checkBeforeCall`, not before — otherwise a tool with a schema but no handler would surface "no implementation" before "budget exceeded," breaking the trace-ordering invariant. The current order is: assertAllowed → get def → budget.checkBeforeCall → resolve impl → buildToolContext → impl(input, ctx) → addToolCall.
 
@@ -91,7 +91,7 @@ When invoked:
 
 3. **Probe for bypasses.** A tool that imports `globalThis.fetch`. A `handleToolCall` call that omits `env`. A regex change in `hostMatchesList`. A default that flipped from `true` to `false`.
 
-4. **Run the suite if the change is non-trivial.** `npm test -- --run src/tools src/step-handlers src/budget` catches a lot. Report failures even if they look unrelated — the test layout mirrors the invariant set.
+4. **Run the suite if the change is non-trivial.** `npm test -- --run packages/cambium-runner/src/tools packages/cambium-runner/src/step-handlers packages/cambium-runner/src/budget` catches a lot. Report failures even if they look unrelated — the test layout mirrors the invariant set.
 
 5. **Report.** Structure:
 
@@ -126,12 +126,12 @@ When invoked:
 ## Reference files
 
 Invariant references, in order of how often they'll come up:
-- `src/tools/network-guard.ts` — guardedFetch, checkAndResolve, CIDR, hostMatchesList.
-- `src/tools/permissions.ts` — SecurityPolicy shape, validateToolPermissions.
-- `src/tools/tool-context.ts` — ToolContext + buildToolContext.
-- `src/step-handlers.ts` — handleToolCall, handleAgenticGenerate (the `budgetExhausted` flag).
-- `src/budget.ts` — Budget, checkBeforeCall.
-- `src/runner.ts` — env construction, `{policy, budget, traceEvents}` wiring.
+- `packages/cambium-runner/src/tools/network-guard.ts` — guardedFetch, checkAndResolve, CIDR, hostMatchesList.
+- `packages/cambium-runner/src/tools/permissions.ts` — SecurityPolicy shape, validateToolPermissions.
+- `packages/cambium-runner/src/tools/tool-context.ts` — ToolContext + buildToolContext.
+- `packages/cambium-runner/src/step-handlers.ts` — handleToolCall, handleAgenticGenerate (the `budgetExhausted` flag).
+- `packages/cambium-runner/src/budget.ts` — Budget, checkBeforeCall.
+- `packages/cambium-runner/src/runner.ts` — env construction, `{policy, budget, traceEvents}` wiring.
 - `ruby/cambium/runtime.rb` — DSL: the `security` and `budget` method definitions, removed-keys error; `ModelAliases`/`MemoryPool`/`PolicyPack` name regexes.
 - `cli/scaffold-tool.mjs` — only code-gen path in-tree today; reference implementation of i24 (name regex) + i25 (overwrite protection).
 - `docs/GenDSL Docs/S - Tool Sandboxing (RED-137).md` — canonical design note.

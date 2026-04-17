@@ -15,7 +15,7 @@ Show inline documentation when hovering over DSL primitives and references.
 | `system` | "Declares the system prompt. Symbol resolves to `app/systems/<name>.system.md`, string is inline." |
 | `:analyst` | The contents of `app/systems/analyst.system.md` |
 | `model` | "Declares the LLM provider and model. Format: `provider:model_name`." |
-| `returns` | "Declares the return schema. Must match a TypeBox `$id` in `src/contracts.ts`." |
+| `returns` | "Declares the return schema. Must match a TypeBox `$id` in `packages/cambium/src/contracts.ts`." |
 | `AnalysisReport` | The TypeBox schema definition from `contracts.ts` |
 | `uses` | "Declares allowed tools. Deny-by-default: undeclared tools cannot be called." |
 | `:calculator` | The `description` field from `app/tools/calculator.tool.json` |
@@ -35,8 +35,8 @@ Navigate from references to their definitions.
 | `:analyst` (after `system`) | `app/systems/analyst.system.md` |
 | `:code_reviewer` (after `system`) | `app/systems/code_reviewer.system.md` |
 | `:calculator` (after `uses` or `tool`) | `app/tools/calculator.tool.json` |
-| `AnalysisReport` (after `returns`) | The export in `src/contracts.ts` |
-| `:math` (after `corrects`) | `src/correctors/math.ts` |
+| `AnalysisReport` (after `returns`) | The export in `packages/cambium/src/contracts.ts` |
+| `:math` (after `corrects`) | `packages/cambium-runner/src/correctors/math.ts` |
 | `:latency_ms` (after `on`) | The `extract :latency_ms` declaration in the same file |
 
 ### Completions
@@ -47,7 +47,7 @@ Context-aware suggestions after DSL keywords.
 | `system :` | Names of `*.system.md` files in `app/systems/` |
 | `uses :` | Names of `*.tool.json` files in `app/tools/` |
 | `corrects :` | Built-in corrector names: `math`, `dates`, `currency` |
-| `returns ` | TypeBox export names from `src/contracts.ts` (by `$id`) |
+| `returns ` | TypeBox export names from `packages/cambium/src/contracts.ts` (by `$id`) |
 | `constrain :` | Known constraint names: `tone`, `compound`, `consistency` |
 | `on :` | Signal names declared via `extract` in the current file |
 
@@ -72,7 +72,7 @@ vscode/cambium-syntax/
 
 ### Server implementation approach
 - Parse `.cmb.rb` files with regex/line-based matching (not a full Ruby parser — the DSL surface is small and regular)
-- Scan `app/systems/`, `app/tools/`, `src/contracts.ts`, `src/correctors/` on startup to build a symbol index
+- Scan `app/systems/`, `app/tools/`, `packages/cambium/src/contracts.ts`, `packages/cambium-runner/src/correctors/` on startup to build a symbol index
 - Watch those directories for changes via VS Code file watcher
 - Use `vscode-languageserver` + `vscode-languageclient` packages
 

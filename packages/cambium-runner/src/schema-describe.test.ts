@@ -63,7 +63,7 @@ describe('describeSchema', () => {
   })
 
   it('handles the AnalysisReport schema', async () => {
-    const { AnalysisReport } = await import('../packages/cambium/src/contracts.ts')
+    const { AnalysisReport } = await import('../../cambium/src/contracts.ts')
     const desc = describeSchema(AnalysisReport)
 
     expect(desc).toContain('summary (string, required)')

@@ -142,7 +142,7 @@ if (compile.status !== 0) {
 const irJson = compile.stdout;
 
 // Run IR with TS runner
-const runnerArgs = ['--import', 'tsx', './src/runner.ts', '--ir', '-'];
+const runnerArgs = ['--import', 'tsx', './packages/cambium-runner/src/runner.ts', '--ir', '-'];
 if (traceOut) runnerArgs.push('--trace', traceOut);
 if (outputOut) runnerArgs.push('--out', outputOut);
 if (mock) runnerArgs.push('--mock');

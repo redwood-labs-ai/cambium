@@ -15,9 +15,9 @@ app/tools/
   my_tool.tool.ts     # handler (discovered + dynamic-imported)
 ```
 
-The registry walks the directory and, for each `.tool.json`, looks for a sibling `.tool.ts` (or `.tool.js`) and imports its `execute(input, ctx?)` export. No edits to `src/tools/index.ts` or the registry itself are required.
+The registry walks the directory and, for each `.tool.json`, looks for a sibling `.tool.ts` (or `.tool.js`) and imports its `execute(input, ctx?)` export. No edits to `packages/cambium-runner/src/tools/index.ts` or the registry itself are required.
 
-Framework-provided "batteries-included" tools (calculator, read_file, web_search, web_extract, execute_code) live in `src/builtin-tools/` in the same paired-file layout as app tools (RED-221). The runner loads `src/builtin-tools/` first, then `packages/<pkg>/app/tools/`. `Map.set` overwrites on name collision, so app tools automatically shadow framework builtins — that's the override hook.
+Framework-provided "batteries-included" tools (calculator, read_file, web_search, web_extract, execute_code) live in `packages/cambium-runner/src/builtin-tools/` in the same paired-file layout as app tools (RED-221). The runner loads `packages/cambium-runner/src/builtin-tools/` first, then `packages/<pkg>/app/tools/`. `Map.set` overwrites on name collision, so app tools automatically shadow framework builtins — that's the override hook.
 
 ## Semantics
 
@@ -29,7 +29,8 @@ Framework-provided "batteries-included" tools (calculator, read_file, web_search
 ## Handler shape
 
 ```ts
-import type { ToolContext } from '../../../../src/tools/tool-context.js';
+// from packages/cambium/app/tools/<name>.tool.ts:
+import type { ToolContext } from '../../../cambium-runner/src/tools/tool-context.js';
 
 export async function execute(
   input: { /* matches inputSchema */ },

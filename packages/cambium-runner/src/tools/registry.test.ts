@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { ToolRegistry } from './registry.js'
 import { join } from 'node:path'
 
-const BUILTINS = join(process.cwd(), 'src/builtin-tools')
+const BUILTINS = join(process.cwd(), 'packages/cambium-runner/src/builtin-tools')
 const APP_TOOLS = join(process.cwd(), 'packages/cambium/app/tools')
 
 describe('ToolRegistry', () => {

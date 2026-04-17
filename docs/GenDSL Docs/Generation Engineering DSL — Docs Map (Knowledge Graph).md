@@ -45,6 +45,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[N - VS Code Language Server]]
 - [[N - Agentic Transactions]]
 - [[N - GAIA Benchmark Evaluation]]
+- [[N - App Mode vs Engine Mode (RED-220)]] — engine-mode embedding design; runner-as-library, co-located gens, sentinel-aware authoring
 
 ---
 

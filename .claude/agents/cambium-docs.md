@@ -1,6 +1,6 @@
 ---
 name: cambium-docs
-description: Docs-drift reviewer for any Cambium change that touches the DSL surface, IR shape, trace step types, or knowledge-graph docs. **Use this agent proactively** whenever a change modifies `ruby/cambium/runtime.rb` (new DSL methods), `ruby/cambium/compile.rb` (new IR fields), `src/step-handlers.ts` / `src/runner.ts` / `src/triggers.ts` (new trace step types), `CLAUDE.md` (new concepts/invariants), `README.md`, or adds/renames files under `docs/GenDSL Docs/`. Catches the drifts that bite in practice: a new DSL method with no doc, a new IR field missing from `C - IR`, a new trace type missing from `C - Trace`, stale cross-references after a doc rename, README project-structure tree going out of sync with disk.
+description: Docs-drift reviewer for any Cambium change that touches the DSL surface, IR shape, trace step types, or knowledge-graph docs. **Use this agent proactively** whenever a change modifies `ruby/cambium/runtime.rb` (new DSL methods), `ruby/cambium/compile.rb` (new IR fields), `packages/cambium-runner/src/step-handlers.ts` / `packages/cambium-runner/src/runner.ts` / `packages/cambium-runner/src/triggers.ts` (new trace step types), `CLAUDE.md` (new concepts/invariants), `README.md`, or adds/renames files under `docs/GenDSL Docs/`. Catches the drifts that bite in practice: a new DSL method with no doc, a new IR field missing from `C - IR`, a new trace type missing from `C - Trace`, stale cross-references after a doc rename, README project-structure tree going out of sync with disk.
 tools: Read, Grep, Glob, Bash
 model: sonnet
 ---
@@ -27,13 +27,13 @@ Cambium ships a tight knowledge graph: a primitive doc per DSL method, `C - *.md
 
 5. **New IR top-level fields in `compile.rb` MUST appear in `C - IR (Intermediate Representation).md`.** That doc's top-level-fields table is the authoritative IR contract. Field inventory source: `grep -E "^\s+'[a-z_]+' =>" ruby/cambium/compile.rb` (skipping nested fields). Flag any field present in the IR but not in the C-IR table, or vice versa (removed field still referenced).
 
-6. **New trace step types MUST appear in `C - Trace (observability).md`.** Step types get emitted as `type: 'SomeName'` in `src/runner.ts`, `src/step-handlers.ts`, `src/triggers.ts`, `src/enrich.ts`. The C-Trace doc has a Step-types table listing the user-facing ones. A change that adds a new primary step type (`ToolCall`, `AgenticTurn`, `ActionCall`, `memory.*`) MUST add a row. Error-variant step types (`EnrichError`, `EnrichFailed`, etc.) do not need per-variant rows — a category mention is enough.
+6. **New trace step types MUST appear in `C - Trace (observability).md`.** Step types get emitted as `type: 'SomeName'` in `packages/cambium-runner/src/runner.ts`, `packages/cambium-runner/src/step-handlers.ts`, `packages/cambium-runner/src/triggers.ts`, `packages/cambium-runner/src/enrich.ts`. The C-Trace doc has a Step-types table listing the user-facing ones. A change that adds a new primary step type (`ToolCall`, `AgenticTurn`, `ActionCall`, `memory.*`) MUST add a row. Error-variant step types (`EnrichError`, `EnrichFailed`, etc.) do not need per-variant rows — a category mention is enough.
 
 7. **`CLAUDE.md` "Key concepts" list MUST cover every primitive that has a `P - *.md` doc.** When a new primitive ships, the one-line summary in the "Key concepts" list under `CLAUDE.md` must be added alongside the primitive doc. Check the backtick-wrapped primitive names in `CLAUDE.md` against the set of `P - *.md` files.
 
 ### README alignment
 
-8. **The project-structure tree in `README.md` MUST match disk layout.** When a PR adds a new top-level source directory (`src/memory/`, `src/actions/`, `src/builtin-actions/`) or a new `app/` subdirectory (`app/memory_pools/`, `app/actions/`, `app/config/`), the README tree must be updated to reflect it. Walk the README tree against `ls src/` and `ls packages/cambium/app/` to catch drift.
+8. **The project-structure tree in `README.md` MUST match disk layout.** When a PR adds a new top-level source directory (`packages/cambium-runner/src/memory/`, `packages/cambium-runner/src/actions/`, `packages/cambium-runner/src/builtin-actions/`) or a new `app/` subdirectory (`app/memory_pools/`, `app/actions/`, `app/config/`), the README tree must be updated to reflect it. Walk the README tree against `ls packages/cambium-runner/src/` and `ls packages/cambium/app/` to catch drift.
 
 9. **README "Key features" SHOULD cover user-visible primitives.** When a PR adds a significant user-facing primitive (memory, triggers, actions), the Key Features list should mention it. SHOULD not MUST — brief changes don't need README updates, but shipping a whole primitive and not mentioning it is an omission worth flagging.
 

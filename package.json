@@ -8,7 +8,7 @@
   "scripts": {
     "run": "node ./cli/cambium.mjs",
     "compile": "ruby ./ruby/cambium/compile.rb",
-    "runner": "node --import tsx ./src/runner.ts",
+    "runner": "node --import tsx ./packages/cambium-runner/src/runner.ts",
     "test": "vitest run"
   },
   "dependencies": {

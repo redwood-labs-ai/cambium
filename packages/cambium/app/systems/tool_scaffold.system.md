@@ -26,7 +26,7 @@ When in doubt, pick the narrower permission. A tool declared as `pure` that actu
 Return the FULL source for `<name>.tool.ts`. It must:
 1. Import `ToolContext` from the runner:
    ```ts
-   import type { ToolContext } from '../../../../src/tools/tool-context.js';
+   import type { ToolContext } from '../../../cambium-runner/src/tools/tool-context.js';
    ```
 2. Export `async function execute(input, ctx?): Promise<...>` matching the output schema.
 3. If `permissions.network` is true, use `ctx.fetch`, NEVER `globalThis.fetch`. The SSRF guard lives on `ctx.fetch`; a bare `fetch` bypasses the entire policy. Example:

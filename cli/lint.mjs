@@ -122,15 +122,19 @@ function lintPackage(pkgDir) {
       const toolName = f.replace('.tool.json', '');
       pass(`tool definition: ${f}`);
 
-      // Check for implementation
-      // Look in src/tools/ relative to workspace root (not package)
+      // Check for implementation. Post-RED-209 the canonical location for
+      // an app-tool handler is the sibling `<name>.tool.ts` (auto-discovered
+      // by the registry); the legacy `src/tools/<name>.ts` paths predate
+      // that and survived only because no one had pruned them. Post-RED-242
+      // those stale paths now also point under packages/cambium-runner/.
       const implCandidates = [
-        join(pkgDir, '../../src/tools', `${toolName}.ts`),
-        join(pkgDir, 'src/tools', `${toolName}.ts`),
+        join(toolsDir, `${toolName}.tool.ts`),                                          // RED-209 sibling
+        join(pkgDir, '../cambium-runner/src/tools', `${toolName}.ts`),                  // legacy framework-internal
+        join(pkgDir, 'src/tools', `${toolName}.ts`),                                    // legacy package-local
       ];
       const hasImpl = implCandidates.some(p => existsSync(p));
       if (hasImpl) pass(`  implementation: ${toolName}.ts`);
-      else warn(`  no implementation found for tool "${toolName}" (check src/tools/${toolName}.ts)`);
+      else warn(`  no implementation found for tool "${toolName}" (check ${toolsDir}/${toolName}.tool.ts)`);
 
       // Validate tool JSON structure
       try {

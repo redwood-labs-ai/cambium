@@ -82,8 +82,8 @@ One TypeBox declaration derives four things:
 No drift. No sync issues. One schema, four uses.
 
 ## Implementation
-- `src/schema-describe.ts` — `describeSchema()` walks the schema tree, `schemaPromptBlock()` formats it for injection
-- `src/step-handlers.ts` — `handleGenerate()` and `handleRepair()` include the block in system prompts
+- `packages/cambium-runner/src/schema-describe.ts` — `describeSchema()` walks the schema tree, `schemaPromptBlock()` formats it for injection
+- `packages/cambium-runner/src/step-handlers.ts` — `handleGenerate()` and `handleRepair()` include the block in system prompts
 
 ## See also
 - [[D - Schemas (JSON Schema)]]
