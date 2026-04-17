@@ -15,6 +15,8 @@
 
 pub mod frame;
 pub mod protocol;
+pub mod spawn;
 
 pub use frame::{read_frame, write_frame, MAX_FRAME_BYTES};
 pub use protocol::{ExecRequest, ExecResponse, Language, Status};
+pub use spawn::{run_exec, run_process};
