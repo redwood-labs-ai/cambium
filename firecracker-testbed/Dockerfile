@@ -22,6 +22,7 @@ RUN apt-get update \
       curl \
       jq \
       iproute2 \
+      python3 \
  && rm -rf /var/lib/apt/lists/*
 
 # Download the upstream Firecracker release for this architecture.
@@ -39,6 +40,7 @@ RUN set -eux; \
 
 WORKDIR /testbed
 COPY smoke.sh /testbed/smoke.sh
-RUN chmod +x /testbed/smoke.sh
+COPY fc_vsock_probe.py /testbed/fc_vsock_probe.py
+RUN chmod +x /testbed/smoke.sh /testbed/fc_vsock_probe.py
 
 CMD ["/testbed/smoke.sh"]
