@@ -1,0 +1,48 @@
+# Firecracker testbed (RED-251 v0).
+#
+# Deployment target: any Linux+KVM host (verified on ARM mini-PCs and
+# x86_64 bare metal; will NOT run on hosts without /dev/kvm). Komodo-
+# deployable — push this directory and its sibling Dockerfile and let
+# Komodo rebuild + restart the service.
+#
+# v0 scope: verify Firecracker is installed, /dev/kvm is accessible
+# through the container boundary, and the Firecracker API socket
+# responds. Real microVM boot + agent + vsock round-trip come with
+# the impl tickets filed off S - Firecracker Substrate (RED-251).
+#
+# NOT for production use. This is a development / integration testbed.
+
+services:
+  firecracker-testbed:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Override the arch at build time if this ever runs on x86_64.
+      args:
+        FIRECRACKER_ARCH: aarch64
+    container_name: firecracker-testbed
+
+    # /dev/kvm passthrough — the only way Firecracker can talk to the
+    # host's KVM subsystem from inside a container. The container runs
+    # as root (Debian base default), so it can open /dev/kvm directly
+    # regardless of the host's kvm-group permissions. A production
+    # substrate host would drop to a non-root user and use `group_add`
+    # with the host's kvm GID, but this is a testbed — simplest
+    # working path wins.
+    devices:
+      - /dev/kvm:/dev/kvm
+
+    # Needed for TAP/tun device creation once we start wiring guest
+    # network egress (v1 substrate ships network: :none, but we'll
+    # grow into this). NET_ADMIN alone is minimal cap-surface; SYS_ADMIN
+    # or privileged=true are heavier and unneeded for v0.
+    cap_add:
+      - NET_ADMIN
+
+    # Rerun the smoke on every container start. Exits non-zero on
+    # failure so Komodo surfaces it.
+    restart: "no"
+
+    # Stdout/stderr are the UI. Komodo or `docker compose logs` shows
+    # the PASS/FAIL dashboard.
+    tty: true
