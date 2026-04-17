@@ -141,7 +141,13 @@ output.json + trace.json
 │   ├── runtime.rb         # GenModel DSL primitives
 │   └── compile.rb         # Ruby → JSON IR compiler
 ├── cli/
-│   └── cambium.mjs        # CLI entry point
+│   ├── cambium.mjs        # CLI dispatch
+│   ├── compile.mjs        # `cambium compile` subcommand (RED-244)
+│   ├── generate.mjs       # `cambium new <type>` scaffolder + engine-mode detection (RED-246)
+│   ├── doctor.mjs         # `cambium doctor` env check
+│   ├── init.mjs           # `cambium init` workspace bootstrap
+│   ├── lint.mjs           # `cambium lint` package validation
+│   └── scaffold-tool.mjs  # `cambium new tool --describe ...` agentic scaffolder (RED-216)
 ├── runs/                  # Execution artifacts (ir.json, trace.json, output.json)
 │                          # plus memory/<scope>/<key>/<name>.sqlite buckets
 ├── vscode/cambium-syntax/ # VS Code extension (syntax + LSP)

@@ -413,6 +413,9 @@ export async function execute(
     console.log(`  1. Edit ${ctx.engineDir}/${snake}.tool.json — input/output schemas + permissions`);
     console.log(`  2. Implement ${ctx.engineDir}/${snake}.tool.ts`);
     console.log(`  3. Declare in your gen: uses :${snake}`);
+    console.log(`\n  Default permissions are 'pure: true'. If you add ctx.fetch, fs, or exec calls`);
+    console.log(`  to the handler, update the .tool.json permissions block FIRST — the static check`);
+    console.log(`  reads the JSON, not the TS body, and a lying 'pure: true' silently bypasses it.`);
     return;
   }
 
@@ -442,6 +445,9 @@ export async function execute(
   console.log(`  1. Edit ${PKG}/app/tools/${snake}.tool.json — input/output schemas + permissions`);
   console.log(`  2. Implement ${PKG}/app/tools/${snake}.tool.ts`);
   console.log(`  3. Declare in your agent: uses :${snake}`);
+  console.log(`\n  Default permissions are 'pure: true'. If you add ctx.fetch, fs, or exec calls`);
+  console.log(`  to the handler, update the .tool.json permissions block FIRST — the static check`);
+  console.log(`  reads the JSON, not the TS body, and a lying 'pure: true' silently bypasses it.`);
   console.log(`\nTip: try \`cambium new tool --describe "what it does"\` for an agentic scaffolder`);
   console.log(`     that infers the schema and permissions from a natural-language description.`);
 }

@@ -15,7 +15,15 @@
  */
 import { spawnSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
-import { dirname, basename, join } from 'node:path';
+import { dirname, basename, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// Resolve the Ruby compile script relative to the CLI's own location,
+// not process.cwd(). Engine-mode users invoke `cambium compile` from
+// their host project directory — `./ruby/cambium/compile.rb` is
+// nowhere on their filesystem. Surfaced by the RED-220 POC.
+const CLI_DIR = dirname(fileURLToPath(import.meta.url));
+const RUBY_COMPILE_SCRIPT = resolve(CLI_DIR, '..', 'ruby', 'cambium', 'compile.rb');
 
 function bail(msg, code = 2) {
   console.error(msg);
@@ -59,7 +67,7 @@ Compiles a GenModel to IR JSON. No execution. Writes to <output> (or to
   // Build the Ruby compile invocation. --arg is optional; we omit it
   // from the spawn args entirely when the user didn't pass one, so the
   // Ruby side falls into its empty-string default.
-  const rubyArgs = ['./ruby/cambium/compile.rb', file, '--method', method];
+  const rubyArgs = [RUBY_COMPILE_SCRIPT, file, '--method', method];
   if (arg !== null) rubyArgs.push('--arg', arg);
 
   const compile = spawnSync('ruby', rubyArgs, {
