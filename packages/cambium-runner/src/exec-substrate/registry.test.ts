@@ -48,8 +48,13 @@ describe('checkRuntime', () => {
     expect(() => checkRuntime('wasm')).not.toThrow();
   });
 
-  it('throws with the substrate reason when firecracker is not yet implemented', () => {
-    expect(() => checkRuntime('firecracker')).toThrow(/Firecracker substrate not yet implemented/);
+  it('throws with the substrate reason when firecracker is not available on this host', () => {
+    // On Linux hosts WITH KVM + firecracker + env vars configured this
+    // would pass. Our dev/CI hosts aren't that; expect a platform or
+    // environment-gated rejection that surfaces the substrate's reason
+    // string, not a generic "unknown substrate."
+    if (process.platform === 'linux') return;
+    expect(() => checkRuntime('firecracker')).toThrow(/requires Linux \+ KVM/);
   });
 });
 
@@ -295,13 +300,23 @@ describe('WasmSubstrate (real — quickjs-emscripten)', () => {
   });
 });
 
-describe('FirecrackerSubstrate (stub)', () => {
+describe('FirecrackerSubstrate', () => {
   const sub = new FirecrackerSubstrate();
 
-  it('reports unavailable with a pointer to back-compat substrates', () => {
+  it('reports unavailable on non-Linux hosts with a platform-specific reason', () => {
+    if (process.platform === 'linux') return;
     const reason = sub.available();
     expect(reason).not.toBeNull();
-    expect(reason).toMatch(/not yet implemented/);
+    expect(reason).toMatch(/requires Linux \+ KVM/);
+    expect(reason).toMatch(process.platform);
+  });
+
+  // Deeper per-gate tests live in firecracker.test.ts (env-var gating,
+  // KVM accessibility, etc.); this block just confirms the registry
+  // returns a FirecrackerSubstrate and its availability probe never
+  // throws (the ExecSubstrate interface contract).
+  it('available() never throws, regardless of host state', () => {
+    expect(() => sub.available()).not.toThrow();
   });
 });
 
