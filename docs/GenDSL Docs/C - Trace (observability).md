@@ -39,6 +39,8 @@ A trace MUST include:
 | `ExecOOM` | Memory cap hit. | `runtime`, `language`, `duration_ms`, `mem_peak_mb?`, `memory_limit_mb`, `reason?` |
 | `ExecEgressDenied` | Substrate refused a network or filesystem operation. | `runtime`, `language`, `duration_ms`, `reason` (future: `kind`, `target`) |
 | `ExecCrashed` | Substrate-infrastructure failure (not guest code error). | `runtime`, `language`, `duration_ms`, `reason` |
+| `ExecSnapshotLoaded` | `:firecracker`-only (RED-256). Fired between `ExecSpawned` and the outcome event when the snapshot cache interacted with the call. Warm-restore path: cached snapshot was used. Cold-boot-and-save path: first call for a cache key; cold-boot ran and a snapshot was saved inline for next time. | `runtime`, `cache_key`, `restore_ms` (warm path) OR `create_ms` + `note` (cold-and-save path) |
+| `ExecSnapshotFallback` | `:firecracker`-only (RED-256). Fired between `ExecSpawned` and the outcome event when the snapshot cache was bypassed; the VM cold-booted without saving a snapshot. | `runtime`, `cache_key`, `reason` (`missing` \| `non_canonical_sizing` \| `load_failed` \| `shared_mem_unsupported` \| `build_locked`), `fallback` (`cold_boot`) |
 | `tool.exec.unsandboxed` | Dispatch-time event when `runtime: :native` runs `execute_code` without isolation (deprecated; RED-249). Also surfaces as a stderr warning once per process. | `tool`, `deprecated: true` |
 
 ## Memory events (RED-215)
