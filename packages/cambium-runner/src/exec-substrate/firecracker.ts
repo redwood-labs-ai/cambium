@@ -71,6 +71,7 @@ import {
   type BufferedSocketLike,
 } from './firecracker-protocol.js';
 import {
+  apiPatchExpect204,
   apiPutExpect204,
   makeLogAccumulator,
   killFirecracker,
@@ -83,6 +84,7 @@ import {
   AGENT_INIT_PATH,
   CANONICAL_MACHINE_CONFIG,
   GUEST_CID,
+  createSnapshot,
   defaultCacheRoot,
   ensureCacheDir,
   handleFor,
@@ -90,7 +92,6 @@ import {
   releaseCacheLock,
   resolveCacheRoot,
   restoreFromSnapshot,
-  saveTemplateInline,
   snapshotExists,
   tryAcquireCacheLock,
   type FallbackReason,
@@ -437,82 +438,94 @@ async function executeColdAndSave(
     });
   }
 
-  const ctx = makeRunContext();
-  let fc: ChildProcess | null = null;
-  let sock: BufferedSocketLike | null = null;
+  // Phase 1: cold-boot the TEMPLATE VM, verify agent, snapshot,
+  // destroy. The template VM exists only to produce the snapshot;
+  // we don't run the user's ExecRequest against it. This was
+  // attempted originally but the resume-after-snapshot path doesn't
+  // reliably re-dial — observed on R1 as 12s timeouts even though
+  // the snapshot saved cleanly. Destroying the template + restoring
+  // in a fresh FC matches what `executeWarm` does, and warm works,
+  // so both paths route the user request through the same
+  // restoreFromSnapshot code.
+  const templateCtx = makeRunContext();
+  let templateFc: ChildProcess | null = null;
+  let templateSock: BufferedSocketLike | null = null;
+  let createMs = 0;
   try {
-    // Stage the rootfs in the CACHE DIRECTORY (not the per-call
-    // tempdir). Firecracker bakes the drive path into the snapshot
-    // file; warm restores later open the same path. If we staged to
-    // the tempdir, cleanup would delete it and every subsequent
-    // warm restore would fail with a drive-open error.
+    // Stage the rootfs + clear any stale vsock UDS — both paths
+    // live in the cache directory so the snapshot's baked paths
+    // remain valid across calls.
     copyFileSync(rootfsPath, handle.rootfsFile);
-
-    // Remove any stale vsock UDS file left from a previous run
-    // (we hold the cache-entry lock, so nobody's racing us). If
-    // Firecracker starts with the path already present, bind can
-    // fail.
     try { rmSync(handle.vsockUdsFile, { force: true }); } catch { /* ignore */ }
 
-    // Canonical boot — we're also saving a template, so we must
-    // match what the cache is keyed on even if the caller's opts
-    // were equivalent after normalization. Rootfs AND vsock UDS
-    // paths both live in the cache dir so the snapshot's baked
-    // paths are still valid at restore time.
+    // Canonical machine-config — we're keying the cache on this,
+    // regardless of what opts normalized to.
     const booted = await coldBootCanonical(
       kernelPath,
       handle.rootfsFile,
       handle.vsockUdsFile,
-      ctx,
+      templateCtx,
     );
-    fc = booted.fc;
-    sock = booted.sock;
+    templateFc = booted.fc;
+    templateSock = booted.sock;
 
-    // Close this bootstrap handshake BEFORE snapshotting — we want
-    // the template state to be "agent in accept()", not "agent
-    // handling a request." The agent's handle_one() reads one frame
-    // header; a half-closed stream resolves to EOF on its end and
-    // the agent loops back to accept(). Dropping `sock` triggers that.
-    try { sock.destroy(); } catch { /* ignore */ }
-    sock = null;
-    // Brief settle window before snapshotting. The RED-256 spike
-    // measured ~3 ms p95 guest accept-wake; 250 ms is ~80× that, far
-    // above any observed noise under normal host load. If this
-    // becomes flaky under real load, replace with a probe-based
-    // detection: dial + CONNECT + close to confirm accept() is ready,
-    // then snapshot.
+    // Close the bootstrap handshake so the agent loops back to
+    // accept() — we want the template state to be
+    // "agent-waiting-in-accept", not mid-handler.
+    try { templateSock.destroy(); } catch { /* ignore */ }
+    templateSock = null;
+    // Settle window — RED-256 spike measured ~3ms p95 for guest
+    // accept() to wake on dial; 250ms is 80× that, far above any
+    // observed noise. Replace with a probe-based detection if this
+    // turns out flaky under real host load.
     await new Promise((r) => setTimeout(r, 250));
 
-    let createMs: number;
+    // Pause + snapshot. We don't resume — instead destroy the
+    // template, then restore into a fresh FC below.
+    const t0 = Date.now();
     try {
-      createMs = await saveTemplateInline(ctx.apiSock, handle);
+      await apiPatchExpect204(templateCtx.apiSock, '/vm', { state: 'Paused' });
+      await createSnapshot(templateCtx.apiSock, handle);
+      createMs = Date.now() - t0;
     } catch (e: any) {
-      // Snapshot save failed; degrade to pure cold-boot for this
-      // request. Re-dial on the live VM to run the ExecRequest.
-      const redial = await dialAndHandshake(
-        handle.vsockUdsFile,
-        VSOCK_GUEST_PORT,
-        Date.now() + 10_000,
+      // Snapshot save failed. Surface as a fallback via cold-boot
+      // — the user's request still needs to succeed, we just don't
+      // have a cache entry for next time.
+      return withSnapshotMeta(
+        await executeCold(opts, rootfsPath, kernelPath, startedAt),
+        { path: 'cold_boot_fallback', fallbackReason: 'load_failed', cacheKey: handle.cacheKey },
       );
-      sock = redial.sock;
-      const responseDeadline = Date.now() + opts.timeout * 1000 + 5_000;
-      const result = await runExecAgainst(opts, sock, responseDeadline, startedAt);
-      return withSnapshotMeta(result, {
-        path: 'cold_boot_fallback',
-        fallbackReason: 'load_failed',
-        cacheKey: handle.cacheKey,
-      });
     }
+  } catch (e: any) {
+    return crashedWithLog(startedAt, templateCtx, e);
+  } finally {
+    try { templateSock?.destroy(); } catch { /* ignore */ }
+    killFirecracker(templateFc);
+    try { rmSync(templateCtx.workDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
 
-    // Template saved. Re-dial and run the user's ExecRequest against
-    // the SAME VM (now resumed). The template on disk is clean; the
-    // live VM can carry the current request.
-    const redial = await dialAndHandshake(
-      ctx.vsockUds,
-      VSOCK_GUEST_PORT,
-      Date.now() + 10_000,
-    );
-    sock = redial.sock;
+  // Phase 2: restore from the just-saved snapshot + run the user
+  // ExecRequest. Same code path executeWarm uses — if that works,
+  // this works.
+  const ctx = makeRunContext();
+  let fc: ChildProcess | null = null;
+  let sock: BufferedSocketLike | null = null;
+  try {
+    let restored;
+    try {
+      restored = await restoreFromSnapshot(handle, ctx.apiSock, ctx.log);
+    } catch (e: any) {
+      // Restore of the snapshot we JUST saved failed. Rare but
+      // possible (e.g., shared-mmap not supported for some reason).
+      // Fall back to pure cold-boot with the error recorded.
+      return withSnapshotMeta(
+        await executeCold(opts, rootfsPath, kernelPath, startedAt),
+        { path: 'cold_boot_fallback', fallbackReason: 'load_failed', cacheKey: handle.cacheKey },
+      );
+    }
+    fc = restored.fc;
+    sock = restored.sock;
+
     const responseDeadline = Date.now() + opts.timeout * 1000 + 5_000;
     const result = await runExecAgainst(opts, sock, responseDeadline, startedAt);
     return withSnapshotMeta(result, {
