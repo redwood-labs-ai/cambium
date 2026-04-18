@@ -60,6 +60,23 @@ describe('FirecrackerSubstrate.execute — scope gates', () => {
     expect(result.reason).toMatch(/\/var\/data/);
   });
 
+  it('fails closed on a malformed filesystem shape (no allowlist_paths) without leaking a TypeError', async () => {
+    // Models a bad IR that got past the TS type checker via `as any`:
+    // filesystem is an object but missing the expected allowlist_paths
+    // field. The gate should still refuse cleanly and return a
+    // status:'crashed' with the pointer message — NOT a raw stack
+    // trace from `undefined.join(...)`.
+    const sub = new FirecrackerSubstrate();
+    const result = await sub.execute({
+      ...baseOpts,
+      filesystem: {} as any,
+    });
+    expect(result.status).toBe('crashed');
+    expect(result.reason).toMatch(/filesystem: 'none' only/);
+    expect(result.reason).not.toMatch(/TypeError/);
+    expect(result.reason).not.toMatch(/Cannot read properties/);
+  });
+
   it('surfaces the available() reason when the substrate is unavailable', async () => {
     // On non-Linux hosts this is the default path — available() returns
     // a platform error, and execute() should surface it as status:

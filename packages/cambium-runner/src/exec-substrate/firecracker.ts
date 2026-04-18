@@ -80,13 +80,22 @@ interface AgentResponse {
   reason: string | null;
 }
 
+const AGENT_STATUS_VALUES = [
+  'completed',
+  'timeout',
+  'oom',
+  'egress_denied',
+  'crashed',
+] as const;
+
 function isAgentResponse(v: unknown): v is AgentResponse {
+  if (typeof v !== 'object' || v === null) return false;
+  const obj = v as Record<string, unknown>;
   return (
-    typeof v === 'object' &&
-    v !== null &&
-    typeof (v as any).status === 'string' &&
-    typeof (v as any).stdout === 'string' &&
-    typeof (v as any).stderr === 'string'
+    typeof obj.status === 'string' &&
+    (AGENT_STATUS_VALUES as readonly string[]).includes(obj.status) &&
+    typeof obj.stdout === 'string' &&
+    typeof obj.stderr === 'string'
   );
 }
 
@@ -179,21 +188,49 @@ export class FirecrackerSubstrate implements ExecSubstrate {
     const runId = randomBytes(4).toString('hex');
     const apiSock = join(workDir, `fc-${runId}.api.sock`);
     const vsockUds = join(workDir, `fc-${runId}.vsock.sock`);
-    // Stage the rootfs in the workdir so the guest can write to it
-    // without dirtying the source artifact. Same reasoning as smoke.sh.
     const stagedRootfs = join(workDir, 'rootfs.ext4');
-    copyFileSync(process.env[ROOTFS_ENV]!, stagedRootfs);
 
     let fc: ChildProcess | null = null;
     let vsockSock: BufferedSocketLike | null = null;
     const fcLog: Buffer[] = [];
+    // Bound the firecracker-log accumulator so a misbehaving or
+    // compromised firecracker binary emitting gigabytes of log output
+    // can't OOM the Node process. 1 MB is far above the ~60 kB real
+    // Firecracker emits even on a full boot; once hit, later chunks
+    // are dropped silently (the error path already tails the last 30
+    // lines, which will have the most useful tail if we ever get
+    // anywhere near the cap).
+    const FC_LOG_MAX_BYTES = 1_000_000;
+    let fcLogBytes = 0;
+    const appendLog = (c: Buffer) => {
+      if (fcLogBytes >= FC_LOG_MAX_BYTES) return;
+      fcLogBytes += c.length;
+      fcLog.push(c);
+    };
 
     try {
+      // Re-check the rootfs file exists and is readable NOW, not at
+      // `available()` time. available() caches its result at runner
+      // startup; a rootfs that was present then but has since been
+      // removed or made unreadable would otherwise surface as a raw
+      // copyFileSync exception rather than a clean crashed result.
+      const rootfsPath = process.env[ROOTFS_ENV];
+      if (!rootfsPath || !existsSync(rootfsPath)) {
+        return crashed(
+          startedAt,
+          `${ROOTFS_ENV}=${rootfsPath ?? ''} does not point to an existing rootfs.ext4 file at dispatch time (was valid at startup, changed since).`,
+        );
+      }
+      // Stage the rootfs in the workdir so the guest can write to it
+      // without dirtying the source artifact. Same reasoning as smoke.sh.
+      // Inside try/finally so a copy failure still cleans up workDir.
+      copyFileSync(rootfsPath, stagedRootfs);
+
       fc = spawn(FC_BINARY, ['--api-sock', apiSock], {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
-      fc.stdout?.on('data', (c: Buffer) => fcLog.push(c));
-      fc.stderr?.on('data', (c: Buffer) => fcLog.push(c));
+      fc.stdout?.on('data', appendLog);
+      fc.stderr?.on('data', appendLog);
 
       await waitForSocket(apiSock, 5_000);
       // Wall-clock budget for everything from now until response
@@ -289,9 +326,15 @@ function checkScope(opts: ExecOpts): string | null {
     }). Host-side netns + iptables resolution is a follow-up; for network access, use runtime: :native (unsandboxed) or file a ticket.`;
   }
   if (opts.filesystem !== 'none') {
-    return `:firecracker v1 supports filesystem: 'none' only (got allowlist_paths: ${
-      opts.filesystem.allowlist_paths.join(', ')
-    }). Host-side bind-mount drive resolution is a follow-up; for filesystem access, use runtime: :native (unsandboxed) or file a ticket.`;
+    // Optional-chain the allowlist_paths read: a malformed IR could
+    // send `filesystem: {}` or another shape without the field. Keep
+    // the error message clean rather than letting a TypeError leak
+    // through as a raw stack trace in the reason string. The gate
+    // still fails closed — anything other than the literal 'none'
+    // returns this error.
+    const paths = (opts.filesystem as { allowlist_paths?: string[] })
+      ?.allowlist_paths?.join(', ') ?? '(no allowlist_paths)';
+    return `:firecracker v1 supports filesystem: 'none' only (got allowlist_paths: ${paths}). Host-side bind-mount drive resolution is a follow-up; for filesystem access, use runtime: :native (unsandboxed) or file a ticket.`;
   }
   return null;
 }
