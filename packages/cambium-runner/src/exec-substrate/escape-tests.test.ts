@@ -26,7 +26,6 @@
 import { describe, it, expect } from 'vitest';
 import type { ExecSubstrate, ExecOpts, ExecResult } from './types.js';
 import { WasmSubstrate } from './wasm.js';
-import { FirecrackerSubstrate } from './firecracker.js';
 
 // ── Harness ────────────────────────────────────────────────────────────
 
@@ -264,29 +263,11 @@ describe('WASM substrate — escape tests (RED-250)', () => {
   }
 });
 
-// ── Firecracker substrate — gated ─────────────────────────────────────
-
-describe('Firecracker substrate — escape tests (RED-250)', () => {
-  const sub = new FirecrackerSubstrate();
-  const gated = process.env.RED213_TEST_FIRECRACKER === '1';
-  const available = sub.available() === null;
-
-  if (!gated || !available) {
-    const reason = !gated
-      ? 'set RED213_TEST_FIRECRACKER=1 to run'
-      : (sub.available() ?? 'unavailable');
-    it.skip(`Firecracker escape tests skipped — ${reason}`, () => {});
-    return;
-  }
-
-  // Runs only when explicitly enabled AND the substrate is available.
-  // RED-251 is where the real implementation lands; for now the stub
-  // returns crashed, so these assertions would fail if someone flipped
-  // the gate without the substrate being real.
-  for (const category of CATEGORIES) {
-    it(category.name, async () => {
-      const result = await runCategory(sub, category);
-      assertNoLeak(category, result);
-    });
-  }
-});
+// Firecracker-substrate escape tests live in
+// `escape-tests.firecracker.test.ts` (RED-257). Substrate-specific
+// reasoning + adaptations for the "guest has real Node+Python in a
+// real Linux kernel, isolation is the VM boundary" semantics make a
+// separate file cleaner than overloading the shared harness above.
+// Specifically: the `/etc/passwd` test's forbidden markers match
+// Alpine's own `/etc/passwd` inside the guest (false positives); the
+// Firecracker variant uses a host-planted sentinel file instead.
