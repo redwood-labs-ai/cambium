@@ -167,11 +167,16 @@ Returns a clear reason string otherwise. No nested-virt-on-Docker-Desktop workar
 
 ### 9. Trace events.
 
-Reuse RED-249's `Exec*` vocabulary verbatim. The substrate populates the existing meta fields and adds a few Firecracker-specific ones on `ExecSpawned`:
+Reuse RED-249's `Exec*` vocabulary verbatim. The substrate populates the existing meta fields. Snapshot-path interactions surface as two NEW step types fired between `ExecSpawned` and the outcome event (see [[C - Trace (observability)]] for the full shape):
 
-- `snapshot_restore_ms` — time spent restoring the snapshot.
-- `vcpu_count`, `mem_size_mib` — substrate-reported caps.
-- `rootfs_version` — identifies which image the VM ran, for reproducibility.
+- `ExecSnapshotLoaded` — warm-restore path carries `cache_key` + `restore_ms`; cold-boot-and-save carries `cache_key` + `create_ms`.
+- `ExecSnapshotFallback` — cache bypass with `cache_key` + `reason` (`missing` | `non_canonical_sizing` | `load_failed` | `shared_mem_unsupported` | `build_locked`).
+
+**What shipped vs. what was originally sketched:**
+
+- The `snapshot_restore_ms` meta field lives on `ExecSnapshotLoaded.restore_ms`, NOT on `ExecSpawned` — moving it onto the snapshot-specific event keeps `ExecSpawned` runtime-agnostic.
+- `vcpu_count` / `mem_size_mib` are NOT currently on `ExecSpawned` meta (the meta is `{ runtime, language, cpu, memory, timeout }`). The snapshot cache keys on canonical sizing (1 vCPU / 512 MiB), and the actual values at boot-source PUT time are reconstructable from `ExecSpawned.cpu` / `.memory`. Add them if a trace consumer needs the substrate-normalized values explicitly.
+- `rootfs_version` is deferred — requires the rootfs image to carry a version manifest, which RED-255 didn't ship. The cache-key hash serves as a content-identity surrogate in the meantime.
 
 ### 10. Security surface.
 
@@ -231,6 +236,36 @@ Practical deployment shapes:
 - NOT: Lambda (can't run nested Firecracker), Fargate (same), most unprivileged containers (no `/dev/kvm`).
 
 V1 does **not** ship a "run Firecracker in Docker" flow. If the user's Docker host has `/dev/kvm` available, the flow works; we don't engineer around the cases where it doesn't.
+
+### Environment variables
+
+The substrate reads four env vars at `available()` time and per dispatch. All four are operator-level (not per-gen policy — a gen can't change them via the DSL):
+
+| Var | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `CAMBIUM_FC_KERNEL` | yes | — | Absolute path to the Firecracker-compatible `vmlinux` kernel image. Validated at `available()`; a missing / non-existent path marks the substrate unavailable with a clear reason. |
+| `CAMBIUM_FC_ROOTFS` | yes | — | Absolute path to the guest `rootfs.ext4` image (the RED-255 reference build or a user replacement). Validated at `available()` AND re-checked at dispatch time so a mid-life removal surfaces cleanly. |
+| `CAMBIUM_FC_SNAPSHOT_DIR` | no | `packages/cambium-runner/var/snapshots/` (relative to the runner's source tree) | Absolute path override for the snapshot cache root. MUST be absolute and normalized — the substrate rejects `..` segments and non-canonical paths at `available()` (see `resolveCacheRoot`). Useful for pointing the cache at a fast scratch mount (NVMe, tmpfs) or sharing a cache across multiple runner instances on the same host. |
+| `CAMBIUM_FC_DISABLE_SNAPSHOTS` | no | unset | Set to `1` to force the cold-only code path — no cache lookup, no snapshot save, every call full-boots. Escape hatch for (a) hosts where the shared-mmap `File` backend isn't available, (b) debugging whether the snapshot path is the cause of a misbehavior, (c) operationally invalidating a cache entry you can't easily `rm -rf`. |
+
+### Snapshot/restore — implemented behaviour (RED-256)
+
+What actually shipped, as settled fact (§A's open questions are now closed):
+
+- **Lazy-first-call creation.** First call in a fresh workspace for a given `(rootfs, kernel, canonical machine-config)` tuple pays cold-boot + snapshot-create (~2.0-2.5 s on the MS-R1). Every subsequent call for that tuple hits the cache and runs warm-restore + request (~100-500 ms on the MS-R1 for most categories; the RED-256 spike measured p95 3.4 ms `/vm Resumed` → first-dial CONNECT-OK in isolation).
+- **Canonical sizing = 1 vCPU / 512 MiB.** `ExecOpts.cpu` / `ExecOpts.memory` that normalize to these values (after `Math.max(1, Math.round(...))`) route through snapshot/restore. Anything else cold-boots with `ExecSnapshotFallback.reason = non_canonical_sizing`. One canonical shape per cache entry — NOT a `(cpu, memory)` matrix. Users who need bigger VMs pay the cold-boot cost.
+- **Cache key.** SHA-256 of the rootfs file bytes ‖ SHA-256 of the kernel file bytes ‖ SHA-256 of the canonical machine-config JSON, all fed into a final SHA-256, first 16 hex chars used as the cache subdirectory name. An in-process cache by `(path, inode, size, mtimeMs)` avoids re-hashing multi-MB files on every dispatch.
+- **Cache directory layout.** Each entry is a subdirectory under `CAMBIUM_FC_SNAPSHOT_DIR` (or the default) named by its cache-key prefix. Contents:
+  - `mem.img` (0600) — memory image; ~513 MB for a 512 MiB VM.
+  - `snapshot.bin` (0600) — Firecracker VM state; ~7 KB.
+  - `rootfs.ext4` (0600) — staged writable copy of the source rootfs; drive path baked into `snapshot.bin`.
+  - `vsock.sock` (0600) — parent vsock UDS; path baked into `snapshot.bin`.
+  - `.lock` — per-entry `O_CREAT | O_EXCL` exclusive-access file; present only while a call holds the lock.
+  Directory mode is 0700. All content is writable only by the runner user.
+- **Per-entry locking.** Both `executeColdAndSave` and `executeWarm` acquire an exclusive `O_CREAT | O_EXCL` lock on `<cacheDir>/<key>/.lock` before touching the entry's shared files (the rootfs is mounted writable inside the guest; concurrent warm restores would otherwise have their `/tmp/script.js` writes stomp on each other — a correctness + data-isolation hazard, not just a quality issue). The non-holder falls back to pure cold-only (`ExecSnapshotFallback.reason = build_locked`) rather than blocking, keeping per-call latency bounded. Different cache keys are unaffected — cross-key concurrency is unchanged.
+- **Cold-boot-and-save is a two-phase flow.** Phase 1 cold-boots the template VM, verifies the agent, pauses, snapshots, then DESTROYS the template. Phase 2 spawns a fresh Firecracker and runs the user's request through the normal warm-restore path. Both cache-hit and cache-miss end up using the same `restoreFromSnapshot` code for the actual user-request execution — simpler lifecycle, same execution semantics.
+- **Fallback is silent to the user, visible in the trace.** Snapshot-save failure, snapshot-load failure, or any transient substrate error degrades to cold-boot with a `ExecSnapshotFallback` step recording the reason. The user's `execute_code` call still returns a valid result; the gen author wouldn't notice. Operators can grep `trace.json` for `ExecSnapshotFallback` entries to spot persistent fallback modes.
+- **Cache invalidation is content-addressed.** Updating `rootfs.ext4` or `vmlinux` produces a new cache key; the old entry becomes stale and is never read again (but occupies disk until manually removed). If you upgrade the Firecracker binary version — which may change the snapshot format — the OLD cache entries will load against the NEW binary and might silently misbehave. The operator-side migration is: `rm -rf $CAMBIUM_FC_SNAPSHOT_DIR/` (or the default `packages/cambium-runner/var/snapshots/`) after any Firecracker upgrade.
 
 ---
 

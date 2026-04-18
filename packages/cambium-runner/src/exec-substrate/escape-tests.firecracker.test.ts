@@ -34,9 +34,17 @@ const SECRET_MARKER = `cambium-escape-marker-${randomBytes(8).toString('hex')}`;
 // a hung VM early rather than letting it block CI for minutes.
 const VITEST_TIMEOUT_MS = 30_000;
 
+// Memory is 512 MiB to match the RED-256 canonical snapshot sizing.
+// When this suite runs under the `:firecracker` substrate with the
+// snapshot cache available (not disabled via CAMBIUM_FC_DISABLE_SNAPSHOTS=1),
+// using the canonical size is what makes the assertion "isolation holds
+// under warm-restore too" actually triggerable. Any other memory value
+// would bypass the snapshot path via `non_canonical_sizing` fallback
+// and test only the cold-boot path — which RED-257's original run
+// already covered.
 const DEFAULT_OPTS: Omit<ExecOpts, 'language' | 'code'> = {
   cpu: 1,
-  memory: 128,
+  memory: 512,
   timeout: 5,
   network: 'none',
   filesystem: 'none',
