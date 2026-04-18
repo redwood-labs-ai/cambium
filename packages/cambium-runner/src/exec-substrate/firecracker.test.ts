@@ -40,6 +40,7 @@ describe('FirecrackerSubstrate.execute — scope gates', () => {
       ...baseOpts,
       network: {
         allowlist: ['api.example.com'],
+        denylist: [],
         block_private: true,
         block_metadata: true,
       },

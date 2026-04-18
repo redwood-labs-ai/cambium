@@ -117,6 +117,39 @@ export interface ExecResult {
    *  "network denied: 169.254.169.254". For `crashed` statuses, the
    *  substrate-infrastructure failure message. */
   reason?: string;
+
+  /**
+   * Firecracker-substrate-specific metadata used by the execute_code
+   * handler to emit the RED-256 `ExecSnapshotLoaded` / `ExecSnapshotFallback`
+   * trace events. Always unset for non-Firecracker substrates. Unset
+   * too for Firecracker calls that didn't interact with the snapshot
+   * cache (e.g., availability failure before any cache lookup).
+   */
+  snapshot?: {
+    /** Which code path ran the exec.
+     *  - `warm_restore`: cache hit, VM restored from snapshot.
+     *  - `cold_boot_and_save`: cache miss, cold-boot ran, snapshot saved inline for next call.
+     *  - `cold_boot_fallback`: snapshot was skipped (reason in `fallbackReason`). */
+    path: 'warm_restore' | 'cold_boot_and_save' | 'cold_boot_fallback';
+    /** Set when `path === 'warm_restore'`: elapsed ms for the
+     *  `/snapshot/load` + `/vm Resumed` + dial + handshake sequence. */
+    restoreMs?: number;
+    /** Set when `path === 'cold_boot_and_save'`: elapsed ms for the
+     *  `/snapshot/create` call (added on top of the cold-boot). */
+    createMs?: number;
+    /** Set when `path === 'cold_boot_fallback'`: why the snapshot
+     *  path was skipped. `non_canonical_sizing` fires when the gen
+     *  asked for non-default cpu/memory; `missing` fires when the
+     *  cache key is new AND the template-build disabled itself;
+     *  `load_failed` fires on a /snapshot/load API failure;
+     *  `shared_mem_unsupported` fires if the Firecracker version
+     *  doesn't expose the File backend. */
+    fallbackReason?: 'missing' | 'non_canonical_sizing' | 'load_failed' | 'shared_mem_unsupported';
+    /** Content-addressed cache key for the `(rootfs, kernel, canonical)`
+     *  tuple. Present on all three paths so the trace can be
+     *  cross-referenced to the cache directory. */
+    cacheKey?: string;
+  };
 }
 
 /**

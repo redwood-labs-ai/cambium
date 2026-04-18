@@ -155,6 +155,49 @@ export async function execute(input: ExecInput, ctx?: ToolContext): Promise<Exec
 
   const result = await substrate.execute(opts);
 
+  // RED-256: if the substrate reported a snapshot-path interaction,
+  // emit the matching trace event BEFORE the Exec{Completed,...}
+  // step, so the trace reads chronologically as:
+  //   ExecSpawned → ExecSnapshot(Loaded|Fallback) → ExecCompleted
+  // Absent `result.snapshot` (WASM / Native / Firecracker pre-RED-256
+  // branches), the event is simply omitted.
+  const snap = result.snapshot;
+  if (snap) {
+    if (snap.path === 'warm_restore') {
+      ctx.emitStep?.({
+        type: 'ExecSnapshotLoaded',
+        ok: true,
+        meta: {
+          runtime,
+          cache_key: snap.cacheKey,
+          restore_ms: snap.restoreMs,
+        },
+      });
+    } else if (snap.path === 'cold_boot_and_save') {
+      ctx.emitStep?.({
+        type: 'ExecSnapshotLoaded',
+        ok: true,
+        meta: {
+          runtime,
+          cache_key: snap.cacheKey,
+          create_ms: snap.createMs,
+          note: 'first-call snapshot save; subsequent calls hit the cache',
+        },
+      });
+    } else if (snap.path === 'cold_boot_fallback') {
+      ctx.emitStep?.({
+        type: 'ExecSnapshotFallback',
+        ok: true,
+        meta: {
+          runtime,
+          reason: snap.fallbackReason,
+          fallback: 'cold_boot',
+          cache_key: snap.cacheKey,
+        },
+      });
+    }
+  }
+
   ctx.emitStep?.(stepForResult(runtime, opts, result));
 
   // Collapse the substrate's structured status into execute_code's
