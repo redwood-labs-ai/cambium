@@ -322,13 +322,17 @@ async function coldBootToAccept(
   return { fc, sock, bootDeadline };
 }
 
-/** Cold-boot with the canonical machine-config, against a specific
- *  rootfs path. Used by executeColdAndSave — the rootfs lives in the
- *  cache directory (not ctx.stagedRootfs), because the snapshot file
- *  bakes this exact path and warm restores later reopen it. */
+/** Cold-boot with the canonical machine-config, against specific
+ *  rootfs + vsock-UDS paths. Used by executeColdAndSave — both paths
+ *  live in the cache directory (not a per-call tempdir), because
+ *  the snapshot file bakes both of them and warm restores later
+ *  reopen them. Using tempdir paths here would leave warm restores
+ *  trying to bind a UDS whose parent directory was deleted in
+ *  cleanup. */
 async function coldBootCanonical(
   kernelPath: string,
   rootfsPath: string,
+  vsockUdsPath: string,
   ctx: RunContext,
 ): Promise<{ fc: ChildProcess; sock: BufferedSocketLike }> {
   const fc = spawnFirecracker(ctx.apiSock, ctx.log);
@@ -349,11 +353,11 @@ async function coldBootCanonical(
   await apiPutExpect204(ctx.apiSock, '/vsock', {
     vsock_id: 'vsock0',
     guest_cid: GUEST_CID,
-    uds_path: ctx.vsockUds,
+    uds_path: vsockUdsPath,
   });
   await apiPutExpect204(ctx.apiSock, '/actions', { action_type: 'InstanceStart' });
 
-  const { sock } = await dialAndHandshake(ctx.vsockUds, VSOCK_GUEST_PORT, bootDeadline);
+  const { sock } = await dialAndHandshake(vsockUdsPath, VSOCK_GUEST_PORT, bootDeadline);
   return { fc, sock };
 }
 
@@ -444,10 +448,23 @@ async function executeColdAndSave(
     // warm restore would fail with a drive-open error.
     copyFileSync(rootfsPath, handle.rootfsFile);
 
+    // Remove any stale vsock UDS file left from a previous run
+    // (we hold the cache-entry lock, so nobody's racing us). If
+    // Firecracker starts with the path already present, bind can
+    // fail.
+    try { rmSync(handle.vsockUdsFile, { force: true }); } catch { /* ignore */ }
+
     // Canonical boot — we're also saving a template, so we must
     // match what the cache is keyed on even if the caller's opts
-    // were equivalent after normalization.
-    const booted = await coldBootCanonical(kernelPath, handle.rootfsFile, ctx);
+    // were equivalent after normalization. Rootfs AND vsock UDS
+    // paths both live in the cache dir so the snapshot's baked
+    // paths are still valid at restore time.
+    const booted = await coldBootCanonical(
+      kernelPath,
+      handle.rootfsFile,
+      handle.vsockUdsFile,
+      ctx,
+    );
     fc = booted.fc;
     sock = booted.sock;
 
@@ -473,7 +490,7 @@ async function executeColdAndSave(
       // Snapshot save failed; degrade to pure cold-boot for this
       // request. Re-dial on the live VM to run the ExecRequest.
       const redial = await dialAndHandshake(
-        ctx.vsockUds,
+        handle.vsockUdsFile,
         VSOCK_GUEST_PORT,
         Date.now() + 10_000,
       );
@@ -545,7 +562,7 @@ async function executeWarm(
   try {
     let restored;
     try {
-      restored = await restoreFromSnapshot(handle, ctx.apiSock, ctx.vsockUds, ctx.log);
+      restored = await restoreFromSnapshot(handle, ctx.apiSock, ctx.log);
     } catch (e: any) {
       // Snapshot load failed. Fall through to cold-boot. The
       // snapshot ISN'T invalidated — could be a transient API

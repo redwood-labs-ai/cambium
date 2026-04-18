@@ -34,6 +34,7 @@ import {
   existsSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readSync,
   renameSync,
   rmSync,
@@ -196,18 +197,24 @@ export function defaultCacheRoot(): string {
 
 export interface SnapshotHandle {
   /** Directory containing `mem.img` + `snapshot.bin` + `rootfs.ext4`
-   *  for this cache entry. Created lazily on cache-miss. */
+   *  + `vsock.sock` for this cache entry. Created lazily on cache
+   *  miss. */
   dir: string;
   memFile: string;
   snapshotFile: string;
   /** The template's baked drive path. Lives in the cache directory
    *  (not a per-call tempdir) so warm restores can reopen it — the
    *  snapshot file records this path, and on restore Firecracker
-   *  expects the same path to still exist. Using `/tmp/cambium-fc-
-   *  XXX/rootfs.ext4` at template-build time and then cleaning up
-   *  the tempdir in the finally-block would leave every subsequent
-   *  warm restore trying to open a nonexistent drive. */
+   *  expects the same path to still exist. */
   rootfsFile: string;
+  /** The template's baked vsock UDS path. SAME problem as
+   *  `rootfsFile`: Firecracker records this path in the snapshot
+   *  and recreates the UDS at that path during restore. If we used
+   *  a per-call tempdir path for the template, every subsequent
+   *  warm restore would fail to bind because the parent dir was
+   *  cleaned up. Keeping it in the cache dir means the path
+   *  persists as long as the snapshot does. */
+  vsockUdsFile: string;
   /** Exclusive-access lockfile path. Both `executeColdAndSave` and
    *  `executeWarm` acquire this before doing anything to the cache
    *  entry. Serializes per-cache-entry access so concurrent callers
@@ -215,8 +222,10 @@ export interface SnapshotHandle {
    *  inside the guest; two parallel warm restores would otherwise
    *  have their guest-side writes to `/tmp/script.js` stomp on each
    *  other — a correctness-and-data-isolation issue, not just
-   *  quality). Contention is resolved by the non-holder falling
-   *  back to cold-only rather than blocking. */
+   *  quality). Also prevents two Firecracker processes from
+   *  concurrently trying to bind `vsockUdsFile`. Contention is
+   *  resolved by the non-holder falling back to cold-only rather
+   *  than blocking. */
   lockFile: string;
   cacheKey: string;
 }
@@ -236,6 +245,7 @@ export async function handleFor(
     memFile: join(dir, 'mem.img'),
     snapshotFile: join(dir, 'snapshot.bin'),
     rootfsFile: join(dir, 'rootfs.ext4'),
+    vsockUdsFile: join(dir, 'vsock.sock'),
     lockFile: join(dir, '.lock'),
     cacheKey,
   };
@@ -375,9 +385,25 @@ export interface RestoreResult {
 export async function restoreFromSnapshot(
   handle: SnapshotHandle,
   apiSock: string,
-  vsockUds: string,
   log: LogAccumulator,
 ): Promise<RestoreResult> {
+  // Firecracker will recreate the vsock UDS at the path baked into
+  // the snapshot (`handle.vsockUdsFile`). If a stale file is sitting
+  // there from a previous run, Firecracker may refuse to bind. Clear
+  // it before boot; the lock we hold guarantees no other caller is
+  // racing us for this path.
+  try { rmSync(handle.vsockUdsFile, { force: true }); } catch { /* ignore */ }
+  // Also clear any `<uds>_<port>` files left from guest-initiated
+  // connections (we don't use them, but Firecracker creates them
+  // opportunistically and they'd accumulate across calls).
+  let dirEntries: string[] = [];
+  try { dirEntries = readdirSync(handle.dir); } catch { /* ignore */ }
+  for (const entry of dirEntries) {
+    if (entry.startsWith('vsock.sock_')) {
+      try { rmSync(join(handle.dir, entry), { force: true }); } catch { /* ignore */ }
+    }
+  }
+
   const fc = spawnFirecracker(apiSock, log);
   await waitForApiSocket(apiSock, 5_000);
 
@@ -410,7 +436,7 @@ export async function restoreFromSnapshot(
   let sock: BufferedSocketLike;
   try {
     const dialed = await dialAndHandshake(
-      vsockUds,
+      handle.vsockUdsFile,
       VSOCK_GUEST_PORT,
       Date.now() + RESTORE_DEADLINE_MS,
     );
