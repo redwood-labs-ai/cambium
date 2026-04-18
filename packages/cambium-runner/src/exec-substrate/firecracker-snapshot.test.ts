@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, statSync, mkdirSync, chmodSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, statSync, mkdirSync, chmodSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -9,7 +9,10 @@ import {
   ensureCacheDir,
   handleFor,
   isCanonicalSizing,
+  releaseCacheLock,
+  resolveCacheRoot,
   snapshotExists,
+  tryAcquireCacheLock,
   _resetDigestCacheForTests,
 } from './firecracker-snapshot.js';
 
@@ -169,5 +172,89 @@ describe('handleFor + cache directory perms', () => {
     ensureCacheDir(handle);
     const mode = statSync(handle.dir).mode & 0o777;
     expect(mode).toBe(0o700);
+  });
+});
+
+describe('resolveCacheRoot', () => {
+  it('returns the default when env is undefined', () => {
+    const result = resolveCacheRoot(undefined);
+    expect(typeof result).toBe('string');
+  });
+
+  it('rejects a relative path', () => {
+    const result = resolveCacheRoot('relative/path');
+    expect(typeof result).toBe('object');
+    if (typeof result === 'object') {
+      expect(result.error).toMatch(/absolute/);
+    }
+  });
+
+  it('rejects a path with null byte', () => {
+    const result = resolveCacheRoot('/tmp/bad\0path');
+    expect(typeof result).toBe('object');
+    if (typeof result === 'object') {
+      expect(result.error).toMatch(/null byte/);
+    }
+  });
+
+  it('rejects an unnormalized traversal path', () => {
+    const result = resolveCacheRoot('/tmp/../etc');
+    expect(typeof result).toBe('object');
+    if (typeof result === 'object') {
+      expect(result.error).toMatch(/not normalized/);
+    }
+  });
+
+  it('accepts a normal absolute path', () => {
+    const result = resolveCacheRoot('/var/cambium/snapshots');
+    expect(result).toBe('/var/cambium/snapshots');
+  });
+});
+
+describe('tryAcquireCacheLock / releaseCacheLock', () => {
+  let cacheRoot: string;
+  let rootfs: string;
+  let kernel: string;
+
+  beforeEach(() => {
+    _resetDigestCacheForTests();
+    const workDir = mkdtempSync(join(tmpdir(), 'snapshot-test-'));
+    cacheRoot = join(workDir, 'cache');
+    rootfs = join(workDir, 'rootfs.ext4');
+    kernel = join(workDir, 'vmlinux');
+    writeFileSync(rootfs, 'rootfs-bytes', { mode: 0o600 });
+    writeFileSync(kernel, 'kernel-bytes', { mode: 0o600 });
+  });
+
+  it('acquires cleanly when the cache entry is free', async () => {
+    const handle = await handleFor(rootfs, kernel, cacheRoot);
+    ensureCacheDir(handle);
+    const fd = tryAcquireCacheLock(handle);
+    expect(fd).not.toBeNull();
+    expect(existsSync(handle.lockFile)).toBe(true);
+    releaseCacheLock(handle, fd);
+    expect(existsSync(handle.lockFile)).toBe(false);
+  });
+
+  it('second acquire fails while the first is held, then succeeds after release', async () => {
+    const handle = await handleFor(rootfs, kernel, cacheRoot);
+    ensureCacheDir(handle);
+    const fd1 = tryAcquireCacheLock(handle);
+    expect(fd1).not.toBeNull();
+    const fd2 = tryAcquireCacheLock(handle);
+    expect(fd2).toBeNull(); // contention — caller should fall back
+    releaseCacheLock(handle, fd1);
+    const fd3 = tryAcquireCacheLock(handle);
+    expect(fd3).not.toBeNull();
+    releaseCacheLock(handle, fd3);
+  });
+
+  it('releaseCacheLock is a no-op on null fd (idempotent with double-release)', async () => {
+    const handle = await handleFor(rootfs, kernel, cacheRoot);
+    ensureCacheDir(handle);
+    const fd = tryAcquireCacheLock(handle);
+    releaseCacheLock(handle, fd);
+    // Second release — lockfile already gone; should not throw.
+    expect(() => releaseCacheLock(handle, null)).not.toThrow();
   });
 });

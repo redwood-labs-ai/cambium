@@ -27,8 +27,10 @@
  */
 
 import { createHash } from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
 import {
   chmodSync,
+  closeSync,
   existsSync,
   mkdirSync,
   openSync,
@@ -36,8 +38,9 @@ import {
   renameSync,
   rmSync,
   statSync,
+  writeSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ChildProcess } from 'node:child_process';
 import {
@@ -81,7 +84,8 @@ export type FallbackReason =
   | 'non_canonical_sizing'
   | 'missing'
   | 'load_failed'
-  | 'shared_mem_unsupported';
+  | 'shared_mem_unsupported'
+  | 'build_locked';
 
 /**
  * Check whether the ExecOpts match canonical sizing AFTER the
@@ -133,7 +137,14 @@ const _digestCache = new Map<string, string>();
 
 function digestCacheKey(path: string): string {
   const st = statSync(path);
-  return `${path}::${st.size}::${st.mtimeMs}`;
+  // Include `st.ino` so that an in-place replacement (`cp new old` with
+  // the same resulting size, where the replacement writes within a
+  // single filesystem-mtime quantum) invalidates the cache. Inode
+  // changes on rename / cp / most replacement operations; pairing it
+  // with size + mtimeMs closes the same-size-same-millisecond alias
+  // that the reviewer flagged. Defense in depth — the concrete alias
+  // is rare, but the cost is one integer in the key.
+  return `${path}::${st.ino}::${st.size}::${st.mtimeMs}`;
 }
 
 async function hashFileWithCache(path: string): Promise<string> {
@@ -184,11 +195,29 @@ export function defaultCacheRoot(): string {
 }
 
 export interface SnapshotHandle {
-  /** Directory containing `mem.img` + `snapshot.bin` for this
-   *  cache entry. Non-existent on a cache miss. */
+  /** Directory containing `mem.img` + `snapshot.bin` + `rootfs.ext4`
+   *  for this cache entry. Created lazily on cache-miss. */
   dir: string;
   memFile: string;
   snapshotFile: string;
+  /** The template's baked drive path. Lives in the cache directory
+   *  (not a per-call tempdir) so warm restores can reopen it — the
+   *  snapshot file records this path, and on restore Firecracker
+   *  expects the same path to still exist. Using `/tmp/cambium-fc-
+   *  XXX/rootfs.ext4` at template-build time and then cleaning up
+   *  the tempdir in the finally-block would leave every subsequent
+   *  warm restore trying to open a nonexistent drive. */
+  rootfsFile: string;
+  /** Exclusive-access lockfile path. Both `executeColdAndSave` and
+   *  `executeWarm` acquire this before doing anything to the cache
+   *  entry. Serializes per-cache-entry access so concurrent callers
+   *  don't race on writing `rootfsFile` (which is mounted writable
+   *  inside the guest; two parallel warm restores would otherwise
+   *  have their guest-side writes to `/tmp/script.js` stomp on each
+   *  other — a correctness-and-data-isolation issue, not just
+   *  quality). Contention is resolved by the non-holder falling
+   *  back to cold-only rather than blocking. */
+  lockFile: string;
   cacheKey: string;
 }
 
@@ -206,8 +235,75 @@ export async function handleFor(
     dir,
     memFile: join(dir, 'mem.img'),
     snapshotFile: join(dir, 'snapshot.bin'),
+    rootfsFile: join(dir, 'rootfs.ext4'),
+    lockFile: join(dir, '.lock'),
     cacheKey,
   };
+}
+
+/**
+ * Validate an operator-supplied cache root (env var) before using
+ * it as the parent of per-cache-entry subdirectories. Returns the
+ * canonicalized absolute path, or an error message suitable for
+ * surfacing from `available()`.
+ *
+ * The subsequent `join(cacheRoot, cacheKey)` would otherwise accept
+ * a relative `..`-bearing env value and land snapshot files (100+
+ * MB memory images) outside the intended tree. Path traversal via
+ * operator env isn't a direct exploit — it's a misconfiguration
+ * foot-gun — but the fix is one line, same pattern as `memory/keys`
+ * under RED-215.
+ */
+export function resolveCacheRoot(envValue: string | undefined): string | { error: string } {
+  if (!envValue) return defaultCacheRoot();
+  if (!isAbsolute(envValue)) {
+    return {
+      error: `${envValue} must be an absolute path. Snapshots persist across runs; a relative path would resolve differently depending on CWD.`,
+    };
+  }
+  if (envValue.includes('\0')) {
+    return { error: `contains null byte` };
+  }
+  const normalized = normalize(envValue);
+  if (normalized !== envValue) {
+    return {
+      error: `${envValue} is not normalized (contains "." or ".." segments). Supply the canonical path directly: ${normalized}`,
+    };
+  }
+  return normalized;
+}
+
+/**
+ * Exclusive lock on a cache entry. Uses `O_CREAT | O_EXCL` semantics
+ * so the check-and-acquire is atomic at the filesystem level. The
+ * holder writes its PID to the lockfile for diagnostic output; the
+ * non-holder gets a null and is expected to fall back to cold-only
+ * (no save) rather than wait — minimizes head-of-line blocking and
+ * keeps latency predictable.
+ */
+export function tryAcquireCacheLock(handle: SnapshotHandle): number | null {
+  // ensureCacheDir created the parent; lockfile goes alongside the
+  // snapshot files.
+  try {
+    const fd = openSync(
+      handle.lockFile,
+      // O_CREAT | O_EXCL | O_WRONLY — create new, fail if exists, writable.
+      fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY,
+      0o600,
+    );
+    writeSync(fd, Buffer.from(`${process.pid}\n`));
+    return fd;
+  } catch (e: any) {
+    if (e?.code === 'EEXIST') return null;
+    throw e;
+  }
+}
+
+/** Release a previously acquired cache lock. No-op if `fd` is null. */
+export function releaseCacheLock(handle: SnapshotHandle, fd: number | null): void {
+  if (fd === null) return;
+  try { closeSync(fd); } catch { /* ignore */ }
+  try { rmSync(handle.lockFile, { force: true }); } catch { /* ignore */ }
 }
 
 /** True iff the cache directory has both files present. */

@@ -143,8 +143,10 @@ export interface ExecResult {
      *  cache key is new AND the template-build disabled itself;
      *  `load_failed` fires on a /snapshot/load API failure;
      *  `shared_mem_unsupported` fires if the Firecracker version
-     *  doesn't expose the File backend. */
-    fallbackReason?: 'missing' | 'non_canonical_sizing' | 'load_failed' | 'shared_mem_unsupported';
+     *  doesn't expose the File backend; `build_locked` fires when
+     *  a concurrent caller holds the per-cache-entry lock — we
+     *  cold-boot this request rather than waiting for them. */
+    fallbackReason?: 'missing' | 'non_canonical_sizing' | 'load_failed' | 'shared_mem_unsupported' | 'build_locked';
     /** Content-addressed cache key for the `(rootfs, kernel, canonical)`
      *  tuple. Present on all three paths so the trace can be
      *  cross-referenced to the cache directory. */

@@ -84,11 +84,15 @@ import {
   CANONICAL_MACHINE_CONFIG,
   GUEST_CID,
   defaultCacheRoot,
+  ensureCacheDir,
   handleFor,
   isCanonicalSizing,
+  releaseCacheLock,
+  resolveCacheRoot,
   restoreFromSnapshot,
   saveTemplateInline,
   snapshotExists,
+  tryAcquireCacheLock,
   type FallbackReason,
   type SnapshotHandle,
 } from './firecracker-snapshot.js';
@@ -169,6 +173,16 @@ function checkAvailable(): string | null {
   if (!rootfs || !existsSync(rootfs)) {
     return `${ROOTFS_ENV}=${rootfs ?? ''} does not point to an existing rootfs.ext4 file. Set ${ROOTFS_ENV} to the RED-255 rootfs image (see firecracker-testbed/rootfs/).`;
   }
+  // Validate the snapshot cache root BEFORE a dispatch can try to
+  // join a traversal-bearing value into path.join. Operator env var;
+  // fail fast at availability time if misconfigured.
+  const snapshotDir = process.env[SNAPSHOT_DIR_ENV];
+  if (snapshotDir) {
+    const resolved = resolveCacheRoot(snapshotDir);
+    if (typeof resolved !== 'string') {
+      return `${SNAPSHOT_DIR_ENV}=${snapshotDir} is invalid: ${resolved.error}`;
+    }
+  }
   return null;
 }
 
@@ -201,7 +215,6 @@ export class FirecrackerSubstrate implements ExecSubstrate {
       );
     }
     const kernelPath = process.env[KERNEL_ENV]!;
-    const cacheRoot = process.env[SNAPSHOT_DIR_ENV] ?? defaultCacheRoot();
     const snapshotsDisabled = process.env[DISABLE_SNAPSHOTS_ENV] === '1';
 
     // Branch: warm-restore, cold-and-save, or cold-only.
@@ -213,6 +226,16 @@ export class FirecrackerSubstrate implements ExecSubstrate {
         snapshotFallbackReason: 'non_canonical_sizing',
       });
     }
+
+    // Cache root — validated at available() but re-resolved here
+    // (cheap) because we want the absolute, normalized form.
+    const cacheRootEnv = process.env[SNAPSHOT_DIR_ENV];
+    const cacheRootResult = cacheRootEnv ? resolveCacheRoot(cacheRootEnv) : defaultCacheRoot();
+    if (typeof cacheRootResult !== 'string') {
+      // Should have been caught at available() — defensive only.
+      return crashed(startedAt, `${SNAPSHOT_DIR_ENV} invalid: ${cacheRootResult.error}`);
+    }
+    const cacheRoot = cacheRootResult;
 
     let handle: SnapshotHandle;
     try {
@@ -299,11 +322,13 @@ async function coldBootToAccept(
   return { fc, sock, bootDeadline };
 }
 
-/** Drive the canonical cold-boot sequence for template creation.
- *  Same shape as coldBootToAccept but forces the canonical machine-
- *  config regardless of what the caller's ExecOpts asked for. */
-async function coldBootCanonicalToAccept(
+/** Cold-boot with the canonical machine-config, against a specific
+ *  rootfs path. Used by executeColdAndSave — the rootfs lives in the
+ *  cache directory (not ctx.stagedRootfs), because the snapshot file
+ *  bakes this exact path and warm restores later reopen it. */
+async function coldBootCanonical(
   kernelPath: string,
+  rootfsPath: string,
   ctx: RunContext,
 ): Promise<{ fc: ChildProcess; sock: BufferedSocketLike }> {
   const fc = spawnFirecracker(ctx.apiSock, ctx.log);
@@ -317,7 +342,7 @@ async function coldBootCanonicalToAccept(
   });
   await apiPutExpect204(ctx.apiSock, '/drives/rootfs', {
     drive_id: 'rootfs',
-    path_on_host: ctx.stagedRootfs,
+    path_on_host: rootfsPath,
     is_root_device: true,
     is_read_only: false,
   });
@@ -395,15 +420,34 @@ async function executeColdAndSave(
   handle: SnapshotHandle,
   startedAt: number,
 ): Promise<ExecResult> {
+  // Prepare the cache directory + acquire the exclusive lock before
+  // any VM work. If another caller is already building this template
+  // (or running a warm restore against it), fall back to pure cold-
+  // boot rather than racing.
+  ensureCacheDir(handle);
+  const lockFd = tryAcquireCacheLock(handle);
+  if (lockFd === null) {
+    return executeCold(opts, rootfsPath, kernelPath, startedAt, {
+      snapshotFallbackReason: 'build_locked',
+      cacheKey: handle.cacheKey,
+    });
+  }
+
   const ctx = makeRunContext();
   let fc: ChildProcess | null = null;
   let sock: BufferedSocketLike | null = null;
   try {
-    copyFileSync(rootfsPath, ctx.stagedRootfs);
+    // Stage the rootfs in the CACHE DIRECTORY (not the per-call
+    // tempdir). Firecracker bakes the drive path into the snapshot
+    // file; warm restores later open the same path. If we staged to
+    // the tempdir, cleanup would delete it and every subsequent
+    // warm restore would fail with a drive-open error.
+    copyFileSync(rootfsPath, handle.rootfsFile);
+
     // Canonical boot — we're also saving a template, so we must
     // match what the cache is keyed on even if the caller's opts
     // were equivalent after normalization.
-    const booted = await coldBootCanonicalToAccept(kernelPath, ctx);
+    const booted = await coldBootCanonical(kernelPath, handle.rootfsFile, ctx);
     fc = booted.fc;
     sock = booted.sock;
 
@@ -411,11 +455,15 @@ async function executeColdAndSave(
     // the template state to be "agent in accept()", not "agent
     // handling a request." The agent's handle_one() reads one frame
     // header; a half-closed stream resolves to EOF on its end and
-    // the agent loops back to accept. Dropping `sock` triggers that.
+    // the agent loops back to accept(). Dropping `sock` triggers that.
     try { sock.destroy(); } catch { /* ignore */ }
     sock = null;
-    // Brief settle window so the agent has time to return from the
-    // handle_one error path and reach accept() before we snapshot.
+    // Brief settle window before snapshotting. The RED-256 spike
+    // measured ~3 ms p95 guest accept-wake; 250 ms is ~80× that, far
+    // above any observed noise under normal host load. If this
+    // becomes flaky under real load, replace with a probe-based
+    // detection: dial + CONNECT + close to confirm accept() is ready,
+    // then snapshot.
     await new Promise((r) => setTimeout(r, 250));
 
     let createMs: number;
@@ -423,8 +471,7 @@ async function executeColdAndSave(
       createMs = await saveTemplateInline(ctx.apiSock, handle);
     } catch (e: any) {
       // Snapshot save failed; degrade to pure cold-boot for this
-      // request. We've already torn down the dial; re-dial to run
-      // the ExecRequest.
+      // request. Re-dial on the live VM to run the ExecRequest.
       const redial = await dialAndHandshake(
         ctx.vsockUds,
         VSOCK_GUEST_PORT,
@@ -460,6 +507,7 @@ async function executeColdAndSave(
     return crashedWithLog(startedAt, ctx, e);
   } finally {
     cleanupRunContext(ctx, fc, sock);
+    releaseCacheLock(handle, lockFd);
   }
 }
 
@@ -470,20 +518,31 @@ async function executeWarm(
   handle: SnapshotHandle,
   startedAt: number,
 ): Promise<ExecResult> {
+  // Acquire the exclusive lock before touching the cache entry.
+  // Two parallel warm restores of the same cache key would both
+  // write to the same `handle.rootfsFile` inside the guest (the
+  // agent writes `/tmp/script.js`, which lands on the virtio-blk
+  // drive) — that's a data-integrity hazard (guest A reads guest
+  // B's script). Serializing per-cache-entry eliminates that;
+  // different cache keys still run in parallel unaffected.
+  const lockFd = tryAcquireCacheLock(handle);
+  if (lockFd === null) {
+    return executeCold(opts, rootfsPath, kernelPath, startedAt, {
+      snapshotFallbackReason: 'build_locked',
+      cacheKey: handle.cacheKey,
+    });
+  }
+
+  // Warm restores do NOT stage a per-call rootfs copy. The drive
+  // path baked into the snapshot file is `handle.rootfsFile`, which
+  // lives in the cache directory and persists across calls.
+  // Firecracker opens that path on restore. (The per-call workdir
+  // still holds the API socket and vsock UDS so those stay
+  // per-call-unique.)
   const ctx = makeRunContext();
   let fc: ChildProcess | null = null;
   let sock: BufferedSocketLike | null = null;
   try {
-    // Stage the rootfs even on the warm path — Firecracker's
-    // restore reads the drive from whatever path is baked into the
-    // snapshot, but v1.5 keeps the rootfs staged at the workdir for
-    // uniformity with cold-boot. Firecracker tolerates this because
-    // the restored drive config uses an absolute path (the staged
-    // path at template-build time); as long as the content is
-    // identical it's fine. TODO: revisit if staging becomes a hot
-    // path — we're paying a ~100ms copy on every warm call.
-    copyFileSync(rootfsPath, ctx.stagedRootfs);
-
     let restored;
     try {
       restored = await restoreFromSnapshot(handle, ctx.apiSock, ctx.vsockUds, ctx.log);
@@ -491,11 +550,13 @@ async function executeWarm(
       // Snapshot load failed. Fall through to cold-boot. The
       // snapshot ISN'T invalidated — could be a transient API
       // error; the next call with identical inputs will try again.
-      const fallback = await executeCold(opts, rootfsPath, kernelPath, startedAt, {
+      // Cold-only doesn't interact with the cache, so holding the
+      // lock through the fallback is safe (and keeps the lock
+      // state simple — one release in the finally, always).
+      return executeCold(opts, rootfsPath, kernelPath, startedAt, {
         snapshotFallbackReason: 'load_failed',
         cacheKey: handle.cacheKey,
       });
-      return fallback;
     }
     fc = restored.fc;
     sock = restored.sock;
@@ -511,6 +572,9 @@ async function executeWarm(
     return crashedWithLog(startedAt, ctx, e);
   } finally {
     cleanupRunContext(ctx, fc, sock);
+    // releaseCacheLock is a no-op if already released (load-failed
+    // path above); safe to call unconditionally.
+    releaseCacheLock(handle, lockFd);
   }
 }
 
