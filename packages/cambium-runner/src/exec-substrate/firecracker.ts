@@ -1,52 +1,66 @@
 /**
- * `:firecracker` substrate — microVM isolation (RED-251).
+ * `:firecracker` substrate — microVM isolation (RED-251 / RED-256).
  *
- * Ports the tested host-side sequence from `firecracker-testbed/smoke.sh`
- * + `fc_vsock_probe.py` into the runner. One microVM per call (per-call
- * cold-start for v1; snapshot/restore is RED-256).
+ * Three dispatch paths, all ending in the same vsock ExecRequest /
+ * ExecResponse exchange with the RED-255 guest agent:
  *
- * Flow per `execute()`:
- *
- *   1. Spawn `firecracker --api-sock /tmp/fc-<id>.sock`.
- *   2. Drive the API in sequence:
- *        PUT /machine-config    (vcpu + RAM from ExecOpts)
- *        PUT /boot-source       (vmlinux + cmdline, `init=cambium-agent`)
- *        PUT /drives/rootfs     (RED-255 rootfs, path from env)
- *        PUT /vsock             (parent UDS path + guest CID 3)
- *        PUT /actions           (InstanceStart)
- *   3. Dial the vsock parent UDS, negotiate `CONNECT 52717\n`.
- *   4. Frame-write one ExecRequest (matches the agent's
- *      `crates/cambium-agent/src/protocol.rs`).
- *   5. Frame-read one ExecResponse.
- *   6. Kill the firecracker process + clean up sockets + temp rootfs.
+ *   1. Warm-restore  — cache hit, restore from memfile+snapshot,
+ *                      resume, dial, round-trip, destroy.
+ *   2. Cold-and-save — cache miss under canonical sizing: full
+ *                      cold-boot + pause + snapshot + resume +
+ *                      round-trip, so the next call hits the cache.
+ *   3. Cold-only     — non-canonical sizing, snapshot disabled, or
+ *                      any snapshot-path failure: full cold-boot
+ *                      + round-trip, no snapshot interaction.
  *
  * Kernel + rootfs paths are operator-level config (not per-gen), read
  * from env:
  *
- *   CAMBIUM_FC_KERNEL  — path to vmlinux
- *   CAMBIUM_FC_ROOTFS  — path to rootfs.ext4 (the RED-255 image)
+ *   CAMBIUM_FC_KERNEL   path to vmlinux
+ *   CAMBIUM_FC_ROOTFS   path to rootfs.ext4 (the RED-255 image)
  *
- * `available()` returns null only when Linux + KVM + firecracker binary
- * + both env vars are all present.
+ * Optional:
  *
- * v1 scope (deliberately narrow, matching what the testbed proves):
+ *   CAMBIUM_FC_SNAPSHOT_DIR   override cache root (default: a `var/
+ *                             snapshots/` directory next to the
+ *                             runner's source tree)
+ *   CAMBIUM_FC_DISABLE_SNAPSHOTS=1   force cold-only path (escape
+ *                                    hatch for debugging or hosts
+ *                                    where the shared-mmap backend
+ *                                    isn't working)
  *
- *   - `network: 'none'` only. An allowlist errors with a pointer to
- *     the follow-up ticket. Same for a non-'none' filesystem.
- *   - No snapshot/restore. Every call is cold-boot.
- *   - No bind-mount drives. The agent only sees the rootfs.
+ * `available()` returns null only when Linux + KVM + firecracker
+ * binary + both kernel/rootfs env vars are all present.
  *
- * Those v1.x extensions are separate tickets — the scope of this file
- * is "make the testbed's green round-trip runnable from TS."
+ * v1 policy scope (deliberately narrow, matching what the testbed
+ * proves):
+ *
+ *   - `network: 'none'` only. An allowlist errors with a pointer
+ *     to the RED-259 follow-up.
+ *   - `filesystem: 'none'` only. Allowlist_paths errors with a
+ *     pointer to the RED-258 follow-up.
+ *
+ * Snapshot design decisions come from RED-256 and are implemented
+ * in `firecracker-snapshot.ts`:
+ *
+ *   - Shared-mmap (`File` backend) restore, not per-call ext4 copy.
+ *   - One canonical machine-config (1 vCPU, 512 MiB); non-canonical
+ *     cold-boots and records `non_canonical_sizing` in the trace.
+ *   - Workspace-local cache keyed by SHA-256 of (rootfs, kernel,
+ *     canonical machine-config). In-process digest cache on
+ *     (path, size, mtime).
+ *   - First-miss snapshot save is inline; no background warmer.
+ *
+ * The RED-256 snapshot-spike (100 iterations on the MS-R1) measured
+ * p95 3.4 ms from `PATCH /vm Resumed` to the first dial completing
+ * the CONNECT handshake — direct-dial is viable, no retry needed.
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
-import { accessSync, constants, copyFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
-import { request } from 'node:http';
+import { accessSync, constants, copyFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { delimiter } from 'node:path';
+import type { ChildProcess } from 'node:child_process';
 import type { ExecSubstrate, ExecOpts, ExecResult } from './types.js';
 import type { NetworkPolicy } from '../tools/permissions.js';
 import {
@@ -56,18 +70,43 @@ import {
   readFrame,
   type BufferedSocketLike,
 } from './firecracker-protocol.js';
+import {
+  apiPatchExpect204,
+  apiPutExpect204,
+  makeLogAccumulator,
+  killFirecracker,
+  spawnFirecracker,
+  waitForApiSocket,
+  FC_BINARY,
+  type LogAccumulator,
+} from './firecracker-api.js';
+import {
+  AGENT_INIT_PATH,
+  CANONICAL_MACHINE_CONFIG,
+  GUEST_CID,
+  createSnapshot,
+  defaultCacheRoot,
+  ensureCacheDir,
+  handleFor,
+  isCanonicalSizing,
+  releaseCacheLock,
+  resolveCacheRoot,
+  restoreFromSnapshot,
+  snapshotExists,
+  tryAcquireCacheLock,
+  type FallbackReason,
+  type SnapshotHandle,
+} from './firecracker-snapshot.js';
 
-const FC_BINARY = 'firecracker';
-const GUEST_CID = 3;
-const AGENT_INIT_PATH = '/usr/local/bin/cambium-agent';
 const KERNEL_ENV = 'CAMBIUM_FC_KERNEL';
 const ROOTFS_ENV = 'CAMBIUM_FC_ROOTFS';
+const SNAPSHOT_DIR_ENV = 'CAMBIUM_FC_SNAPSHOT_DIR';
+const DISABLE_SNAPSHOTS_ENV = 'CAMBIUM_FC_DISABLE_SNAPSHOTS';
 
 /**
- * Shape the agent returns over vsock. Matches `ExecResponse` in
- * `crates/cambium-agent/src/protocol.rs`. Narrowing lives here (rather
- * than a shared type file) because it's the Firecracker substrate's
- * private protocol contract.
+ * Agent-side ExecResponse shape (matches `crates/cambium-agent/src/
+ * protocol.rs`). Private to the substrate — agent wire format is
+ * the substrate's contract, not a cross-module type.
  */
 interface AgentResponse {
   status: 'completed' | 'timeout' | 'oom' | 'egress_denied' | 'crashed';
@@ -81,11 +120,7 @@ interface AgentResponse {
 }
 
 const AGENT_STATUS_VALUES = [
-  'completed',
-  'timeout',
-  'oom',
-  'egress_denied',
-  'crashed',
+  'completed', 'timeout', 'oom', 'egress_denied', 'crashed',
 ] as const;
 
 function isAgentResponse(v: unknown): v is AgentResponse {
@@ -105,21 +140,16 @@ function truncate(s: string, maxBytes: number): { text: string; truncated: boole
   return { text: `${slice}\n[truncated at ${maxBytes} bytes]`, truncated: true };
 }
 
-/**
- * Whether `firecracker` is on PATH. Does a lexical search rather than
- * spawning, so `available()` stays synchronous and side-effect-free.
- */
+/** Lexical search for `firecracker` on $PATH. Kept synchronous +
+ *  side-effect-free so `available()` stays that way. */
 function firecrackerOnPath(): boolean {
   const path = process.env.PATH ?? '';
   for (const dir of path.split(delimiter)) {
     if (!dir) continue;
     try {
-      const candidate = join(dir, FC_BINARY);
-      accessSync(candidate, constants.X_OK);
+      accessSync(join(dir, FC_BINARY), constants.X_OK);
       return true;
-    } catch {
-      /* next */
-    }
+    } catch { /* next */ }
   }
   return false;
 }
@@ -144,6 +174,16 @@ function checkAvailable(): string | null {
   if (!rootfs || !existsSync(rootfs)) {
     return `${ROOTFS_ENV}=${rootfs ?? ''} does not point to an existing rootfs.ext4 file. Set ${ROOTFS_ENV} to the RED-255 rootfs image (see firecracker-testbed/rootfs/).`;
   }
+  // Validate the snapshot cache root BEFORE a dispatch can try to
+  // join a traversal-bearing value into path.join. Operator env var;
+  // fail fast at availability time if misconfigured.
+  const snapshotDir = process.env[SNAPSHOT_DIR_ENV];
+  if (snapshotDir) {
+    const resolved = resolveCacheRoot(snapshotDir);
+    if (typeof resolved !== 'string') {
+      return `${SNAPSHOT_DIR_ENV}=${snapshotDir} is invalid: ${resolved.error}`;
+    }
+  }
   return null;
 }
 
@@ -159,182 +199,442 @@ export class FirecrackerSubstrate implements ExecSubstrate {
   async execute(opts: ExecOpts): Promise<ExecResult> {
     const startedAt = Date.now();
 
-    // Policy scope checks — v1 is vsock-only, rootfs-only.
     const scopeError = checkScope(opts);
-    if (scopeError) {
-      return {
-        status: 'crashed',
-        stdout: '',
-        stderr: '',
-        truncated: { stdout: false, stderr: false },
-        durationMs: 0,
-        reason: scopeError,
-      };
-    }
+    if (scopeError) return crashed(startedAt, scopeError);
 
     const reason = this.available();
-    if (reason !== null) {
-      return {
-        status: 'crashed',
-        stdout: '',
-        stderr: '',
-        truncated: { stdout: false, stderr: false },
-        durationMs: 0,
-        reason,
-      };
-    }
+    if (reason !== null) return crashed(startedAt, reason);
 
-    const workDir = mkdtempSync(join(tmpdir(), 'cambium-fc-'));
-    const runId = randomBytes(4).toString('hex');
-    const apiSock = join(workDir, `fc-${runId}.api.sock`);
-    const vsockUds = join(workDir, `fc-${runId}.vsock.sock`);
-    const stagedRootfs = join(workDir, 'rootfs.ext4');
-
-    let fc: ChildProcess | null = null;
-    let vsockSock: BufferedSocketLike | null = null;
-    const fcLog: Buffer[] = [];
-    // Bound the firecracker-log accumulator so a misbehaving or
-    // compromised firecracker binary emitting gigabytes of log output
-    // can't OOM the Node process. 1 MB is far above the ~60 kB real
-    // Firecracker emits even on a full boot; once hit, later chunks
-    // are dropped silently (the error path already tails the last 30
-    // lines, which will have the most useful tail if we ever get
-    // anywhere near the cap).
-    const FC_LOG_MAX_BYTES = 1_000_000;
-    let fcLogBytes = 0;
-    const appendLog = (c: Buffer) => {
-      if (fcLogBytes >= FC_LOG_MAX_BYTES) return;
-      fcLogBytes += c.length;
-      fcLog.push(c);
-    };
-
-    try {
-      // Re-check the rootfs file exists and is readable NOW, not at
-      // `available()` time. available() caches its result at runner
-      // startup; a rootfs that was present then but has since been
-      // removed or made unreadable would otherwise surface as a raw
-      // copyFileSync exception rather than a clean crashed result.
-      const rootfsPath = process.env[ROOTFS_ENV];
-      if (!rootfsPath || !existsSync(rootfsPath)) {
-        return crashed(
-          startedAt,
-          `${ROOTFS_ENV}=${rootfsPath ?? ''} does not point to an existing rootfs.ext4 file at dispatch time (was valid at startup, changed since).`,
-        );
-      }
-      // Stage the rootfs in the workdir so the guest can write to it
-      // without dirtying the source artifact. Same reasoning as smoke.sh.
-      // Inside try/finally so a copy failure still cleans up workDir.
-      copyFileSync(rootfsPath, stagedRootfs);
-
-      fc = spawn(FC_BINARY, ['--api-sock', apiSock], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      fc.stdout?.on('data', appendLog);
-      fc.stderr?.on('data', appendLog);
-
-      await waitForSocket(apiSock, 5_000);
-      // Wall-clock budget for everything from now until response
-      // read. Gives boot + vsock-listen setup up to 20s, plus the
-      // user's requested interpreter timeout.
-      const bootDeadline = Date.now() + 20_000;
-      const responseDeadline = Date.now() + 20_000 + opts.timeout * 1000 + 5_000;
-
-      await apiPutExpect204(apiSock, '/machine-config', {
-        vcpu_count: Math.max(1, Math.round(opts.cpu)),
-        mem_size_mib: Math.max(16, Math.round(opts.memory)),
-      });
-      await apiPutExpect204(apiSock, '/boot-source', {
-        kernel_image_path: process.env[KERNEL_ENV],
-        boot_args: `console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=${AGENT_INIT_PATH}`,
-      });
-      await apiPutExpect204(apiSock, '/drives/rootfs', {
-        drive_id: 'rootfs',
-        path_on_host: stagedRootfs,
-        is_root_device: true,
-        is_read_only: false,
-      });
-      await apiPutExpect204(apiSock, '/vsock', {
-        vsock_id: 'vsock0',
-        guest_cid: GUEST_CID,
-        uds_path: vsockUds,
-      });
-      await apiPutExpect204(apiSock, '/actions', {
-        action_type: 'InstanceStart',
-      });
-
-      const { sock } = await dialAndHandshake(
-        vsockUds,
-        VSOCK_GUEST_PORT,
-        bootDeadline,
-      );
-      vsockSock = sock;
-
-      writeFrame(vsockSock, {
-        language: opts.language,
-        code: opts.code,
-        cpu: opts.cpu,
-        memory_mb: Math.max(16, Math.round(opts.memory)),
-        timeout_seconds: Math.max(1, Math.round(opts.timeout)),
-        max_output_bytes: opts.maxOutputBytes,
-      });
-
-      const readTimeoutMs = Math.max(1_000, responseDeadline - Date.now());
-      const raw = await readFrame(vsockSock, readTimeoutMs);
-      if (!isAgentResponse(raw)) {
-        return crashed(
-          startedAt,
-          `agent returned unexpected shape: ${JSON.stringify(raw).slice(0, 200)}`,
-        );
-      }
-      return translateResponse(raw, opts, startedAt);
-    } catch (e: any) {
+    // Re-validate rootfs at dispatch time — available() caches at
+    // startup, so a rootfs removed since then would otherwise
+    // surface as a copyFileSync exception mid-try.
+    const rootfsPath = process.env[ROOTFS_ENV];
+    if (!rootfsPath || !existsSync(rootfsPath)) {
       return crashed(
         startedAt,
-        `${e?.message ?? String(e)}${
-          fcLog.length
-            ? `\n--- firecracker log tail ---\n${Buffer.concat(fcLog)
-                .toString('utf8')
-                .split('\n')
-                .slice(-30)
-                .join('\n')}`
-            : ''
-        }`,
+        `${ROOTFS_ENV}=${rootfsPath ?? ''} does not point to an existing rootfs.ext4 file at dispatch time (was valid at startup, changed since).`,
       );
-    } finally {
-      try { vsockSock?.destroy(); } catch {}
-      if (fc && fc.exitCode === null) {
-        try { fc.kill('SIGKILL'); } catch {}
-      }
-      try { rmSync(workDir, { recursive: true, force: true }); } catch {}
     }
+    const kernelPath = process.env[KERNEL_ENV]!;
+    const snapshotsDisabled = process.env[DISABLE_SNAPSHOTS_ENV] === '1';
+
+    // Branch: warm-restore, cold-and-save, or cold-only.
+    if (snapshotsDisabled) {
+      return executeCold(opts, rootfsPath, kernelPath, startedAt);
+    }
+    if (!isCanonicalSizing(opts)) {
+      return executeCold(opts, rootfsPath, kernelPath, startedAt, {
+        snapshotFallbackReason: 'non_canonical_sizing',
+      });
+    }
+
+    // Cache root — validated at available() but re-resolved here
+    // (cheap) because we want the absolute, normalized form.
+    const cacheRootEnv = process.env[SNAPSHOT_DIR_ENV];
+    const cacheRootResult = cacheRootEnv ? resolveCacheRoot(cacheRootEnv) : defaultCacheRoot();
+    if (typeof cacheRootResult !== 'string') {
+      // Should have been caught at available() — defensive only.
+      return crashed(startedAt, `${SNAPSHOT_DIR_ENV} invalid: ${cacheRootResult.error}`);
+    }
+    const cacheRoot = cacheRootResult;
+
+    let handle: SnapshotHandle;
+    try {
+      handle = await handleFor(rootfsPath, kernelPath, cacheRoot);
+    } catch (e: any) {
+      // Hash failure (e.g. rootfs unreadable between existsSync and
+      // read). Fall back to cold without trying to snapshot.
+      return executeCold(opts, rootfsPath, kernelPath, startedAt, {
+        snapshotFallbackReason: 'load_failed',
+      });
+    }
+
+    if (snapshotExists(handle)) {
+      return executeWarm(opts, rootfsPath, kernelPath, handle, startedAt);
+    }
+    return executeColdAndSave(opts, rootfsPath, kernelPath, handle, startedAt);
   }
 }
 
-/** v1 scope gate. Returns null on allowed shapes, error message on any
- *  currently-unsupported combo. Network/filesystem allowlists are
- *  tracked as follow-ups; they fail closed here rather than silently
- *  downgrading. */
+// ── Shared dispatch pieces ──────────────────────────────────────────
+
+interface RunContext {
+  workDir: string;
+  apiSock: string;
+  vsockUds: string;
+  stagedRootfs: string;
+  log: LogAccumulator;
+  runId: string;
+}
+
+function makeRunContext(): RunContext {
+  const workDir = mkdtempSync(join(tmpdir(), 'cambium-fc-'));
+  const runId = randomBytes(4).toString('hex');
+  return {
+    workDir,
+    apiSock: join(workDir, `fc-${runId}.api.sock`),
+    vsockUds: join(workDir, `fc-${runId}.vsock.sock`),
+    stagedRootfs: join(workDir, 'rootfs.ext4'),
+    log: makeLogAccumulator(),
+    runId,
+  };
+}
+
+function cleanupRunContext(ctx: RunContext, fc: ChildProcess | null, sock: BufferedSocketLike | null): void {
+  try { sock?.destroy(); } catch { /* ignore */ }
+  killFirecracker(fc);
+  try { rmSync(ctx.workDir, { recursive: true, force: true }); } catch { /* ignore */ }
+}
+
+/** Drive a fresh firecracker through the full cold-boot sequence,
+ *  ending with a dialed + handshaked vsock socket ready to carry
+ *  one ExecRequest. Used by both executeCold and executeColdAndSave. */
+async function coldBootToAccept(
+  opts: ExecOpts,
+  kernelPath: string,
+  ctx: RunContext,
+): Promise<{ fc: ChildProcess; sock: BufferedSocketLike; bootDeadline: number }> {
+  const fc = spawnFirecracker(ctx.apiSock, ctx.log);
+  await waitForApiSocket(ctx.apiSock, 5_000);
+  const bootDeadline = Date.now() + 20_000;
+
+  await apiPutExpect204(ctx.apiSock, '/machine-config', {
+    vcpu_count: Math.max(1, Math.round(opts.cpu)),
+    mem_size_mib: Math.max(16, Math.round(opts.memory)),
+  });
+  await apiPutExpect204(ctx.apiSock, '/boot-source', {
+    kernel_image_path: kernelPath,
+    boot_args: `console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=${AGENT_INIT_PATH}`,
+  });
+  await apiPutExpect204(ctx.apiSock, '/drives/rootfs', {
+    drive_id: 'rootfs',
+    path_on_host: ctx.stagedRootfs,
+    is_root_device: true,
+    is_read_only: false,
+  });
+  await apiPutExpect204(ctx.apiSock, '/vsock', {
+    vsock_id: 'vsock0',
+    guest_cid: GUEST_CID,
+    uds_path: ctx.vsockUds,
+  });
+  await apiPutExpect204(ctx.apiSock, '/actions', { action_type: 'InstanceStart' });
+
+  const { sock } = await dialAndHandshake(ctx.vsockUds, VSOCK_GUEST_PORT, bootDeadline);
+  return { fc, sock, bootDeadline };
+}
+
+/** Cold-boot with the canonical machine-config, against specific
+ *  rootfs + vsock-UDS paths. Used by executeColdAndSave — both paths
+ *  live in the cache directory (not a per-call tempdir), because
+ *  the snapshot file bakes both of them and warm restores later
+ *  reopen them. Using tempdir paths here would leave warm restores
+ *  trying to bind a UDS whose parent directory was deleted in
+ *  cleanup. */
+async function coldBootCanonical(
+  kernelPath: string,
+  rootfsPath: string,
+  vsockUdsPath: string,
+  ctx: RunContext,
+): Promise<{ fc: ChildProcess; sock: BufferedSocketLike }> {
+  const fc = spawnFirecracker(ctx.apiSock, ctx.log);
+  await waitForApiSocket(ctx.apiSock, 5_000);
+  const bootDeadline = Date.now() + 20_000;
+
+  await apiPutExpect204(ctx.apiSock, '/machine-config', CANONICAL_MACHINE_CONFIG);
+  await apiPutExpect204(ctx.apiSock, '/boot-source', {
+    kernel_image_path: kernelPath,
+    boot_args: `console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=${AGENT_INIT_PATH}`,
+  });
+  await apiPutExpect204(ctx.apiSock, '/drives/rootfs', {
+    drive_id: 'rootfs',
+    path_on_host: rootfsPath,
+    is_root_device: true,
+    is_read_only: false,
+  });
+  await apiPutExpect204(ctx.apiSock, '/vsock', {
+    vsock_id: 'vsock0',
+    guest_cid: GUEST_CID,
+    uds_path: vsockUdsPath,
+  });
+  await apiPutExpect204(ctx.apiSock, '/actions', { action_type: 'InstanceStart' });
+
+  const { sock } = await dialAndHandshake(vsockUdsPath, VSOCK_GUEST_PORT, bootDeadline);
+  return { fc, sock };
+}
+
+/** Send ExecRequest over an already-handshaked socket and read
+ *  ExecResponse. Shared by all three dispatch paths. */
+async function runExecAgainst(
+  opts: ExecOpts,
+  sock: BufferedSocketLike,
+  responseDeadline: number,
+  startedAt: number,
+): Promise<ExecResult> {
+  writeFrame(sock, {
+    language: opts.language,
+    code: opts.code,
+    cpu: opts.cpu,
+    memory_mb: Math.max(16, Math.round(opts.memory)),
+    timeout_seconds: Math.max(1, Math.round(opts.timeout)),
+    max_output_bytes: opts.maxOutputBytes,
+  });
+  const readTimeoutMs = Math.max(1_000, responseDeadline - Date.now());
+  const raw = await readFrame(sock, readTimeoutMs);
+  if (!isAgentResponse(raw)) {
+    return crashed(
+      startedAt,
+      `agent returned unexpected shape: ${JSON.stringify(raw).slice(0, 200)}`,
+    );
+  }
+  return translateResponse(raw, opts, startedAt);
+}
+
+// ── The three paths ──────────────────────────────────────────────────
+
+async function executeCold(
+  opts: ExecOpts,
+  rootfsPath: string,
+  kernelPath: string,
+  startedAt: number,
+  meta: { snapshotFallbackReason?: FallbackReason; cacheKey?: string } = {},
+): Promise<ExecResult> {
+  const ctx = makeRunContext();
+  let fc: ChildProcess | null = null;
+  let sock: BufferedSocketLike | null = null;
+  try {
+    copyFileSync(rootfsPath, ctx.stagedRootfs);
+    const booted = await coldBootToAccept(opts, kernelPath, ctx);
+    fc = booted.fc;
+    sock = booted.sock;
+    const responseDeadline = Date.now() + opts.timeout * 1000 + 5_000;
+    const result = await runExecAgainst(opts, sock, responseDeadline, startedAt);
+    return withSnapshotMeta(result, meta.snapshotFallbackReason
+      ? { path: 'cold_boot_fallback', fallbackReason: meta.snapshotFallbackReason, cacheKey: meta.cacheKey }
+      : undefined);
+  } catch (e: any) {
+    return crashedWithLog(startedAt, ctx, e);
+  } finally {
+    cleanupRunContext(ctx, fc, sock);
+  }
+}
+
+async function executeColdAndSave(
+  opts: ExecOpts,
+  rootfsPath: string,
+  kernelPath: string,
+  handle: SnapshotHandle,
+  startedAt: number,
+): Promise<ExecResult> {
+  // Prepare the cache directory + acquire the exclusive lock before
+  // any VM work. If another caller is already building this template
+  // (or running a warm restore against it), fall back to pure cold-
+  // boot rather than racing.
+  ensureCacheDir(handle);
+  const lockFd = tryAcquireCacheLock(handle);
+  if (lockFd === null) {
+    return executeCold(opts, rootfsPath, kernelPath, startedAt, {
+      snapshotFallbackReason: 'build_locked',
+      cacheKey: handle.cacheKey,
+    });
+  }
+
+  // Outer try/finally ensures the lock is ALWAYS released — even
+  // when phase 1 returns early on snapshot-save failure, even when
+  // phase 1's crashedWithLog catch fires, even when anything in
+  // phase 2 throws. `tryAcquireCacheLock` uses O_CREAT | O_EXCL
+  // (a real filesystem lockfile, not an OS-level advisory lock
+  // that auto-releases on fd close), so a leak here would leave
+  // the cache entry permanently locked — all future calls would
+  // fall through to cold-only with `build_locked` until an
+  // operator manually removed the lockfile. Flagged by
+  // cambium-security's post-R1 follow-up review.
+  try {
+    // Phase 1: cold-boot the TEMPLATE VM, verify agent, snapshot,
+    // destroy. The template VM exists only to produce the snapshot;
+    // we don't run the user's ExecRequest against it. Attempting to
+    // reuse the same VM after snapshot + resume doesn't reliably
+    // re-dial (observed on R1 as 12s timeouts even though the
+    // snapshot saved cleanly). Destroying the template + restoring
+    // in a fresh FC matches what `executeWarm` does, and warm works,
+    // so both paths route the user request through the same
+    // restoreFromSnapshot code.
+    const templateCtx = makeRunContext();
+    let templateFc: ChildProcess | null = null;
+    let templateSock: BufferedSocketLike | null = null;
+    let createMs = 0;
+    let phase1Degraded = false;
+    try {
+      copyFileSync(rootfsPath, handle.rootfsFile);
+      try { rmSync(handle.vsockUdsFile, { force: true }); } catch { /* ignore */ }
+
+      const booted = await coldBootCanonical(
+        kernelPath,
+        handle.rootfsFile,
+        handle.vsockUdsFile,
+        templateCtx,
+      );
+      templateFc = booted.fc;
+      templateSock = booted.sock;
+
+      try { templateSock.destroy(); } catch { /* ignore */ }
+      templateSock = null;
+      // Settle window — RED-256 spike measured ~3ms p95 for guest
+      // accept() to wake on dial; 250ms is 80× that. Replace with
+      // probe-based detection if flaky under real host load.
+      await new Promise((r) => setTimeout(r, 250));
+
+      const t0 = Date.now();
+      try {
+        await apiPatchExpect204(templateCtx.apiSock, '/vm', { state: 'Paused' });
+        await createSnapshot(templateCtx.apiSock, handle);
+        createMs = Date.now() - t0;
+      } catch (e: any) {
+        // Snapshot save failed. Degrade to pure cold-boot for the
+        // user's request. Mark the phase as degraded so phase 2
+        // skips the restore attempt.
+        phase1Degraded = true;
+      }
+    } catch (e: any) {
+      // Template boot / dial / pause / anything-else threw. Same
+      // degraded outcome — log the tail, skip phase 2, fall back
+      // to cold-only for the user's request.
+      const degraded = crashedWithLog(startedAt, templateCtx, e);
+      // If crashedWithLog had anything to say (firecracker log tail)
+      // it's on `degraded.reason`; we preserve by threading through
+      // executeCold below (which has its own error handling but
+      // won't see the template's log). For now, return the template
+      // crash directly — the user's request CAN'T run because we
+      // couldn't even boot the VM once.
+      return degraded;
+    } finally {
+      try { templateSock?.destroy(); } catch { /* ignore */ }
+      killFirecracker(templateFc);
+      try { rmSync(templateCtx.workDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+
+    if (phase1Degraded) {
+      return withSnapshotMeta(
+        await executeCold(opts, rootfsPath, kernelPath, startedAt),
+        { path: 'cold_boot_fallback', fallbackReason: 'load_failed', cacheKey: handle.cacheKey },
+      );
+    }
+
+    // Phase 2: restore from the just-saved snapshot + run the user
+    // ExecRequest. Same code path executeWarm uses — if that works,
+    // this works.
+    const ctx = makeRunContext();
+    let fc: ChildProcess | null = null;
+    let sock: BufferedSocketLike | null = null;
+    try {
+      let restored;
+      try {
+        restored = await restoreFromSnapshot(handle, ctx.apiSock, ctx.log);
+      } catch (e: any) {
+        return withSnapshotMeta(
+          await executeCold(opts, rootfsPath, kernelPath, startedAt),
+          { path: 'cold_boot_fallback', fallbackReason: 'load_failed', cacheKey: handle.cacheKey },
+        );
+      }
+      fc = restored.fc;
+      sock = restored.sock;
+
+      const responseDeadline = Date.now() + opts.timeout * 1000 + 5_000;
+      const result = await runExecAgainst(opts, sock, responseDeadline, startedAt);
+      return withSnapshotMeta(result, {
+        path: 'cold_boot_and_save',
+        createMs,
+        cacheKey: handle.cacheKey,
+      });
+    } catch (e: any) {
+      return crashedWithLog(startedAt, ctx, e);
+    } finally {
+      cleanupRunContext(ctx, fc, sock);
+    }
+  } finally {
+    releaseCacheLock(handle, lockFd);
+  }
+}
+
+async function executeWarm(
+  opts: ExecOpts,
+  rootfsPath: string,
+  kernelPath: string,
+  handle: SnapshotHandle,
+  startedAt: number,
+): Promise<ExecResult> {
+  // Acquire the exclusive lock before touching the cache entry.
+  // Two parallel warm restores of the same cache key would both
+  // write to the same `handle.rootfsFile` inside the guest (the
+  // agent writes `/tmp/script.js`, which lands on the virtio-blk
+  // drive) — that's a data-integrity hazard (guest A reads guest
+  // B's script). Serializing per-cache-entry eliminates that;
+  // different cache keys still run in parallel unaffected.
+  const lockFd = tryAcquireCacheLock(handle);
+  if (lockFd === null) {
+    return executeCold(opts, rootfsPath, kernelPath, startedAt, {
+      snapshotFallbackReason: 'build_locked',
+      cacheKey: handle.cacheKey,
+    });
+  }
+
+  // Warm restores do NOT stage a per-call rootfs copy. The drive
+  // path baked into the snapshot file is `handle.rootfsFile`, which
+  // lives in the cache directory and persists across calls.
+  // Firecracker opens that path on restore. (The per-call workdir
+  // still holds the API socket and vsock UDS so those stay
+  // per-call-unique.)
+  const ctx = makeRunContext();
+  let fc: ChildProcess | null = null;
+  let sock: BufferedSocketLike | null = null;
+  try {
+    let restored;
+    try {
+      restored = await restoreFromSnapshot(handle, ctx.apiSock, ctx.log);
+    } catch (e: any) {
+      // Snapshot load failed. Fall through to cold-boot. The
+      // snapshot ISN'T invalidated — could be a transient API
+      // error; the next call with identical inputs will try again.
+      // Cold-only doesn't interact with the cache, so holding the
+      // lock through the fallback is safe (and keeps the lock
+      // state simple — one release in the finally, always).
+      return executeCold(opts, rootfsPath, kernelPath, startedAt, {
+        snapshotFallbackReason: 'load_failed',
+        cacheKey: handle.cacheKey,
+      });
+    }
+    fc = restored.fc;
+    sock = restored.sock;
+
+    const responseDeadline = Date.now() + opts.timeout * 1000 + 5_000;
+    const result = await runExecAgainst(opts, sock, responseDeadline, startedAt);
+    return withSnapshotMeta(result, {
+      path: 'warm_restore',
+      restoreMs: restored.restoreMs,
+      cacheKey: handle.cacheKey,
+    });
+  } catch (e: any) {
+    return crashedWithLog(startedAt, ctx, e);
+  } finally {
+    cleanupRunContext(ctx, fc, sock);
+    // releaseCacheLock is a no-op if already released (load-failed
+    // path above); safe to call unconditionally.
+    releaseCacheLock(handle, lockFd);
+  }
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────
+
 function checkScope(opts: ExecOpts): string | null {
   if (opts.network !== 'none') {
-    // NetworkPolicy with an allowlist isn't wired yet — netns + iptables
-    // rule generation is a separate piece. Error rather than silently
-    // ignoring so a gen with real requirements isn't lulled into false
-    // security.
     const np = opts.network as NetworkPolicy;
     return `:firecracker v1 supports network: 'none' only (got allowlist: ${
       np?.allowlist?.join(', ') ?? 'unknown'
-    }). Host-side netns + iptables resolution is a follow-up; for network access, use runtime: :native (unsandboxed) or file a ticket.`;
+    }). Host-side netns + iptables resolution is RED-259; for network access, use runtime: :native (unsandboxed) or file a ticket.`;
   }
   if (opts.filesystem !== 'none') {
-    // Optional-chain the allowlist_paths read: a malformed IR could
-    // send `filesystem: {}` or another shape without the field. Keep
-    // the error message clean rather than letting a TypeError leak
-    // through as a raw stack trace in the reason string. The gate
-    // still fails closed — anything other than the literal 'none'
-    // returns this error.
     const paths = (opts.filesystem as { allowlist_paths?: string[] })
       ?.allowlist_paths?.join(', ') ?? '(no allowlist_paths)';
-    return `:firecracker v1 supports filesystem: 'none' only (got allowlist_paths: ${paths}). Host-side bind-mount drive resolution is a follow-up; for filesystem access, use runtime: :native (unsandboxed) or file a ticket.`;
+    return `:firecracker v1 supports filesystem: 'none' only (got allowlist_paths: ${paths}). Host-side bind-mount drive resolution is RED-258; for filesystem access, use runtime: :native (unsandboxed) or file a ticket.`;
   }
   return null;
 }
@@ -350,14 +650,28 @@ function crashed(startedAt: number, reason: string): ExecResult {
   };
 }
 
+function crashedWithLog(startedAt: number, ctx: RunContext, e: any): ExecResult {
+  const base = e?.message ?? String(e);
+  const tail = ctx.log.tail(30);
+  const reason = tail
+    ? `${base}\n--- firecracker log tail ---\n${tail}`
+    : base;
+  return crashed(startedAt, reason);
+}
+
+function withSnapshotMeta(
+  result: ExecResult,
+  snapshot?: ExecResult['snapshot'],
+): ExecResult {
+  if (!snapshot) return result;
+  return { ...result, snapshot };
+}
+
 function translateResponse(
   resp: AgentResponse,
   opts: ExecOpts,
   startedAt: number,
 ): ExecResult {
-  // Truncate on the host side against opts.maxOutputBytes — the agent
-  // has its own per-stream cap but the host's cap is the source of
-  // truth at the substrate boundary (matches WASM/Native).
   const stdoutCap = truncate(resp.stdout, opts.maxOutputBytes);
   const stderrCap = truncate(resp.stderr, opts.maxOutputBytes);
   const truncated = {
@@ -405,59 +719,3 @@ function translateResponse(
       };
   }
 }
-
-/** Wait up to `timeoutMs` for the Firecracker API socket to appear. */
-async function waitForSocket(path: string, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (existsSync(path)) return;
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  throw new Error(`Firecracker API socket did not appear at ${path} within ${timeoutMs}ms`);
-}
-
-/** PUT `body` to the API socket; throw if the response isn't 204. */
-async function apiPutExpect204(
-  socketPath: string,
-  path: string,
-  body: unknown,
-): Promise<void> {
-  const bodyStr = JSON.stringify(body);
-  const { statusCode, responseBody } = await new Promise<{
-    statusCode: number;
-    responseBody: string;
-  }>((resolve, reject) => {
-    const req = request(
-      {
-        socketPath,
-        method: 'PUT',
-        path,
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          'Content-Length': Buffer.byteLength(bodyStr, 'utf8'),
-        },
-      },
-      (res) => {
-        const chunks: Buffer[] = [];
-        res.on('data', (c: Buffer) => chunks.push(c));
-        res.on('end', () =>
-          resolve({
-            statusCode: res.statusCode ?? 0,
-            responseBody: Buffer.concat(chunks).toString('utf8'),
-          }),
-        );
-        res.on('error', reject);
-      },
-    );
-    req.on('error', reject);
-    req.write(bodyStr);
-    req.end();
-  });
-  if (statusCode !== 204) {
-    throw new Error(
-      `Firecracker API PUT ${path} returned ${statusCode}: ${responseBody}`,
-    );
-  }
-}
-
