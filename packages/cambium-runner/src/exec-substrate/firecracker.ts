@@ -438,105 +438,119 @@ async function executeColdAndSave(
     });
   }
 
-  // Phase 1: cold-boot the TEMPLATE VM, verify agent, snapshot,
-  // destroy. The template VM exists only to produce the snapshot;
-  // we don't run the user's ExecRequest against it. This was
-  // attempted originally but the resume-after-snapshot path doesn't
-  // reliably re-dial — observed on R1 as 12s timeouts even though
-  // the snapshot saved cleanly. Destroying the template + restoring
-  // in a fresh FC matches what `executeWarm` does, and warm works,
-  // so both paths route the user request through the same
-  // restoreFromSnapshot code.
-  const templateCtx = makeRunContext();
-  let templateFc: ChildProcess | null = null;
-  let templateSock: BufferedSocketLike | null = null;
-  let createMs = 0;
+  // Outer try/finally ensures the lock is ALWAYS released — even
+  // when phase 1 returns early on snapshot-save failure, even when
+  // phase 1's crashedWithLog catch fires, even when anything in
+  // phase 2 throws. `tryAcquireCacheLock` uses O_CREAT | O_EXCL
+  // (a real filesystem lockfile, not an OS-level advisory lock
+  // that auto-releases on fd close), so a leak here would leave
+  // the cache entry permanently locked — all future calls would
+  // fall through to cold-only with `build_locked` until an
+  // operator manually removed the lockfile. Flagged by
+  // cambium-security's post-R1 follow-up review.
   try {
-    // Stage the rootfs + clear any stale vsock UDS — both paths
-    // live in the cache directory so the snapshot's baked paths
-    // remain valid across calls.
-    copyFileSync(rootfsPath, handle.rootfsFile);
-    try { rmSync(handle.vsockUdsFile, { force: true }); } catch { /* ignore */ }
-
-    // Canonical machine-config — we're keying the cache on this,
-    // regardless of what opts normalized to.
-    const booted = await coldBootCanonical(
-      kernelPath,
-      handle.rootfsFile,
-      handle.vsockUdsFile,
-      templateCtx,
-    );
-    templateFc = booted.fc;
-    templateSock = booted.sock;
-
-    // Close the bootstrap handshake so the agent loops back to
-    // accept() — we want the template state to be
-    // "agent-waiting-in-accept", not mid-handler.
-    try { templateSock.destroy(); } catch { /* ignore */ }
-    templateSock = null;
-    // Settle window — RED-256 spike measured ~3ms p95 for guest
-    // accept() to wake on dial; 250ms is 80× that, far above any
-    // observed noise. Replace with a probe-based detection if this
-    // turns out flaky under real host load.
-    await new Promise((r) => setTimeout(r, 250));
-
-    // Pause + snapshot. We don't resume — instead destroy the
-    // template, then restore into a fresh FC below.
-    const t0 = Date.now();
+    // Phase 1: cold-boot the TEMPLATE VM, verify agent, snapshot,
+    // destroy. The template VM exists only to produce the snapshot;
+    // we don't run the user's ExecRequest against it. Attempting to
+    // reuse the same VM after snapshot + resume doesn't reliably
+    // re-dial (observed on R1 as 12s timeouts even though the
+    // snapshot saved cleanly). Destroying the template + restoring
+    // in a fresh FC matches what `executeWarm` does, and warm works,
+    // so both paths route the user request through the same
+    // restoreFromSnapshot code.
+    const templateCtx = makeRunContext();
+    let templateFc: ChildProcess | null = null;
+    let templateSock: BufferedSocketLike | null = null;
+    let createMs = 0;
+    let phase1Degraded = false;
     try {
-      await apiPatchExpect204(templateCtx.apiSock, '/vm', { state: 'Paused' });
-      await createSnapshot(templateCtx.apiSock, handle);
-      createMs = Date.now() - t0;
+      copyFileSync(rootfsPath, handle.rootfsFile);
+      try { rmSync(handle.vsockUdsFile, { force: true }); } catch { /* ignore */ }
+
+      const booted = await coldBootCanonical(
+        kernelPath,
+        handle.rootfsFile,
+        handle.vsockUdsFile,
+        templateCtx,
+      );
+      templateFc = booted.fc;
+      templateSock = booted.sock;
+
+      try { templateSock.destroy(); } catch { /* ignore */ }
+      templateSock = null;
+      // Settle window — RED-256 spike measured ~3ms p95 for guest
+      // accept() to wake on dial; 250ms is 80× that. Replace with
+      // probe-based detection if flaky under real host load.
+      await new Promise((r) => setTimeout(r, 250));
+
+      const t0 = Date.now();
+      try {
+        await apiPatchExpect204(templateCtx.apiSock, '/vm', { state: 'Paused' });
+        await createSnapshot(templateCtx.apiSock, handle);
+        createMs = Date.now() - t0;
+      } catch (e: any) {
+        // Snapshot save failed. Degrade to pure cold-boot for the
+        // user's request. Mark the phase as degraded so phase 2
+        // skips the restore attempt.
+        phase1Degraded = true;
+      }
     } catch (e: any) {
-      // Snapshot save failed. Surface as a fallback via cold-boot
-      // — the user's request still needs to succeed, we just don't
-      // have a cache entry for next time.
+      // Template boot / dial / pause / anything-else threw. Same
+      // degraded outcome — log the tail, skip phase 2, fall back
+      // to cold-only for the user's request.
+      const degraded = crashedWithLog(startedAt, templateCtx, e);
+      // If crashedWithLog had anything to say (firecracker log tail)
+      // it's on `degraded.reason`; we preserve by threading through
+      // executeCold below (which has its own error handling but
+      // won't see the template's log). For now, return the template
+      // crash directly — the user's request CAN'T run because we
+      // couldn't even boot the VM once.
+      return degraded;
+    } finally {
+      try { templateSock?.destroy(); } catch { /* ignore */ }
+      killFirecracker(templateFc);
+      try { rmSync(templateCtx.workDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+
+    if (phase1Degraded) {
       return withSnapshotMeta(
         await executeCold(opts, rootfsPath, kernelPath, startedAt),
         { path: 'cold_boot_fallback', fallbackReason: 'load_failed', cacheKey: handle.cacheKey },
       );
     }
-  } catch (e: any) {
-    return crashedWithLog(startedAt, templateCtx, e);
-  } finally {
-    try { templateSock?.destroy(); } catch { /* ignore */ }
-    killFirecracker(templateFc);
-    try { rmSync(templateCtx.workDir, { recursive: true, force: true }); } catch { /* ignore */ }
-  }
 
-  // Phase 2: restore from the just-saved snapshot + run the user
-  // ExecRequest. Same code path executeWarm uses — if that works,
-  // this works.
-  const ctx = makeRunContext();
-  let fc: ChildProcess | null = null;
-  let sock: BufferedSocketLike | null = null;
-  try {
-    let restored;
+    // Phase 2: restore from the just-saved snapshot + run the user
+    // ExecRequest. Same code path executeWarm uses — if that works,
+    // this works.
+    const ctx = makeRunContext();
+    let fc: ChildProcess | null = null;
+    let sock: BufferedSocketLike | null = null;
     try {
-      restored = await restoreFromSnapshot(handle, ctx.apiSock, ctx.log);
-    } catch (e: any) {
-      // Restore of the snapshot we JUST saved failed. Rare but
-      // possible (e.g., shared-mmap not supported for some reason).
-      // Fall back to pure cold-boot with the error recorded.
-      return withSnapshotMeta(
-        await executeCold(opts, rootfsPath, kernelPath, startedAt),
-        { path: 'cold_boot_fallback', fallbackReason: 'load_failed', cacheKey: handle.cacheKey },
-      );
-    }
-    fc = restored.fc;
-    sock = restored.sock;
+      let restored;
+      try {
+        restored = await restoreFromSnapshot(handle, ctx.apiSock, ctx.log);
+      } catch (e: any) {
+        return withSnapshotMeta(
+          await executeCold(opts, rootfsPath, kernelPath, startedAt),
+          { path: 'cold_boot_fallback', fallbackReason: 'load_failed', cacheKey: handle.cacheKey },
+        );
+      }
+      fc = restored.fc;
+      sock = restored.sock;
 
-    const responseDeadline = Date.now() + opts.timeout * 1000 + 5_000;
-    const result = await runExecAgainst(opts, sock, responseDeadline, startedAt);
-    return withSnapshotMeta(result, {
-      path: 'cold_boot_and_save',
-      createMs,
-      cacheKey: handle.cacheKey,
-    });
-  } catch (e: any) {
-    return crashedWithLog(startedAt, ctx, e);
+      const responseDeadline = Date.now() + opts.timeout * 1000 + 5_000;
+      const result = await runExecAgainst(opts, sock, responseDeadline, startedAt);
+      return withSnapshotMeta(result, {
+        path: 'cold_boot_and_save',
+        createMs,
+        cacheKey: handle.cacheKey,
+      });
+    } catch (e: any) {
+      return crashedWithLog(startedAt, ctx, e);
+    } finally {
+      cleanupRunContext(ctx, fc, sock);
+    }
   } finally {
-    cleanupRunContext(ctx, fc, sock);
     releaseCacheLock(handle, lockFd);
   }
 }
