@@ -383,10 +383,28 @@ HTTP=$(api_put /actions '{"action_type":"InstanceStart"}'); expect_204 "${HTTP}"
 # guest was failing silently. Bring the tap back up explicitly. If it
 # was already UP this is a no-op.
 sudo ip netns exec "${NETNS}" ip link set "${TAP}" up
-# Brief settle — give the kernel a tick to propagate the link-up to
-# the routing stack before the probe starts sending packets.
-sleep 0.3
+# Give the kernel a tick to propagate the link-up to the routing stack
+# AND let FC actually open the tap fd if it hasn't yet.
+sleep 1.0
 pass "VM started with virtio-net attached to ${TAP}, tap re-upped post-start"
+
+# ── Post-start tap diagnostics ──────────────────────────────────────
+# If the tap is still NO_CARRIER after FC has been running for a
+# second, FC didn't successfully attach its virtio-net fd to this
+# tap — the surface symptom is the guest can bring up eth0 but
+# can't ARP its gateway.
+info "Post-start tap state"
+set +eo pipefail
+echo "  /sys/class/net/${TAP} state files:"
+for f in carrier operstate flags; do
+  v=$(sudo ip netns exec "${NETNS}" cat "/sys/class/net/${TAP}/${f}" 2>/dev/null || echo "(unreadable)")
+  printf '    %-10s = %s\n' "$f" "$v"
+done
+echo "  ip -s link show ${TAP} (rx/tx counters):"
+sudo ip netns exec "${NETNS}" ip -s link show "${TAP}" 2>&1 | sed 's/^/    /'
+echo "  firecracker log tail (network interface + boot):"
+tail -n 30 "${FC_LOG}" 2>/dev/null | sed 's/^/    /'
+set -eo pipefail
 
 # ── Probe the guest ─────────────────────────────────────────────────
 info "Probing guest — bring eth0 up then test connectivity"
@@ -469,13 +487,20 @@ const {{ execSync }} = require('child_process');
 // guessing.
 const bringUp = [
   'echo "--- busybox applets (network-related) ---"',
-  '(busybox --list 2>&1 | grep -E "^(ifconfig|route|ip|udhcpc|arp|netstat)$") || echo "(no network applets surfaced by busybox --list)"',
+  '(busybox --list 2>&1 | grep -E "^(ifconfig|route|ip|udhcpc|arp|netstat|ping)$") || echo "(no network applets surfaced by busybox --list)"',
   'echo "--- attempting busybox ifconfig + route ---"',
   '(busybox ifconfig eth0 {guest_ip} netmask 255.255.255.0 up && busybox route add default gw {tap_ip} && echo ETH0_UP) || echo ETH0_FAIL',
   'echo "--- eth0 state ---"',
   'busybox ifconfig eth0 2>&1 || echo "(ifconfig applet unavailable)"',
   'echo "--- route ---"',
   'busybox route -n 2>&1 || echo "(route applet unavailable)"',
+  // L2 isolation: ping the gateway BEFORE trying fetch(). If this
+  // succeeds, ARP works and the tap path is functional — any fetch
+  // failure is then a higher-layer issue. If this fails, ARP to the
+  // tap is the actual problem and fetch() will fail for the same
+  // reason. Explicit markers so the host-side parser can distinguish.
+  'echo "--- ping gateway {tap_ip} (L2 reachability) ---"',
+  '(busybox ping -c 2 -W 2 {tap_ip} 2>&1 && echo PING_GW_OK) || echo PING_GW_FAIL',
 ].join(' ; ') + ' ; exit 0';
 let setup;
 try {{
