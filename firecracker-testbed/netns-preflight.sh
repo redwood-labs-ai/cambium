@@ -229,7 +229,13 @@ fi
 #   - AppArmor or a sysctl lockdown reverting ip_forward inside netns
 #
 # Dump everything relevant so we can see the actual state, not guess.
+# Many of the tools we invoke here (nft, ufw, firewall-cmd) may fail
+# cleanly on hosts where they aren't in use. set -eo pipefail would
+# abort the whole script on the first such failure and we'd never see
+# the rest of the dump. Disable errexit/pipefail locally — the trap
+# at exit still handles cleanup.
 info "Diagnostic dump — host network state"
+set +eo pipefail
 echo "  iptables version:"
 iptables -V 2>&1 | sed 's/^/    /'
 
@@ -283,6 +289,10 @@ for k in net.ipv4.ip_forward net.ipv4.conf.all.rp_filter; do
   v=$(sudo ip netns exec "${NETNS}" sysctl -n "$k" 2>/dev/null || echo "(unavailable)")
   printf '      %s = %s\n' "$k" "$v"
 done
+
+# Back to strict mode for the rest of the script — the probe + findings
+# path relies on consistent error propagation.
+set -eo pipefail
 
 # ── Firecracker API helpers ─────────────────────────────────────────
 FC_RESP="${WORKDIR}/fc-resp"
