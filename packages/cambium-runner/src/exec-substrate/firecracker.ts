@@ -32,13 +32,16 @@
  * `available()` returns null only when Linux + KVM + firecracker
  * binary + both kernel/rootfs env vars are all present.
  *
- * v1 policy scope (deliberately narrow, matching what the testbed
- * proves):
+ * v1 policy scope:
  *
  *   - `network: 'none'` only. An allowlist errors with a pointer
  *     to the RED-259 follow-up.
- *   - `filesystem: 'none'` only. Allowlist_paths errors with a
- *     pointer to the RED-258 follow-up.
+ *   - `filesystem: 'none'` OR `{ allowlist_paths: [...] }` with
+ *     read-only per-allowlist ext4 mounts (RED-258). The host
+ *     builds one ext4 per allowlisted path via `mke2fs -d`, caches
+ *     it in the snapshot cache dir, attaches it as virtio-blk, and
+ *     the agent mounts it at the declared guest path before
+ *     spawning the interpreter.
  *
  * Snapshot design decisions come from RED-256 and are implemented
  * in `firecracker-snapshot.ts`:
@@ -97,6 +100,16 @@ import {
   type FallbackReason,
   type SnapshotHandle,
 } from './firecracker-snapshot.js';
+import {
+  buildAllowlistDrives,
+  drivesToAgentMounts,
+  formatAllowlistError,
+  hashAllowlist,
+  normalizeAllowlistPaths,
+  type AgentMount,
+  type AllowlistDrive,
+  type AllowlistEntry,
+} from './firecracker-allowlist.js';
 
 const KERNEL_ENV = 'CAMBIUM_FC_KERNEL';
 const ROOTFS_ENV = 'CAMBIUM_FC_ROOTFS';
@@ -199,8 +212,9 @@ export class FirecrackerSubstrate implements ExecSubstrate {
   async execute(opts: ExecOpts): Promise<ExecResult> {
     const startedAt = Date.now();
 
-    const scopeError = checkScope(opts);
-    if (scopeError) return crashed(startedAt, scopeError);
+    const scope = resolveScope(opts);
+    if ('error' in scope) return crashed(startedAt, scope.error);
+    const allowlist = scope.allowlist;
 
     const reason = this.available();
     if (reason !== null) return crashed(startedAt, reason);
@@ -220,10 +234,10 @@ export class FirecrackerSubstrate implements ExecSubstrate {
 
     // Branch: warm-restore, cold-and-save, or cold-only.
     if (snapshotsDisabled) {
-      return executeCold(opts, rootfsPath, kernelPath, startedAt);
+      return executeCold(opts, rootfsPath, kernelPath, allowlist, startedAt);
     }
     if (!isCanonicalSizing(opts)) {
-      return executeCold(opts, rootfsPath, kernelPath, startedAt, {
+      return executeCold(opts, rootfsPath, kernelPath, allowlist, startedAt, {
         snapshotFallbackReason: 'non_canonical_sizing',
       });
     }
@@ -238,21 +252,37 @@ export class FirecrackerSubstrate implements ExecSubstrate {
     }
     const cacheRoot = cacheRootResult;
 
+    // Allowlist signature participates in the cache key — different
+    // allowlists must map to different snapshots because virtio-blk
+    // drives get baked into the snapshot at template-build time and
+    // can't be attached to a restored VM.
+    let allowlistSig: string;
+    try {
+      allowlistSig = hashAllowlist(allowlist);
+    } catch (e: any) {
+      // Hashing can throw if a source dir is huge (> max entries) or
+      // unreadable. Fall back to cold-only; the snapshot path wouldn't
+      // work either way.
+      return executeCold(opts, rootfsPath, kernelPath, allowlist, startedAt, {
+        snapshotFallbackReason: 'load_failed',
+      });
+    }
+
     let handle: SnapshotHandle;
     try {
-      handle = await handleFor(rootfsPath, kernelPath, cacheRoot);
+      handle = await handleFor(rootfsPath, kernelPath, allowlistSig, cacheRoot);
     } catch (e: any) {
       // Hash failure (e.g. rootfs unreadable between existsSync and
       // read). Fall back to cold without trying to snapshot.
-      return executeCold(opts, rootfsPath, kernelPath, startedAt, {
+      return executeCold(opts, rootfsPath, kernelPath, allowlist, startedAt, {
         snapshotFallbackReason: 'load_failed',
       });
     }
 
     if (snapshotExists(handle)) {
-      return executeWarm(opts, rootfsPath, kernelPath, handle, startedAt);
+      return executeWarm(opts, rootfsPath, kernelPath, allowlist, handle, startedAt);
     }
-    return executeColdAndSave(opts, rootfsPath, kernelPath, handle, startedAt);
+    return executeColdAndSave(opts, rootfsPath, kernelPath, allowlist, handle, startedAt);
   }
 }
 
@@ -286,12 +316,31 @@ function cleanupRunContext(ctx: RunContext, fc: ChildProcess | null, sock: Buffe
   try { rmSync(ctx.workDir, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
+/** Attach each allowlist drive via `PUT /drives/<drive_id>`. Must
+ *  happen BEFORE `PUT /actions InstanceStart`; Firecracker doesn't
+ *  support hot-attach. Drive order determines the guest-side device
+ *  path (`/dev/vdb`, `/dev/vdc`, ...) the agent will mount. */
+async function attachAllowlistDrives(
+  apiSock: string,
+  drives: AllowlistDrive[],
+): Promise<void> {
+  for (const d of drives) {
+    await apiPutExpect204(apiSock, `/drives/${d.driveId}`, {
+      drive_id: d.driveId,
+      path_on_host: d.imagePath,
+      is_root_device: false,
+      is_read_only: d.readOnly,
+    });
+  }
+}
+
 /** Drive a fresh firecracker through the full cold-boot sequence,
  *  ending with a dialed + handshaked vsock socket ready to carry
  *  one ExecRequest. Used by both executeCold and executeColdAndSave. */
 async function coldBootToAccept(
   opts: ExecOpts,
   kernelPath: string,
+  allowlistDrives: AllowlistDrive[],
   ctx: RunContext,
 ): Promise<{ fc: ChildProcess; sock: BufferedSocketLike; bootDeadline: number }> {
   const fc = spawnFirecracker(ctx.apiSock, ctx.log);
@@ -312,6 +361,7 @@ async function coldBootToAccept(
     is_root_device: true,
     is_read_only: false,
   });
+  await attachAllowlistDrives(ctx.apiSock, allowlistDrives);
   await apiPutExpect204(ctx.apiSock, '/vsock', {
     vsock_id: 'vsock0',
     guest_cid: GUEST_CID,
@@ -334,6 +384,7 @@ async function coldBootCanonical(
   kernelPath: string,
   rootfsPath: string,
   vsockUdsPath: string,
+  allowlistDrives: AllowlistDrive[],
   ctx: RunContext,
 ): Promise<{ fc: ChildProcess; sock: BufferedSocketLike }> {
   const fc = spawnFirecracker(ctx.apiSock, ctx.log);
@@ -351,6 +402,7 @@ async function coldBootCanonical(
     is_root_device: true,
     is_read_only: false,
   });
+  await attachAllowlistDrives(ctx.apiSock, allowlistDrives);
   await apiPutExpect204(ctx.apiSock, '/vsock', {
     vsock_id: 'vsock0',
     guest_cid: GUEST_CID,
@@ -363,10 +415,14 @@ async function coldBootCanonical(
 }
 
 /** Send ExecRequest over an already-handshaked socket and read
- *  ExecResponse. Shared by all three dispatch paths. */
+ *  ExecResponse. Shared by all three dispatch paths. `mounts` is
+ *  the per-allowlist-drive metadata the agent uses to `mount -t
+ *  ext4 <device> <guest_path>` before spawning the interpreter;
+ *  empty for gens with no filesystem allowlist. */
 async function runExecAgainst(
   opts: ExecOpts,
   sock: BufferedSocketLike,
+  mounts: AgentMount[],
   responseDeadline: number,
   startedAt: number,
 ): Promise<ExecResult> {
@@ -377,6 +433,7 @@ async function runExecAgainst(
     memory_mb: Math.max(16, Math.round(opts.memory)),
     timeout_seconds: Math.max(1, Math.round(opts.timeout)),
     max_output_bytes: opts.maxOutputBytes,
+    mounts,
   });
   const readTimeoutMs = Math.max(1_000, responseDeadline - Date.now());
   const raw = await readFrame(sock, readTimeoutMs);
@@ -395,6 +452,7 @@ async function executeCold(
   opts: ExecOpts,
   rootfsPath: string,
   kernelPath: string,
+  allowlist: AllowlistEntry[],
   startedAt: number,
   meta: { snapshotFallbackReason?: FallbackReason; cacheKey?: string } = {},
 ): Promise<ExecResult> {
@@ -403,11 +461,16 @@ async function executeCold(
   let sock: BufferedSocketLike | null = null;
   try {
     copyFileSync(rootfsPath, ctx.stagedRootfs);
-    const booted = await coldBootToAccept(opts, kernelPath, ctx);
+    // Build per-call allowlist drives in the tempdir. They're
+    // disposable (same lifecycle as the rootfs copy) since cold-only
+    // doesn't persist any cache state.
+    const allowlistDrives = buildAllowlistDrives(allowlist, ctx.workDir);
+    const booted = await coldBootToAccept(opts, kernelPath, allowlistDrives, ctx);
     fc = booted.fc;
     sock = booted.sock;
     const responseDeadline = Date.now() + opts.timeout * 1000 + 5_000;
-    const result = await runExecAgainst(opts, sock, responseDeadline, startedAt);
+    const mounts = drivesToAgentMounts(allowlistDrives);
+    const result = await runExecAgainst(opts, sock, mounts, responseDeadline, startedAt);
     return withSnapshotMeta(result, meta.snapshotFallbackReason
       ? { path: 'cold_boot_fallback', fallbackReason: meta.snapshotFallbackReason, cacheKey: meta.cacheKey }
       : undefined);
@@ -422,6 +485,7 @@ async function executeColdAndSave(
   opts: ExecOpts,
   rootfsPath: string,
   kernelPath: string,
+  allowlist: AllowlistEntry[],
   handle: SnapshotHandle,
   startedAt: number,
 ): Promise<ExecResult> {
@@ -432,7 +496,7 @@ async function executeColdAndSave(
   ensureCacheDir(handle);
   const lockFd = tryAcquireCacheLock(handle);
   if (lockFd === null) {
-    return executeCold(opts, rootfsPath, kernelPath, startedAt, {
+    return executeCold(opts, rootfsPath, kernelPath, allowlist, startedAt, {
       snapshotFallbackReason: 'build_locked',
       cacheKey: handle.cacheKey,
     });
@@ -463,14 +527,20 @@ async function executeColdAndSave(
     let templateSock: BufferedSocketLike | null = null;
     let createMs = 0;
     let phase1Degraded = false;
+    // Allowlist drives live in the cache directory alongside the
+    // rootfs + memfile. Built once per cache entry; warm restores
+    // reuse the same image paths (they're baked into the snapshot).
+    let allowlistDrivesForTemplate: AllowlistDrive[];
     try {
       copyFileSync(rootfsPath, handle.rootfsFile);
       try { rmSync(handle.vsockUdsFile, { force: true }); } catch { /* ignore */ }
+      allowlistDrivesForTemplate = buildAllowlistDrives(allowlist, handle.dir);
 
       const booted = await coldBootCanonical(
         kernelPath,
         handle.rootfsFile,
         handle.vsockUdsFile,
+        allowlistDrivesForTemplate,
         templateCtx,
       );
       templateFc = booted.fc;
@@ -514,14 +584,20 @@ async function executeColdAndSave(
 
     if (phase1Degraded) {
       return withSnapshotMeta(
-        await executeCold(opts, rootfsPath, kernelPath, startedAt),
+        await executeCold(opts, rootfsPath, kernelPath, allowlist, startedAt),
         { path: 'cold_boot_fallback', fallbackReason: 'load_failed', cacheKey: handle.cacheKey },
       );
     }
 
     // Phase 2: restore from the just-saved snapshot + run the user
     // ExecRequest. Same code path executeWarm uses — if that works,
-    // this works.
+    // this works. The allowlist drives were built in phase 1 (they're
+    // in handle.dir). Recompute the drives list to derive the device
+    // paths + agent-mount metadata we need for this phase; the
+    // helper is idempotent (existsSync short-circuits the rebuild).
+    const allowlistDrives = buildAllowlistDrives(allowlist, handle.dir);
+    const mounts = drivesToAgentMounts(allowlistDrives);
+
     const ctx = makeRunContext();
     let fc: ChildProcess | null = null;
     let sock: BufferedSocketLike | null = null;
@@ -531,7 +607,7 @@ async function executeColdAndSave(
         restored = await restoreFromSnapshot(handle, ctx.apiSock, ctx.log);
       } catch (e: any) {
         return withSnapshotMeta(
-          await executeCold(opts, rootfsPath, kernelPath, startedAt),
+          await executeCold(opts, rootfsPath, kernelPath, allowlist, startedAt),
           { path: 'cold_boot_fallback', fallbackReason: 'load_failed', cacheKey: handle.cacheKey },
         );
       }
@@ -539,7 +615,7 @@ async function executeColdAndSave(
       sock = restored.sock;
 
       const responseDeadline = Date.now() + opts.timeout * 1000 + 5_000;
-      const result = await runExecAgainst(opts, sock, responseDeadline, startedAt);
+      const result = await runExecAgainst(opts, sock, mounts, responseDeadline, startedAt);
       return withSnapshotMeta(result, {
         path: 'cold_boot_and_save',
         createMs,
@@ -559,6 +635,7 @@ async function executeWarm(
   opts: ExecOpts,
   rootfsPath: string,
   kernelPath: string,
+  allowlist: AllowlistEntry[],
   handle: SnapshotHandle,
   startedAt: number,
 ): Promise<ExecResult> {
@@ -571,7 +648,7 @@ async function executeWarm(
   // different cache keys still run in parallel unaffected.
   const lockFd = tryAcquireCacheLock(handle);
   if (lockFd === null) {
-    return executeCold(opts, rootfsPath, kernelPath, startedAt, {
+    return executeCold(opts, rootfsPath, kernelPath, allowlist, startedAt, {
       snapshotFallbackReason: 'build_locked',
       cacheKey: handle.cacheKey,
     });
@@ -597,7 +674,7 @@ async function executeWarm(
       // Cold-only doesn't interact with the cache, so holding the
       // lock through the fallback is safe (and keeps the lock
       // state simple — one release in the finally, always).
-      return executeCold(opts, rootfsPath, kernelPath, startedAt, {
+      return executeCold(opts, rootfsPath, kernelPath, allowlist, startedAt, {
         snapshotFallbackReason: 'load_failed',
         cacheKey: handle.cacheKey,
       });
@@ -605,8 +682,16 @@ async function executeWarm(
     fc = restored.fc;
     sock = restored.sock;
 
+    // Allowlist drives are already in the cache dir (built at
+    // template-save time); reconstitute the mount metadata from the
+    // canonical allowlist so the agent knows where to mount each
+    // drive. The ext4 images themselves are referenced by the
+    // snapshot's baked drive config, no host-side re-attach needed.
+    const allowlistDrives = buildAllowlistDrives(allowlist, handle.dir);
+    const mounts = drivesToAgentMounts(allowlistDrives);
+
     const responseDeadline = Date.now() + opts.timeout * 1000 + 5_000;
-    const result = await runExecAgainst(opts, sock, responseDeadline, startedAt);
+    const result = await runExecAgainst(opts, sock, mounts, responseDeadline, startedAt);
     return withSnapshotMeta(result, {
       path: 'warm_restore',
       restoreMs: restored.restoreMs,
@@ -624,19 +709,42 @@ async function executeWarm(
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-function checkScope(opts: ExecOpts): string | null {
+/**
+ * Validate the policy shape of an ExecOpts and normalize the
+ * filesystem allowlist into structured entries. Returns either an
+ * error string (to surface as `crashed`) or the normalized scope.
+ *
+ * Network is still `'none'`-only (RED-259 follow-up). Filesystem
+ * accepts `'none'` OR a validated, canonicalized allowlist per
+ * RED-258. Validation covers absoluteness, normalized form,
+ * rootfs-owned prefix collision, source directory existence, and
+ * the `MAX_ALLOWLIST_ENTRIES` cap.
+ */
+function resolveScope(opts: ExecOpts):
+  | { error: string }
+  | { allowlist: AllowlistEntry[] } {
   if (opts.network !== 'none') {
     const np = opts.network as NetworkPolicy;
-    return `:firecracker v1 supports network: 'none' only (got allowlist: ${
-      np?.allowlist?.join(', ') ?? 'unknown'
-    }). Host-side netns + iptables resolution is RED-259; for network access, use runtime: :native (unsandboxed) or file a ticket.`;
+    return {
+      error: `:firecracker v1 supports network: 'none' only (got allowlist: ${
+        np?.allowlist?.join(', ') ?? 'unknown'
+      }). Host-side netns + iptables resolution is RED-259; for network access, use runtime: :native (unsandboxed) or file a ticket.`,
+    };
   }
-  if (opts.filesystem !== 'none') {
-    const paths = (opts.filesystem as { allowlist_paths?: string[] })
-      ?.allowlist_paths?.join(', ') ?? '(no allowlist_paths)';
-    return `:firecracker v1 supports filesystem: 'none' only (got allowlist_paths: ${paths}). Host-side bind-mount drive resolution is RED-258; for filesystem access, use runtime: :native (unsandboxed) or file a ticket.`;
+  if (opts.filesystem === 'none') {
+    return { allowlist: [] };
   }
-  return null;
+  const rawPaths = (opts.filesystem as { allowlist_paths?: unknown })?.allowlist_paths;
+  if (!Array.isArray(rawPaths) || !rawPaths.every((p): p is string => typeof p === 'string')) {
+    return {
+      error: `filesystem policy must be 'none' or { allowlist_paths: string[] } (got ${JSON.stringify(opts.filesystem)})`,
+    };
+  }
+  const resolved = normalizeAllowlistPaths(rawPaths);
+  if (!Array.isArray(resolved)) {
+    return { error: formatAllowlistError(resolved) };
+  }
+  return { allowlist: resolved };
 }
 
 function crashed(startedAt: number, reason: string): ExecResult {
