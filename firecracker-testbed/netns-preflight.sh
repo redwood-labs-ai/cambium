@@ -520,12 +520,10 @@ const bringUp = [
   // filtered" from "nothing leaves the netns at all".
   'echo "--- ping {allow} (ICMP vs TCP isolation) ---"',
   '(busybox ping -c 2 -W 3 {allow} 2>&1 && echo PING_ALLOW_OK) || echo PING_ALLOW_FAIL',
-  // TCP via busybox wget — entirely different code path than Node
-  // fetch(). If wget succeeds but fetch() fails, the issue is in
-  // Node/undici, not the network. If wget also fails, TCP itself is
-  // blocked somewhere.
-  'echo "--- wget {allow} (raw TCP through busybox, bypasses undici) ---"',
-  '(busybox wget -q -T 5 -O /dev/null http://{allow}/ 2>&1 && echo WGET_ALLOW_OK) || echo WGET_ALLOW_FAIL',
+  // (Removed: busybox wget probe. It tripped over Cloudflare's
+  // http://1.1.1.1/ → https://one.one.one.one/ redirect and failed
+  // on DNS resolution of the redirect target. The Node TCP-connect
+  // probes below sidestep redirect handling entirely.)
 ].join(' ; ') + ' ; exit 0';
 let setup;
 try {{
@@ -537,23 +535,37 @@ try {{
 }}
 console.log(setup);
 
-async function probe(label, url, okMarker, failMarker) {{
-  try {{
-    const r = await fetch(url, {{ signal: AbortSignal.timeout(3000) }});
-    console.log(`--- ${{label}} ---`);
-    console.log(`status=${{r.status}}`);
-    console.log(okMarker);
-  }} catch (e) {{
-    console.log(`--- ${{label}} ---`);
-    console.log(`error=${{e.name}}: ${{e.message}}`);
-    console.log(failMarker);
-  }}
+// Raw TCP connect probe. The earlier fetch() + wget attempts both
+// followed Cloudflare's 301 redirect from http://1.1.1.1/ to
+// https://one.one.one.one/ and then timed out on DNS resolution in
+// the guest (no resolv.conf). Using Node's `net` module directly
+// sidesteps any redirect handling AND any DNS lookup — it dials the
+// literal IP on a raw TCP socket. Success here = TCP path is open.
+const net = require('net');
+function tcpProbe(label, host, port, okMarker, failMarker) {{
+  return new Promise((resolve) => {{
+    const sock = net.connect({{ host, port }});
+    let done = false;
+    const finish = (msg, marker) => {{
+      if (done) return;
+      done = true;
+      console.log(`--- ${{label}} ${{host}}:${{port}} ---`);
+      console.log(msg);
+      console.log(marker);
+      try {{ sock.destroy(); }} catch (_) {{}}
+      resolve();
+    }};
+    sock.setTimeout(3000);
+    sock.once('connect', () => finish(`connected to ${{host}}:${{port}}`, okMarker));
+    sock.once('timeout', () => finish('timeout after 3s', failMarker));
+    sock.once('error', (e) => finish(`error=${{e.code || e.name}}: ${{e.message}}`, failMarker));
+  }});
 }}
 
 (async () => {{
-  await probe('ALLOW ({allow})',    'http://{allow}/',    'FETCH_ALLOW_OK',       'FETCH_ALLOW_FAIL');
-  await probe('BLOCK ({block})',    'http://{block}/',    'FETCH_BLOCK_LEAKED',   'FETCH_BLOCK_DROPPED');
-  await probe('META ({metadata})',  'http://{metadata}/', 'FETCH_META_LEAKED',    'FETCH_META_BLOCKED');
+  await tcpProbe('ALLOW', '{allow}',    80, 'FETCH_ALLOW_OK',     'FETCH_ALLOW_FAIL');
+  await tcpProbe('BLOCK', '{block}',    80, 'FETCH_BLOCK_LEAKED', 'FETCH_BLOCK_DROPPED');
+  await tcpProbe('META',  '{metadata}', 80, 'FETCH_META_LEAKED',  'FETCH_META_BLOCKED');
 }})().catch(e => {{
   console.log('PROBE_CRASH: ' + e.stack);
 }});
@@ -648,12 +660,10 @@ if echo "${OUT}" | grep -q "FETCH_ALLOW_OK"; then
   allow_worked=true
 fi
 
-# Record the secondary signals for the findings block — want to
-# distinguish "TCP broken" from "only Node fetch broken" in the report.
+# Record the ICMP signal for the findings block — if ICMP works but
+# TCP doesn't, that's a TCP-specific symptom we want to surface.
 ping_allow_ok=false
-wget_allow_ok=false
 if echo "${OUT}" | grep -q "PING_ALLOW_OK"; then ping_allow_ok=true; fi
-if echo "${OUT}" | grep -q "WGET_ALLOW_OK"; then wget_allow_ok=true; fi
 # For BLOCK and META: the SUCCESS case is that fetch FAILED —
 # i.e. iptables DROP caused a connection error/timeout.
 if echo "${OUT}" | grep -q "FETCH_BLOCK_DROPPED"; then
@@ -670,11 +680,9 @@ else
 fi
 
 if ${allow_worked}; then
-  pass "guest → ${ALLOW_IP} reachable via fetch (allowlist works)"
-elif ${wget_allow_ok}; then
-  warn "guest → ${ALLOW_IP} reachable via wget but NOT via Node fetch — issue is Node/undici specific, not the network"
+  pass "guest → ${ALLOW_IP} reachable via TCP (allowlist works)"
 elif ${ping_allow_ok}; then
-  warn "guest → ${ALLOW_IP} reachable via ICMP but NOT via TCP — TCP-specific block somewhere (MSS/MTU, filter rule, or similar)"
+  warn "guest → ${ALLOW_IP} reachable via ICMP but NOT via TCP — TCP-specific block (MSS/MTU or filter rule)"
 else
   fail "guest could NOT reach ${ALLOW_IP} at all — the allowlist mechanism doesn't get traffic through"
 fi
