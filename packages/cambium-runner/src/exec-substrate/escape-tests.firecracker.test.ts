@@ -21,7 +21,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import type { ExecOpts } from './types.js';
 import { FirecrackerSubstrate } from './firecracker.js';
@@ -176,11 +176,11 @@ describe('Firecracker substrate — escape tests (RED-257)', () => {
   // ── 3. Host filesystem isolation ─────────────────────────────────────
   //
   // Why this passes for Firecracker: the guest's root is the RED-255
-  // rootfs ext4 image mounted as `/dev/vda`. There are no additional
-  // virtio-blk drives in v1 (bind-mount drives are a follow-up). Any
-  // path that exists on the host but not in the guest rootfs fails
-  // with ENOENT — including the sentinel file we planted in the
-  // host's /tmp.
+  // rootfs ext4 image mounted as `/dev/vda`. Only the allowlist entries
+  // declared in `filesystem: { allowlist_paths: [...] }` get
+  // additional virtio-blk drives (vdb..vdy). Any host path not in the
+  // allowlist fails with ENOENT — including the sentinel file we
+  // planted in the host's /tmp.
   //
   // Note: tests using host-specific paths like `/etc/passwd` don't
   // work for Firecracker because the guest has its OWN /etc/passwd
@@ -189,7 +189,7 @@ describe('Firecracker substrate — escape tests (RED-257)', () => {
   // host sentinel file and checking that the marker doesn't appear in
   // guest output is the portable invariant.
 
-  it('host sentinel file cannot be read from guest', async () => {
+  it('host sentinel file cannot be read from guest (no allowlist)', async () => {
     const result = await sub.execute({
       ...DEFAULT_OPTS,
       language: 'js',
@@ -206,6 +206,109 @@ describe('Firecracker substrate — escape tests (RED-257)', () => {
     expect(result.stdout).not.toContain(SECRET_MARKER);
     expect(result.stderr).not.toContain(SECRET_MARKER);
     expect(result.stdout).toContain('BLOCKED');
+  }, VITEST_TIMEOUT_MS);
+
+  // ── 3b. Allowlist — positive + scoping (RED-258) ─────────────────────
+  //
+  // The v1 allowlist grants read-only access to declared host
+  // directories via per-path ext4 images attached as virtio-blk. What
+  // we assert here:
+  //   (a) An allowlisted host dir IS readable inside the guest —
+  //       without this, the feature doesn't work.
+  //   (b) An unrelated host dir remains invisible even when the
+  //       allowlist grants access to something else — confirms the
+  //       allowlist doesn't function as a blanket "host access" flag.
+  //
+  // The allowlist scratch dir is created under $HOME so it passes
+  // validation (the DEEP_FORBIDDEN list blocks /tmp / /var / etc at
+  // subpath level; /home is EXACT_FORBIDDEN, so /home/<user>/... is
+  // fine). On the R1 under a non-root user this is `/home/$USER/...`;
+  // under any host where $HOME resolves to a forbidden prefix (running
+  // as root gets you `/root`), the allowlist validator would reject
+  // and the tests would fail with a clear reason.
+
+  let allowDir: string;
+  let allowSentinelPath: string;
+  const ALLOW_MARKER = `cambium-allow-marker-${randomBytes(8).toString('hex')}`;
+  beforeAll(() => {
+    allowDir = mkdtempSync(join(homedir(), '.cambium-escape-allow-'));
+    allowSentinelPath = join(allowDir, 'data.txt');
+    writeFileSync(allowSentinelPath, ALLOW_MARKER, { mode: 0o644 });
+  });
+  afterAll(() => {
+    try { rmSync(allowDir, { recursive: true, force: true }); } catch {}
+  });
+
+  it('allowlisted host dir IS readable from guest', async () => {
+    const result = await sub.execute({
+      ...DEFAULT_OPTS,
+      filesystem: { allowlist_paths: [allowDir] },
+      language: 'js',
+      code: `
+        try {
+          const fs = require('fs');
+          const data = fs.readFileSync(${JSON.stringify(allowSentinelPath)}, 'utf8');
+          console.log('READ:' + data);
+        } catch (e) {
+          console.log('BLOCKED:' + e.message);
+        }
+      `,
+    });
+    expect(result.status).toBe('completed');
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('READ:');
+    expect(result.stdout).toContain(ALLOW_MARKER);
+  }, VITEST_TIMEOUT_MS);
+
+  it('non-allowlisted host dir stays invisible when another path IS allowlisted', async () => {
+    // The allowlist grants access to `allowDir` — NOT to `hostDir`
+    // (which is under the host's /tmp and holds `SECRET_MARKER`). The
+    // guest must not see that unrelated directory, confirming the
+    // allowlist is path-scoped rather than a blanket host-access bit.
+    const result = await sub.execute({
+      ...DEFAULT_OPTS,
+      filesystem: { allowlist_paths: [allowDir] },
+      language: 'js',
+      code: `
+        try {
+          const fs = require('fs');
+          const data = fs.readFileSync(${JSON.stringify(hostSentinelPath)}, 'utf8');
+          console.log('LEAKED:' + data);
+        } catch (e) {
+          console.log('BLOCKED:' + e.message);
+        }
+      `,
+    });
+    expect(result.stdout).not.toContain(SECRET_MARKER);
+    expect(result.stderr).not.toContain(SECRET_MARKER);
+    expect(result.stdout).toContain('BLOCKED');
+  }, VITEST_TIMEOUT_MS);
+
+  it('allowlist mount is read-only — guest writes are rejected', async () => {
+    // Host-side hardcodes read_only: true, and the agent refuses any
+    // read_only: false mount as belt-and-suspenders. The in-guest
+    // `mount -o ro` makes writes fail with EROFS. This test confirms
+    // the end-to-end read-only invariant from guest code's POV.
+    const result = await sub.execute({
+      ...DEFAULT_OPTS,
+      filesystem: { allowlist_paths: [allowDir] },
+      language: 'js',
+      code: `
+        try {
+          const fs = require('fs');
+          fs.writeFileSync(${JSON.stringify(join(allowDir, 'guest-write.txt'))}, 'SHOULD-NOT-WRITE');
+          console.log('WROTE');
+        } catch (e) {
+          console.log('BLOCKED:' + e.code + ':' + e.message);
+        }
+      `,
+    });
+    expect(result.stdout).not.toContain('WROTE');
+    expect(result.stdout).toContain('BLOCKED');
+    // EROFS is the canonical read-only-filesystem errno; EACCES is a
+    // plausible alternate on some busybox configs. Either is fine;
+    // what we care about is that the write didn't succeed.
+    expect(result.stdout).toMatch(/EROFS|EACCES/);
   }, VITEST_TIMEOUT_MS);
 
   // ── 4. Arbitrary outbound network ────────────────────────────────────
