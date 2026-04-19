@@ -353,9 +353,28 @@ describe('Firecracker substrate — escape tests (RED-257)', () => {
 
   /** Build a guest-side TCP-connect probe. Uses Node's `net` module
    *  directly (no fetch, no undici, no redirects); reports OK / FAIL /
-   *  ERROR with a stable marker the assertions grep for. */
+   *  ERROR with a stable marker the assertions grep for. Also dumps
+   *  guest-side net state (eth0 link/operstate/route table) before
+   *  the connect — only visible on test-failure stdout, but invaluable
+   *  for diagnosing ENETUNREACH-style failures where the iptables
+   *  rules aren't even reached. */
   function tcpConnectProbe(host: string, port: number, marker: string): string {
     return `
+      const { execSync } = require('child_process');
+      try {
+        const dump = execSync(
+          'echo --eth0--; busybox ifconfig eth0 2>&1 || true; ' +
+          'echo --carrier--; cat /sys/class/net/eth0/carrier 2>&1 || true; ' +
+          'echo --operstate--; cat /sys/class/net/eth0/operstate 2>&1 || true; ' +
+          'echo --route--; busybox route -n 2>&1 || true; ' +
+          'echo --hosts--; cat /etc/hosts 2>&1 || true',
+          { shell: '/bin/sh', timeout: 1500 }
+        ).toString();
+        console.log('--- net state ---');
+        console.log(dump);
+      } catch (e) {
+        console.log('--- net state probe error: ' + e.message + ' ---');
+      }
       const net = require('net');
       const sock = net.connect({ host: ${JSON.stringify(host)}, port: ${port} });
       let done = false;
@@ -387,6 +406,13 @@ describe('Firecracker substrate — escape tests (RED-257)', () => {
       stdout: result.stdout?.slice(0, 600),
     });
   }
+  /** Like logIfNotCompleted but always logs stdout — used for tests
+   *  that complete (status: 'completed') with the wrong content
+   *  (assertion on stdout content fails). */
+  function logProbeOutput(label: string, result: Awaited<ReturnType<typeof sub.execute>>): void {
+    if (result.stdout?.includes('_OK')) return;
+    console.error(`[probe-state ${label}] stdout:\n${result.stdout}`);
+  }
 
   it('allowlisted IP IS reachable via TCP from the guest', async () => {
     // The positive-path test: a gen with an allowlist containing
@@ -399,6 +425,7 @@ describe('Firecracker substrate — escape tests (RED-257)', () => {
       code: tcpConnectProbe(NET_ALLOW_IP, 80, 'ALLOW'),
     });
     logIfNotCompleted('RED-259 allow-ip', result);
+    logProbeOutput('RED-259 allow-ip', result);
     expect(result.status).toBe('completed');
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain('ALLOW_OK');
