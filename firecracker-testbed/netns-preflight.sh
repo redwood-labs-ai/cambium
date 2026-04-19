@@ -520,6 +520,12 @@ const bringUp = [
   // filtered" from "nothing leaves the netns at all".
   'echo "--- ping {allow} (ICMP vs TCP isolation) ---"',
   '(busybox ping -c 2 -W 3 {allow} 2>&1 && echo PING_ALLOW_OK) || echo PING_ALLOW_FAIL',
+  // TCP via busybox wget — entirely different code path than Node
+  // fetch(). If wget succeeds but fetch() fails, the issue is in
+  // Node/undici, not the network. If wget also fails, TCP itself is
+  // blocked somewhere.
+  'echo "--- wget {allow} (raw TCP through busybox, bypasses undici) ---"',
+  '(busybox wget -q -T 5 -O /dev/null http://{allow}/ 2>&1 && echo WGET_ALLOW_OK) || echo WGET_ALLOW_FAIL',
 ].join(' ; ') + ' ; exit 0';
 let setup;
 try {{
@@ -641,6 +647,13 @@ fi
 if echo "${OUT}" | grep -q "FETCH_ALLOW_OK"; then
   allow_worked=true
 fi
+
+# Record the secondary signals for the findings block — want to
+# distinguish "TCP broken" from "only Node fetch broken" in the report.
+ping_allow_ok=false
+wget_allow_ok=false
+if echo "${OUT}" | grep -q "PING_ALLOW_OK"; then ping_allow_ok=true; fi
+if echo "${OUT}" | grep -q "WGET_ALLOW_OK"; then wget_allow_ok=true; fi
 # For BLOCK and META: the SUCCESS case is that fetch FAILED —
 # i.e. iptables DROP caused a connection error/timeout.
 if echo "${OUT}" | grep -q "FETCH_BLOCK_DROPPED"; then
@@ -657,9 +670,13 @@ else
 fi
 
 if ${allow_worked}; then
-  pass "guest → ${ALLOW_IP} reachable (allowlist works)"
+  pass "guest → ${ALLOW_IP} reachable via fetch (allowlist works)"
+elif ${wget_allow_ok}; then
+  warn "guest → ${ALLOW_IP} reachable via wget but NOT via Node fetch — issue is Node/undici specific, not the network"
+elif ${ping_allow_ok}; then
+  warn "guest → ${ALLOW_IP} reachable via ICMP but NOT via TCP — TCP-specific block somewhere (MSS/MTU, filter rule, or similar)"
 else
-  fail "guest could NOT reach ${ALLOW_IP} — the allowlist mechanism doesn't get traffic through"
+  fail "guest could NOT reach ${ALLOW_IP} at all — the allowlist mechanism doesn't get traffic through"
 fi
 
 # IMPORTANT: block_worked and metadata_worked are only meaningful
