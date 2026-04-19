@@ -99,6 +99,7 @@ cleanup() {
   # will do the same.
   if [ -n "${HOST_OUT_IFACE}" ]; then
     sudo iptables -t nat -D POSTROUTING -s "${GUEST_SUBNET}" -o "${HOST_OUT_IFACE}" -j MASQUERADE 2>/dev/null || true
+    sudo iptables -t nat -D POSTROUTING -s "${VETH_SUBNET}" -o "${HOST_OUT_IFACE}" -j MASQUERADE 2>/dev/null || true
     sudo iptables -D FORWARD -i "${VETH_H}" -j ACCEPT 2>/dev/null || true
     sudo iptables -D FORWARD -o "${VETH_H}" -j ACCEPT 2>/dev/null || true
   fi
@@ -194,9 +195,15 @@ pass "tap device up: ${TAP}=${TAP_IP} (GUEST_SUBNET=${GUEST_SUBNET}) inside netn
 # veth-specific ACCEPT is the first match evaluated. The rule is
 # scoped to VETH_H so it doesn't loosen forwarding for anything else.
 sudo iptables -t nat -A POSTROUTING -s "${GUEST_SUBNET}" -o "${HOST_OUT_IFACE}" -j MASQUERADE
+# Also MASQUERADE the veth subnet — the netns itself (sourcing from
+# its veth-g IP) needs NAT for the baseline check. In the real
+# RED-259 impl the netns doesn't originate outbound traffic; only
+# the guest does. The VETH_SUBNET rule here is preflight-only
+# scaffolding and can be dropped from the production topology.
+sudo iptables -t nat -A POSTROUTING -s "${VETH_SUBNET}" -o "${HOST_OUT_IFACE}" -j MASQUERADE
 sudo iptables -I FORWARD 1 -i "${VETH_H}" -j ACCEPT
 sudo iptables -I FORWARD 1 -o "${VETH_H}" -j ACCEPT
-pass "host MASQUERADE (source ${GUEST_SUBNET}) + FORWARD rules installed"
+pass "host MASQUERADE (${GUEST_SUBNET} + ${VETH_SUBNET}) + FORWARD rules installed"
 
 # Allowlist enforcement — iptables OUTPUT in the netns. RED-137 maps
 # to this shape:
