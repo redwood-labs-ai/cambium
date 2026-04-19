@@ -309,6 +309,13 @@ else:
     print(f"[probe] could not dial: {last_err!r}", file=sys.stderr)
     sys.exit(2)
 
+# Once CONNECT handshake is done, bump the socket timeout for the
+# ExecRequest round-trip. The probe runs `busybox --list` + three
+# fetch()es with 3s timeouts each + shell overhead; 2s was the
+# handshake budget, not the response budget. Use 40s to give the
+# agent's internal 30s timeout_seconds room to surface back to us.
+sock.settimeout(40.0)
+
 # Guest agent does NOT bring eth0 up on its own in v0 — RED-259 will
 # add that as part of the ExecRequest.net path. For this preflight we
 # do it in-line: first bring eth0 up via busybox `ip` commands, then
