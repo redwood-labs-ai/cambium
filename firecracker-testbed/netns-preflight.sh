@@ -299,6 +299,14 @@ for k in \
   printf '    %s = %s\n' "$k" "$v"
 done
 
+echo "  host ip rule (policy routing — Tailscale + others may divert):"
+ip rule show 2>&1 | sed 's/^/    /'
+echo "  host routing decision for a guest packet (1.1.1.1 from 10.200.0.2 in via ${VETH_H}):"
+sudo ip route get 1.1.1.1 from 10.200.0.2 iif "${VETH_H}" 2>&1 | sed 's/^/    /'
+echo "  host routes: main table default + tailscale0 presence:"
+ip route show 2>&1 | grep -E '^default|tailscale' | sed 's/^/    /'
+ip -4 route show table all 2>&1 | grep -E '1\.1\.1\.1|^default.*tailscale|unreachable' | head -n 20 | sed 's/^/    /'
+
 echo "  netns state:"
 echo "    interfaces (link: admin/oper state):"
 sudo ip netns exec "${NETNS}" ip -brief link 2>&1 | sed 's/^/      /'
@@ -496,11 +504,13 @@ const bringUp = [
   'busybox route -n 2>&1 || echo "(route applet unavailable)"',
   // L2 isolation: ping the gateway BEFORE trying fetch(). If this
   // succeeds, ARP works and the tap path is functional — any fetch
-  // failure is then a higher-layer issue. If this fails, ARP to the
-  // tap is the actual problem and fetch() will fail for the same
-  // reason. Explicit markers so the host-side parser can distinguish.
+  // failure is then a higher-layer issue.
   'echo "--- ping gateway {tap_ip} (L2 reachability) ---"',
   '(busybox ping -c 2 -W 2 {tap_ip} 2>&1 && echo PING_GW_OK) || echo PING_GW_FAIL',
+  // ICMP to 1.1.1.1 — distinguishes "routing+MASQUERADE works, TCP
+  // filtered" from "nothing leaves the netns at all".
+  'echo "--- ping {allow} (ICMP vs TCP isolation) ---"',
+  '(busybox ping -c 2 -W 3 {allow} 2>&1 && echo PING_ALLOW_OK) || echo PING_ALLOW_FAIL',
 ].join(' ; ') + ' ; exit 0';
 let setup;
 try {{
@@ -588,6 +598,25 @@ if ! OUT=$(sudo python3 "${PROBE_SCRIPT}" "${VSOCK_UDS}" "${VSOCK_PORT}" \
   fail "probe failed to complete"
 fi
 echo "${OUT}"
+
+# ── Post-probe diagnostics ───────────────────────────────────────────
+# The probe just generated traffic. Counters + conntrack entries
+# now tell us whether packets are leaving the tap, reaching the
+# root netns, and whether the kernel even created state for the
+# attempted connection.
+info "Post-probe state"
+set +eo pipefail
+echo "  ${TAP} counters (post-probe — should be non-zero if guest sent anything):"
+sudo ip netns exec "${NETNS}" ip -s link show "${TAP}" 2>&1 | grep -E 'RX:|TX:|bytes' | sed 's/^/    /'
+echo "  ${VETH_G} counters (netns side of host link — TX non-zero means guest traffic left netns):"
+sudo ip netns exec "${NETNS}" ip -s link show "${VETH_G}" 2>&1 | grep -E 'RX:|TX:|bytes' | sed 's/^/    /'
+echo "  conntrack entries for 10.200.0.0/24 (did host conntrack see guest traffic?):"
+if command -v conntrack >/dev/null; then
+  sudo conntrack -L -s 10.200.0.0/24 2>&1 | head -n 10 | sed 's/^/    /'
+else
+  echo "    (conntrack not installed; install conntrack-tools to diagnose SNAT state)"
+fi
+set -eo pipefail
 
 # ── Parse + report ──────────────────────────────────────────────────
 info "Findings"
