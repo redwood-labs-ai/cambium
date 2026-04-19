@@ -330,6 +330,114 @@ describe('Firecracker substrate — escape tests (RED-257)', () => {
     expect(result.stdout).not.toContain('LEAKED');
   }, VITEST_TIMEOUT_MS);
 
+  // ── 4b. Network allowlist — positive + scoping + block_metadata (RED-259) ──
+  //
+  // RED-259 lifted the `:firecracker v1 supports network: 'none' only`
+  // restriction. When a gen declares a NetworkPolicy, the substrate
+  // creates a per-call netns + veth + tap + iptables FORWARD chain
+  // that DROPs by default, ACCEPTs ESTABLISHED/RELATED + each resolved
+  // allowlist IP, and explicitly DROPs metadata / private-IP ranges.
+  // These tests use raw TCP connects (no HTTP layer) against literal
+  // IPs so the assertions don't depend on remote-server behavior
+  // (port 80 being open, no redirects, etc.) — the preflight showed
+  // that fetch + wget both follow Cloudflare's http://1.1.1.1/ →
+  // https://one.one.one.one/ redirect and fail on DNS for the redirect
+  // target, giving a confusing false negative.
+  //
+  // Uses literal IPs to sidestep DNS resolution from the test's POV —
+  // the resolver path is exercised by `firecracker-dns.test.ts`.
+
+  const NET_ALLOW_IP = '1.1.1.1';         // Cloudflare — stable, well-known
+  const NET_BLOCK_IP = '8.8.8.8';         // Google DNS — not in allowlist
+  const NET_METADATA_IP = '169.254.169.254'; // AWS cloud metadata
+
+  /** Build a guest-side TCP-connect probe. Uses Node's `net` module
+   *  directly (no fetch, no undici, no redirects); reports OK / FAIL /
+   *  ERROR with a stable marker the assertions grep for. */
+  function tcpConnectProbe(host: string, port: number, marker: string): string {
+    return `
+      const net = require('net');
+      const sock = net.connect({ host: ${JSON.stringify(host)}, port: ${port} });
+      let done = false;
+      const finish = (msg) => { if (done) return; done = true; console.log(msg); try { sock.destroy(); } catch (_) {} };
+      sock.setTimeout(3000);
+      sock.once('connect',  () => finish('${marker}_OK'));
+      sock.once('timeout',  () => finish('${marker}_TIMEOUT'));
+      sock.once('error',    (e) => finish('${marker}_ERROR:' + (e.code || e.name)));
+    `;
+  }
+
+  const BASIC_POLICY = {
+    allowlist: [NET_ALLOW_IP],
+    denylist: [] as string[],
+    block_private: true,
+    block_metadata: true,
+  };
+
+  it('allowlisted IP IS reachable via TCP from the guest', async () => {
+    // The positive-path test: a gen with an allowlist containing
+    // 1.1.1.1 must be able to reach 1.1.1.1. If this fails, the
+    // feature doesn't work — whole integration is broken.
+    const result = await sub.execute({
+      ...DEFAULT_OPTS,
+      network: BASIC_POLICY,
+      language: 'js',
+      code: tcpConnectProbe(NET_ALLOW_IP, 80, 'ALLOW'),
+    });
+    expect(result.status).toBe('completed');
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('ALLOW_OK');
+  }, VITEST_TIMEOUT_MS);
+
+  it('non-allowlisted IP is NOT reachable even when another IP IS allowlisted', async () => {
+    // The allowlist only grants 1.1.1.1; 8.8.8.8 must stay blocked
+    // even when the guest has network access to the allowlisted target.
+    // This confirms the iptables DEFAULT DROP + per-IP ACCEPT pattern
+    // is scoped, not a blanket "network enabled" switch.
+    const result = await sub.execute({
+      ...DEFAULT_OPTS,
+      network: BASIC_POLICY,
+      language: 'js',
+      code: tcpConnectProbe(NET_BLOCK_IP, 80, 'BLOCK'),
+    });
+    expect(result.status).toBe('completed');
+    // A blocked IP surfaces as either TIMEOUT (iptables silently drops
+    // the SYN) or ERROR:EHOSTUNREACH (kernel short-circuits); what we
+    // forbid is BLOCK_OK (connection succeeded).
+    expect(result.stdout).not.toContain('BLOCK_OK');
+    expect(result.stdout).toMatch(/BLOCK_(TIMEOUT|ERROR)/);
+  }, VITEST_TIMEOUT_MS);
+
+  it('cloud metadata is blocked even when added to the allowlist (block_metadata wins)', async () => {
+    // RED-137 invariant: `block_metadata: true` rejects 169.254.169.254
+    // regardless of allowlist membership. Here we pathologically put
+    // the metadata IP in the allowlist AND leave block_metadata on;
+    // the rule ordering in `buildNetnsForwardRules` places the
+    // metadata DROP BEFORE any allowlist ACCEPT, so the DROP fires.
+    const result = await sub.execute({
+      ...DEFAULT_OPTS,
+      network: {
+        allowlist: [NET_ALLOW_IP, NET_METADATA_IP], // metadata deliberately present
+        denylist: [],
+        block_private: true,
+        block_metadata: true,
+      } as any,
+      language: 'js',
+      code: tcpConnectProbe(NET_METADATA_IP, 80, 'META'),
+    });
+    // Note: resolveAllowlist ALSO rejects a literal metadata IP at
+    // resolve time when block_metadata is on (defense in depth). If
+    // that catches it first, the substrate surfaces a `crashed`
+    // result with a clear policy error — either outcome is
+    // acceptable for this test; what we forbid is reaching metadata.
+    if (result.status === 'crashed') {
+      expect(result.reason).toMatch(/169\.254\.169\.254|policy/i);
+    } else {
+      expect(result.status).toBe('completed');
+      expect(result.stdout).not.toContain('META_OK');
+    }
+  }, VITEST_TIMEOUT_MS);
+
   // ── 5. Subprocess containment ────────────────────────────────────────
   //
   // Why this passes for Firecracker: the guest CAN spawn subprocesses
