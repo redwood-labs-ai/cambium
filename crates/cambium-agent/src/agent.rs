@@ -102,6 +102,7 @@ mod tests {
             timeout_seconds: 5,
             max_output_bytes: 10_000,
             mounts: vec![],
+            net: None,
         };
         let (mut cursor, response_start) = framed_request_stream(&req);
 
@@ -145,6 +146,7 @@ mod tests {
             timeout_seconds: 5,
             max_output_bytes: 10_000,
             mounts: vec![],
+            net: None,
         };
         let (mut cursor, response_start) = framed_request_stream(&req);
 
@@ -172,6 +174,7 @@ mod tests {
             timeout_seconds: 5,
             max_output_bytes: 10_000,
             mounts: vec![],
+            net: None,
         };
         let (mut cursor, _) = framed_request_stream(&req);
         handle_one(&mut cursor).expect("unicode handled without panic");
