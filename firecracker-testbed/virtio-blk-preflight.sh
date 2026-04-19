@@ -219,21 +219,26 @@ const { execSync } = require('child_process');
 let out;
 try {
   out = execSync([
-    'echo "--- /dev/disk/by-label/ ---"',
-    'ls -la /dev/disk/by-label/ 2>&1 || echo "(directory missing)"',
+    'echo "--- /dev/disk/by-label/ CONTENTS ---"',
+    '(ls -la /dev/disk/by-label/ 2>&1 && echo "BY_LABEL_DIR_EXISTS") || echo "BY_LABEL_DIR_MISSING"',
     'echo "--- /dev/vd* ---"',
     'ls -la /dev/vd* 2>&1',
     'echo "--- blkid ---"',
     'blkid 2>&1 || echo "(blkid unavailable)"',
-    'echo "--- mount by label ---"',
+    'echo "--- mount by label (ext4 explicit) ---"',
     'mkdir -p /mnt/testlabel',
-    'mount /dev/disk/by-label/CAMBIUMPREFL /mnt/testlabel 2>&1 && echo "MOUNTED_BY_LABEL" || echo "FAILED_BY_LABEL"',
+    'mount -t ext4 /dev/disk/by-label/CAMBIUMPREFL /mnt/testlabel 2>&1 && echo "MOUNTED_BY_LABEL" || echo "FAILED_BY_LABEL"',
     'cat /mnt/testlabel/sentinel 2>&1 | sed "s/^/LABEL_READ: /"',
     'umount /mnt/testlabel 2>/dev/null',
-    'echo "--- mount by device ---"',
+    'echo "--- mount by device (ext4 explicit) ---"',
     'mkdir -p /mnt/testdev',
-    'mount /dev/vdb /mnt/testdev 2>&1 && echo "MOUNTED_BY_DEV" || echo "FAILED_BY_DEV"',
+    'mount -t ext4 /dev/vdb /mnt/testdev 2>&1 && echo "MOUNTED_BY_DEV" || echo "FAILED_BY_DEV"',
     'cat /mnt/testdev/sentinel 2>&1 | sed "s/^/DEV_READ: /"',
+    'umount /mnt/testdev 2>/dev/null',
+    'echo "--- /etc/filesystems + /proc/filesystems ---"',
+    'cat /etc/filesystems 2>&1 || echo "(no /etc/filesystems)"',
+    'echo "---"',
+    'grep -E "ext4|ext3|ext2" /proc/filesystems 2>&1',
   ].join(' ; '), { shell: '/bin/sh' }).toString();
 } catch (e) {
   out = 'EXEC ERROR: ' + (e.stderr?.toString() || e.message);
@@ -295,7 +300,9 @@ dev_mount_works=false
 label_read_works=false
 dev_read_works=false
 
-if echo "${OUT}" | grep -q "/dev/disk/by-label/CAMBIUMPREFL"; then
+# Check for the explicit marker the probe emits — not just the label
+# string, which would false-positive on the mount error line.
+if echo "${OUT}" | grep -q "BY_LABEL_DIR_EXISTS"; then
   by_label_populated=true
 fi
 if echo "${OUT}" | grep -q "MOUNTED_BY_LABEL"; then
