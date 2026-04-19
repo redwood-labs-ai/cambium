@@ -86,7 +86,8 @@ export type FallbackReason =
   | 'missing'
   | 'load_failed'
   | 'shared_mem_unsupported'
-  | 'build_locked';
+  | 'build_locked'
+  | 'allowlist_hash_failed';
 
 /**
  * Check whether the ExecOpts match canonical sizing AFTER the
@@ -104,17 +105,23 @@ export function isCanonicalSizing(opts: { cpu: number; memory: number }): boolea
 
 /**
  * Content-addressed cache key for `(rootfs, kernel, canonical
- * machine-config)`. SHA-256(rootfs) concatenated with SHA-256(kernel),
- * concatenated with SHA-256(JSON-canonicalized machine-config), then
- * re-hashed and the first 16 hex chars used. Short enough to be a
- * readable directory name, long enough that accidental collisions
- * are negligible. Re-hashing with concat rather than joining strings
- * is to defend against any length-extension-ish confusion; 16 hex
- * chars = 64 bits of randomness, which is plenty for a local cache.
+ * machine-config, allowlist signature)`. SHA-256 of each component,
+ * concatenated, re-hashed, first 16 hex chars used. Short enough
+ * to be a readable directory name, long enough that accidental
+ * collisions are negligible. 16 hex chars = 64 bits of randomness,
+ * plenty for a workspace-local cache.
+ *
+ * The allowlist signature (RED-258) includes both the declared
+ * allowlist metadata AND a content hash of each source directory,
+ * so changes to any file in an allowlisted path invalidate the
+ * cache. Absent allowlist (or `allowlistSig = 'allowlist:none'`)
+ * yields the same key shape as pre-RED-258 cache entries — no
+ * invalidation of existing caches just for adding the parameter.
  */
 export async function computeCacheKey(
   rootfsPath: string,
   kernelPath: string,
+  allowlistSig: string,
   options?: { _hashFile?: (path: string) => Promise<string> },
 ): Promise<string> {
   const hashFile = options?._hashFile ?? hashFileWithCache;
@@ -127,6 +134,7 @@ export async function computeCacheKey(
     .update(rootfsHash)
     .update(kernelHash)
     .update(configHash)
+    .update(allowlistSig)
     .digest('hex');
   return combined.slice(0, 16);
 }
@@ -230,15 +238,19 @@ export interface SnapshotHandle {
   cacheKey: string;
 }
 
-/** Compute the SnapshotHandle for a (rootfs, kernel) pair without
- *  checking whether the files exist on disk. */
+/** Compute the SnapshotHandle for a (rootfs, kernel, allowlist-sig)
+ *  tuple without checking whether the files exist on disk. The
+ *  `allowlistSig` argument comes from `hashAllowlist()` in
+ *  `firecracker-allowlist.ts`; pass `'allowlist:none'` when the
+ *  caller has no filesystem policy declared. */
 export async function handleFor(
   rootfsPath: string,
   kernelPath: string,
+  allowlistSig: string,
   cacheRoot: string,
   options?: { _hashFile?: (path: string) => Promise<string> },
 ): Promise<SnapshotHandle> {
-  const cacheKey = await computeCacheKey(rootfsPath, kernelPath, options);
+  const cacheKey = await computeCacheKey(rootfsPath, kernelPath, allowlistSig, options);
   const dir = join(cacheRoot, cacheKey);
   return {
     dir,

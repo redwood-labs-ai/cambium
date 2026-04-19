@@ -50,30 +50,90 @@ describe('FirecrackerSubstrate.execute — scope gates', () => {
     expect(result.reason).toMatch(/allowlist/);
   });
 
-  it('rejects a non-"none" filesystem policy with a pointer to the follow-up path', async () => {
+  it('rejects an allowlist path that collides with a deep-forbidden rootfs prefix', async () => {
+    // RED-258: filesystem allowlist is supported via virtio-blk ext4
+    // images, but system-owned trees like /etc are DEEP_FORBIDDEN —
+    // the prefix itself AND any subpath are rejected because mounting
+    // under them would shadow the guest's own config / binaries /
+    // kernel interfaces / agent scratch.
     const sub = new FirecrackerSubstrate();
     const result = await sub.execute({
       ...baseOpts,
-      filesystem: { allowlist_paths: ['/var/data'] },
+      filesystem: { allowlist_paths: ['/etc/myapp'] },
     });
     expect(result.status).toBe('crashed');
-    expect(result.reason).toMatch(/filesystem: 'none' only/);
-    expect(result.reason).toMatch(/\/var\/data/);
+    expect(result.reason).toMatch(/rootfs-owned prefix/);
+    expect(result.reason).toMatch(/\/etc\/myapp/);
+  });
+
+  it('rejects exact-mount at a user-land prefix (e.g. /var) but allows subpaths', async () => {
+    // EXACT_FORBIDDEN: /var itself is rejected (exact-match shadows
+    // the whole tree), but a subpath like /var/app/input is allowed
+    // at policy-validation time — it would then be stat-checked for
+    // existence, and if absent fail with source_missing. That's the
+    // Cambium opinion: user-land FHS prefixes are open to deep use.
+    const sub = new FirecrackerSubstrate();
+    const exact = await sub.execute({
+      ...baseOpts,
+      filesystem: { allowlist_paths: ['/var'] },
+    });
+    expect(exact.status).toBe('crashed');
+    expect(exact.reason).toMatch(/rootfs-owned prefix/);
+
+    const subpath = await sub.execute({
+      ...baseOpts,
+      filesystem: { allowlist_paths: ['/var/probably-does-not-exist-cambium'] },
+    });
+    expect(subpath.status).toBe('crashed');
+    // source_missing, NOT rootfs_collision — the prefix check passed
+    expect(subpath.reason).toMatch(/does not exist on host/);
+  });
+
+  it('rejects a relative allowlist path', async () => {
+    const sub = new FirecrackerSubstrate();
+    const result = await sub.execute({
+      ...baseOpts,
+      filesystem: { allowlist_paths: ['relative/dir'] },
+    });
+    expect(result.status).toBe('crashed');
+    expect(result.reason).toMatch(/must be absolute/);
+  });
+
+  it('rejects an allowlist path with traversal segments', async () => {
+    const sub = new FirecrackerSubstrate();
+    const result = await sub.execute({
+      ...baseOpts,
+      filesystem: { allowlist_paths: ['/data/../etc'] },
+    });
+    expect(result.status).toBe('crashed');
+    // Either the traversal check fires first or the normalization
+    // check does — both are correct outcomes. Accept either.
+    expect(result.reason).toMatch(/\.\.|normalized/);
+  });
+
+  it('rejects an allowlist pointing at a non-existent host directory', async () => {
+    const sub = new FirecrackerSubstrate();
+    const result = await sub.execute({
+      ...baseOpts,
+      filesystem: { allowlist_paths: ['/opt/definitely-not-here-cambium-test-xyz-42'] },
+    });
+    expect(result.status).toBe('crashed');
+    expect(result.reason).toMatch(/does not exist on host/);
   });
 
   it('fails closed on a malformed filesystem shape (no allowlist_paths) without leaking a TypeError', async () => {
     // Models a bad IR that got past the TS type checker via `as any`:
     // filesystem is an object but missing the expected allowlist_paths
     // field. The gate should still refuse cleanly and return a
-    // status:'crashed' with the pointer message — NOT a raw stack
-    // trace from `undefined.join(...)`.
+    // status:'crashed' with a clean error — NOT a raw stack trace
+    // from `undefined.join(...)` or similar.
     const sub = new FirecrackerSubstrate();
     const result = await sub.execute({
       ...baseOpts,
       filesystem: {} as any,
     });
     expect(result.status).toBe('crashed');
-    expect(result.reason).toMatch(/filesystem: 'none' only/);
+    expect(result.reason).toMatch(/filesystem policy must be 'none' or/);
     expect(result.reason).not.toMatch(/TypeError/);
     expect(result.reason).not.toMatch(/Cannot read properties/);
   });

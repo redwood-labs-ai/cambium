@@ -57,30 +57,30 @@ describe('computeCacheKey + digest cache', () => {
   });
 
   it('produces a short hex key', async () => {
-    const key = await computeCacheKey(rootfs, kernel);
+    const key = await computeCacheKey(rootfs, kernel, 'allowlist:none');
     // 16 hex chars, all lowercase.
     expect(key).toMatch(/^[0-9a-f]{16}$/);
   });
 
   it('is deterministic across calls for the same inputs', async () => {
-    const a = await computeCacheKey(rootfs, kernel);
-    const b = await computeCacheKey(rootfs, kernel);
+    const a = await computeCacheKey(rootfs, kernel, 'allowlist:none');
+    const b = await computeCacheKey(rootfs, kernel, 'allowlist:none');
     expect(a).toBe(b);
   });
 
   it('changes when rootfs content changes', async () => {
-    const a = await computeCacheKey(rootfs, kernel);
+    const a = await computeCacheKey(rootfs, kernel, 'allowlist:none');
     // mtime change + content change together — more realistic than
     // content-change-only because `utimes` is the usual trigger.
     writeFileSync(rootfs, 'now the rootfs is different', { mode: 0o600 });
-    const b = await computeCacheKey(rootfs, kernel);
+    const b = await computeCacheKey(rootfs, kernel, 'allowlist:none');
     expect(a).not.toBe(b);
   });
 
   it('changes when kernel content changes', async () => {
-    const a = await computeCacheKey(rootfs, kernel);
+    const a = await computeCacheKey(rootfs, kernel, 'allowlist:none');
     writeFileSync(kernel, 'now the kernel is different', { mode: 0o600 });
-    const b = await computeCacheKey(rootfs, kernel);
+    const b = await computeCacheKey(rootfs, kernel, 'allowlist:none');
     expect(a).not.toBe(b);
   });
 
@@ -91,8 +91,8 @@ describe('computeCacheKey + digest cache', () => {
       calls += 1;
       return `fake-hash-for-${path}`;
     };
-    await computeCacheKey(rootfs, kernel, { _hashFile: mockHash });
-    await computeCacheKey(rootfs, kernel, { _hashFile: mockHash });
+    await computeCacheKey(rootfs, kernel, 'allowlist:none', { _hashFile: mockHash });
+    await computeCacheKey(rootfs, kernel, 'allowlist:none', { _hashFile: mockHash });
     // Two files × two computeCacheKey calls = 4 total hash requests,
     // all through the _hashFile override (which bypasses the real
     // in-process cache). The test confirms the override is invoked
@@ -107,14 +107,14 @@ describe('computeCacheKey + digest cache', () => {
     // second call with identical file state should hit the cache
     // (no extra stat cost beyond the cheap key lookup). Third call
     // after rewriting invalidates via (path, size, mtime) mismatch.
-    const a = await computeCacheKey(rootfs, kernel);
+    const a = await computeCacheKey(rootfs, kernel, 'allowlist:none');
     const before = statSync(rootfs).mtimeMs;
     // Force a later mtime by writing again.
     await new Promise((r) => setTimeout(r, 15));
     writeFileSync(rootfs, 'same length content!!   ', { mode: 0o600 }); // same length, different content
     const after = statSync(rootfs).mtimeMs;
     expect(after).toBeGreaterThan(before);
-    const b = await computeCacheKey(rootfs, kernel);
+    const b = await computeCacheKey(rootfs, kernel, 'allowlist:none');
     expect(a).not.toBe(b);
   });
 });
@@ -135,7 +135,7 @@ describe('handleFor + cache directory perms', () => {
   });
 
   it('handleFor composes expected layout', async () => {
-    const handle = await handleFor(rootfs, kernel, cacheRoot);
+    const handle = await handleFor(rootfs, kernel, 'allowlist:none', cacheRoot);
     expect(handle.cacheKey).toMatch(/^[0-9a-f]{16}$/);
     expect(handle.dir).toBe(join(cacheRoot, handle.cacheKey));
     expect(handle.memFile).toBe(join(handle.dir, 'mem.img'));
@@ -143,12 +143,12 @@ describe('handleFor + cache directory perms', () => {
   });
 
   it('snapshotExists returns false when cache is empty', async () => {
-    const handle = await handleFor(rootfs, kernel, cacheRoot);
+    const handle = await handleFor(rootfs, kernel, 'allowlist:none', cacheRoot);
     expect(snapshotExists(handle)).toBe(false);
   });
 
   it('snapshotExists returns true only when BOTH files are present', async () => {
-    const handle = await handleFor(rootfs, kernel, cacheRoot);
+    const handle = await handleFor(rootfs, kernel, 'allowlist:none', cacheRoot);
     mkdirSync(handle.dir, { recursive: true });
     writeFileSync(handle.memFile, 'mem', { mode: 0o600 });
     expect(snapshotExists(handle)).toBe(false); // snapshot file still missing
@@ -157,14 +157,14 @@ describe('handleFor + cache directory perms', () => {
   });
 
   it('ensureCacheDir creates the directory with 0700 perms', async () => {
-    const handle = await handleFor(rootfs, kernel, cacheRoot);
+    const handle = await handleFor(rootfs, kernel, 'allowlist:none', cacheRoot);
     ensureCacheDir(handle);
     const mode = statSync(handle.dir).mode & 0o777;
     expect(mode).toBe(0o700);
   });
 
   it('ensureCacheDir tightens perms if the directory was created with a looser mode', async () => {
-    const handle = await handleFor(rootfs, kernel, cacheRoot);
+    const handle = await handleFor(rootfs, kernel, 'allowlist:none', cacheRoot);
     // Simulate a pre-existing directory with relaxed perms (e.g.,
     // created before our chmod landed, or by a different process).
     mkdirSync(handle.dir, { recursive: true });
@@ -227,7 +227,7 @@ describe('tryAcquireCacheLock / releaseCacheLock', () => {
   });
 
   it('acquires cleanly when the cache entry is free', async () => {
-    const handle = await handleFor(rootfs, kernel, cacheRoot);
+    const handle = await handleFor(rootfs, kernel, 'allowlist:none', cacheRoot);
     ensureCacheDir(handle);
     const fd = tryAcquireCacheLock(handle);
     expect(fd).not.toBeNull();
@@ -237,7 +237,7 @@ describe('tryAcquireCacheLock / releaseCacheLock', () => {
   });
 
   it('second acquire fails while the first is held, then succeeds after release', async () => {
-    const handle = await handleFor(rootfs, kernel, cacheRoot);
+    const handle = await handleFor(rootfs, kernel, 'allowlist:none', cacheRoot);
     ensureCacheDir(handle);
     const fd1 = tryAcquireCacheLock(handle);
     expect(fd1).not.toBeNull();
@@ -250,7 +250,7 @@ describe('tryAcquireCacheLock / releaseCacheLock', () => {
   });
 
   it('releaseCacheLock is a no-op on null fd (idempotent with double-release)', async () => {
-    const handle = await handleFor(rootfs, kernel, cacheRoot);
+    const handle = await handleFor(rootfs, kernel, 'allowlist:none', cacheRoot);
     ensureCacheDir(handle);
     const fd = tryAcquireCacheLock(handle);
     releaseCacheLock(handle, fd);

@@ -141,13 +141,23 @@ b) **HTTP proxy through the runner.** The agent makes outbound HTTP calls via a 
 
 Either path adds surface area we should only add with a driver. V1 ships without, DSL shape already accepts it.
 
-### 6. Filesystem in v1: bind-mount allowlist, read-only default.
+### 6. Filesystem in v1: virtio-blk ext4 allowlist, read-only only (RED-258).
 
 `filesystem: :none` → rootfs + tmpfs `/tmp` only; `/tmp` is always read-write, always ephemeral (dies with the VM).
 
-`filesystem: { allowlist_paths: ['/data/in'] }` → host bind-mounts each path into the VM at the same logical location, read-only. Explicit `{ allowlist_paths: [...], rw: [...] }` opts a subset into read-write. No wildcard paths ever; each entry is an explicit directory or file.
+`filesystem: { allowlist_paths: ['/data/in'] }` → for each declared host directory, the substrate builds a read-only ext4 image via `mke2fs -d <host_dir>`, caches it alongside the snapshot, attaches it to the VM as a virtio-blk drive (`/dev/vdb`, `/dev/vdc`, ... up to `/dev/vdy` — rootfs occupies `/dev/vda`), and the in-guest agent mounts `-t ext4 -o ro <device> <guest_path>` before dispatching user code. v1 uses identity mapping (host_path === guest_path). Each allowlist entry becomes exactly one drive, bounded at 24 entries.
+
+**Firecracker does not support virtio-fs.** The design originally assumed host bind-mounts; hardware / firecracker device-list reality forced virtio-blk. Consequences:
+- **Content freshness = image-build time.** Editing files under an allowlisted host directory while the VM runs has no effect until the cache entry invalidates and the image rebuilds on the next cold path. The snapshot cache key includes `hashAllowlist(entries)` — an mtime/size/inode signature of each host directory — so content changes DO invalidate between runs automatically.
+- **Read-only only in v1.** The wire protocol has a `read_only` bool, but the host hardcodes `true` and the in-guest agent (`crates/cambium-agent/src/mounts.rs`) refuses any mount with `read_only: false` as belt-and-suspenders. Future read-write support requires touching both enforcement points.
+- **Path validation is strict.** `validateAllowlistPath` rejects non-absolute paths, `..` segments, symlinks (`lstatSync` check — defense against a symlinked `/opt/mydata -> /etc` that would otherwise sneak past the prefix check), and any path colliding with the rootfs's filesystem layout. The collision check is split by the role the prefix plays:
+  - `DEEP_FORBIDDEN_GUEST_PREFIXES` (`/bin`, `/boot`, `/dev`, `/etc`, `/init`, `/lib`, `/lib64`, `/proc`, `/root`, `/run`, `/sbin`, `/sys`, `/tmp`, `/usr`) — the prefix itself AND any subpath under it is rejected. These trees are system-owned (binaries, kernel interfaces, config, agent scratch); any user-side mount would shadow real files or agent writes.
+  - `EXACT_FORBIDDEN_GUEST_PREFIXES` (`/`, `/home`, `/mnt`, `/srv`, `/var`) — only the exact prefix is rejected. Subpaths like `/home/user/project/data` or `/var/app/input` are accepted so a gen can identity-map a real workstation path without first copying it into `/opt/...`. This is Cambium's opinionated Rails-style stance: take a side on user space vs system space rather than refusing the whole FHS top-level.
+- **`mke2fs` is a runtime host dependency.** Alongside the `firecracker` binary. Preflight fails loudly if `mke2fs` is missing from PATH.
 
 `filesystem: :inherit` — resolves against the gen's outer `security filesystem:` block at parse time (already wired in RED-248's TS-side resolver). The substrate sees the already-resolved shape.
+
+Out of scope for v1, tracked as follow-ups: read-write mounts, wildcard paths, non-identity guest paths, symlink-safe allowlisting.
 
 ### 7. Platform: Linux + KVM only.
 
@@ -209,7 +219,7 @@ Extends RED-250's test bench for the Firecracker substrate. Same eight categorie
 | --- | --- | --- |
 | Env var egress | ReferenceError (no `process`) | Agent clears env before spawning interpreter; guest sees no host env vars |
 | Cloud metadata | no `fetch` | No network → connection refused |
-| `~/.ssh/` access | no `fs` | No bind-mount → file not found |
+| `~/.ssh/` access | no `fs` | Not in allowlist → file not found |
 | `/etc/passwd` | no `fs` | The guest's own `/etc/passwd` exists; it's the VM's, not the host's. Test asserts guest `/etc/passwd` does NOT contain host usernames. |
 | Subprocess spawn | no `child_process` | Allowed inside VM; the subprocess can't escape the VM. Test asserts spawned processes cannot read host filesystem or make network calls. |
 | Fork bomb | substrate interrupt | Agent's cgroup pid limit + VM-level memory cap; host is untouched. |
@@ -277,7 +287,7 @@ Listed in the order they unblock each other. Concrete tickets file after this no
 2. **Rootfs build pipeline.** Dockerfile → ext4 image. Matching kernel config. Build script produces `rootfs-<arch>.img` + `vmlinux-<arch>`. Published as release artifacts.
 3. **Host-side `FirecrackerSubstrate`.** Replaces the current stub. Firecracker HTTP-over-Unix-socket client (~100 lines), vsock client wrapper, snapshot creation + restore lifecycle, `ExecResult` assembly.
 4. **Snapshot / restore machinery.** Template-boot, snapshot-create, per-call restore, per-call shutdown. Amortizes snapshot creation to first call.
-5. **Filesystem bind-mount resolution.** Takes the resolved `ExecPolicy.filesystem`, turns it into Firecracker drive config entries. Read-only default, `rw` subset opt-in.
+5. **Filesystem allowlist resolution (RED-258).** Takes the resolved `ExecPolicy.filesystem`, validates + canonicalizes the allowlist, builds one read-only ext4 image per entry via `mke2fs -d`, and turns the list into Firecracker virtio-blk drive config entries attached as `/dev/vdb`..`/dev/vdy`. Read-only only in v1; the agent refuses `read_only: false` mounts as belt-and-suspenders.
 6. **Escape test extension.** Adds the Firecracker variant to the existing RED-250 bench. Gated behind the env flag.
 7. **Operating-Firecracker docs.** The shape of `Operating Firecracker` above, formalized. Includes the "build your own rootfs" recipe with a published Dockerfile.
 
