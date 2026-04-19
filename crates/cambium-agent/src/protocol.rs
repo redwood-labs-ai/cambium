@@ -77,6 +77,60 @@ pub struct Mount {
     pub read_only: bool,
 }
 
+/// One (hostname, IP) mapping the host pre-resolved for the guest.
+/// The agent writes these to `/etc/hosts` before spawning the
+/// interpreter so the guest's name lookups for allowlisted hosts
+/// resolve to the same IPs the host's iptables rules allow.
+///
+/// RED-259's design rationale: resolve allowlisted names host-side
+/// so the guest doesn't need a working DNS resolver. The iptables
+/// policy in the netns is IP-based; names and IPs must stay in sync
+/// so the guest doesn't ARP a name that resolves to an un-allowed
+/// address via guest-local DNS.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostMapping {
+    /// Name as it appears in the allowlist (and in the gen's code).
+    pub name: String,
+    /// IP the host resolved for that name at dispatch time.
+    pub ip: String,
+}
+
+/// Network configuration the agent applies to `eth0` before spawning
+/// the interpreter. `None` on the `ExecRequest.net` field means the
+/// gen requested `network: 'none'` — the agent leaves the interface
+/// alone and the guest has no reachable network.
+///
+/// When `Some`, the agent:
+///   1. Brings `eth0` up with `iface_ip` (CIDR form) as a static address.
+///   2. Adds a default route via `gateway`.
+///   3. Writes each `HostMapping` into `/etc/hosts`.
+///   4. Logs + continues. Any failure surfaces as `Crashed`.
+///
+/// This contract is symmetric with the host-side policy: the host
+/// has already created the netns, attached the tap, installed the
+/// iptables allowlist, and pre-resolved hostnames before handing
+/// `net` over. The guest agent never touches iptables or does its
+/// own resolution — it just obeys the config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetConfig {
+    /// CIDR-form address to assign to `eth0`, e.g. `"10.200.0.2/24"`.
+    /// The agent parses this and applies via
+    /// `ifconfig eth0 <addr> netmask <mask> up` (RED-259 preflight
+    /// confirmed busybox's `ifconfig` applet is the reliable path on
+    /// the reference rootfs; `ip` applet is also present but less
+    /// consistent across busybox builds).
+    pub iface_ip: String,
+    /// Gateway IP on the `iface_ip` subnet — the host-side tap's IP.
+    /// Agent installs a default route via this address.
+    pub gateway: String,
+    /// Pre-resolved (name, ip) mappings to write into `/etc/hosts`.
+    /// Empty when the allowlist holds only literal IPs. Backward-
+    /// compatible via `#[serde(default)]` so a future host adding
+    /// new optional mappings doesn't break older agents.
+    #[serde(default)]
+    pub hosts: Vec<HostMapping>,
+}
+
 /// Single-call request from host to agent. The agent reads exactly
 /// one of these per connection (one-request-per-connection by
 /// design — the host destroys the VM after reading the response).
@@ -104,6 +158,13 @@ pub struct ExecRequest {
     /// field parse cleanly as an empty vec.
     #[serde(default)]
     pub mounts: Vec<Mount>,
+    /// Network configuration the agent applies to `eth0` before
+    /// spawning the interpreter. `None` means the gen requested
+    /// `network: 'none'` — leave the interface alone. Backward-
+    /// compatible via `#[serde(default)]`: older hosts that don't
+    /// send this field parse cleanly as `None`.
+    #[serde(default)]
+    pub net: Option<NetConfig>,
 }
 
 /// Single-call response from agent back to host. Written after the
@@ -207,6 +268,7 @@ mod tests {
             timeout_seconds: 30,
             max_output_bytes: 50_000,
             mounts: vec![],
+            net: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: ExecRequest = serde_json::from_str(&json).unwrap();
@@ -237,6 +299,7 @@ mod tests {
                     read_only: true,
                 },
             ],
+            net: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: ExecRequest = serde_json::from_str(&json).unwrap();
@@ -263,6 +326,92 @@ mod tests {
         let parsed: ExecRequest =
             serde_json::from_str(json).expect("legacy request shape must parse");
         assert!(parsed.mounts.is_empty());
+        assert!(parsed.net.is_none());
+    }
+
+    #[test]
+    fn exec_request_with_net_round_trip() {
+        // A request carrying NetConfig must serialize + parse
+        // symmetrically. The host builds these from the pre-resolved
+        // NetworkPolicy allowlist at dispatch time.
+        let req = ExecRequest {
+            language: Language::Js,
+            code: "fetch('http://api.example.com/')".to_string(),
+            cpu: 1.0,
+            memory_mb: 256,
+            timeout_seconds: 30,
+            max_output_bytes: 50_000,
+            mounts: vec![],
+            net: Some(NetConfig {
+                iface_ip: "10.200.0.2/24".to_string(),
+                gateway: "10.200.0.1".to_string(),
+                hosts: vec![
+                    HostMapping {
+                        name: "api.example.com".to_string(),
+                        ip: "93.184.216.34".to_string(),
+                    },
+                    HostMapping {
+                        name: "cdn.example.com".to_string(),
+                        ip: "151.101.1.57".to_string(),
+                    },
+                ],
+            }),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: ExecRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+        let net = parsed.net.as_ref().expect("net must round-trip");
+        assert_eq!(net.iface_ip, "10.200.0.2/24");
+        assert_eq!(net.gateway, "10.200.0.1");
+        assert_eq!(net.hosts.len(), 2);
+    }
+
+    #[test]
+    fn exec_request_without_net_field_parses_as_none() {
+        // Backward-compat: the RED-258 host side doesn't know about
+        // `net` yet. JSON without `net` must parse as None (via
+        // #[serde(default)]). Without this, RED-259 agent changes
+        // would break every existing host until the host-side PR
+        // lands — and we specifically want to ship agent protocol
+        // first so the host can be iterated against a stable agent.
+        let json = r#"{
+            "language": "js",
+            "code": "console.log(1)",
+            "cpu": 1.0,
+            "memory_mb": 128,
+            "timeout_seconds": 5,
+            "max_output_bytes": 50000
+        }"#;
+        let parsed: ExecRequest =
+            serde_json::from_str(json).expect("legacy request shape must parse");
+        assert!(parsed.net.is_none());
+    }
+
+    #[test]
+    fn net_config_without_hosts_field_parses_as_empty() {
+        // Forward-compat: a host that sends a NetConfig with an empty
+        // hosts list (or omits the field) must parse as Vec::new().
+        // The allowlist may contain only literal IPs; no /etc/hosts
+        // entries needed.
+        let json = r#"{
+            "iface_ip": "10.200.0.2/24",
+            "gateway": "10.200.0.1"
+        }"#;
+        let parsed: NetConfig =
+            serde_json::from_str(json).expect("NetConfig without hosts must parse");
+        assert!(parsed.hosts.is_empty());
+    }
+
+    #[test]
+    fn host_mapping_serializes_as_snake_case_fields() {
+        let m = HostMapping {
+            name: "api.github.com".to_string(),
+            ip: "140.82.112.6".to_string(),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        // The host-side TS marshals against these exact keys.
+        assert!(json.contains(r#""name":"api.github.com""#));
+        assert!(json.contains(r#""ip":"140.82.112.6""#));
     }
 
     #[test]
