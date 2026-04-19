@@ -100,6 +100,7 @@ cleanup() {
   if [ -n "${HOST_OUT_IFACE}" ]; then
     sudo iptables -t nat -D POSTROUTING -s "${GUEST_SUBNET}" -o "${HOST_OUT_IFACE}" -j MASQUERADE 2>/dev/null || true
     sudo iptables -t nat -D POSTROUTING -s "${VETH_SUBNET}" -o "${HOST_OUT_IFACE}" -j MASQUERADE 2>/dev/null || true
+    sudo ip route delete "${GUEST_SUBNET}" via "${VETH_G_IP}" dev "${VETH_H}" 2>/dev/null || true
     sudo iptables -D FORWARD -i "${VETH_H}" -j ACCEPT 2>/dev/null || true
     sudo iptables -D FORWARD -o "${VETH_H}" -j ACCEPT 2>/dev/null || true
   fi
@@ -164,6 +165,14 @@ sudo ip link set "${VETH_G}" netns "${NETNS}"
 sudo ip addr add "${VETH_H_IP}/24" dev "${VETH_H}" 2>&1 \
   || fail "ip addr add veth-h IP failed — a stale veth may exist"
 sudo ip link set "${VETH_H}" up
+# Return-path route: the root netns needs to know that 10.200.0.0/24
+# (the guest subnet) is reachable via the netns's veth-g IP on cambpf-h.
+# Without this, reply packets from 1.1.1.1 un-NAT back to 10.200.0.2,
+# fall through to the default route, and loop back out eth1 where the
+# LAN gateway drops them. Symptom: outbound works, everything that
+# requires a reply (ICMP echo, TCP handshake, HTTP fetch) silently
+# times out — exactly what the previous runs showed.
+sudo ip route add "${GUEST_SUBNET}" via "${VETH_G_IP}" dev "${VETH_H}"
 sudo ip netns exec "${NETNS}" ip addr add "${VETH_G_IP}/24" dev "${VETH_G}"
 sudo ip netns exec "${NETNS}" ip link set "${VETH_G}" up
 sudo ip netns exec "${NETNS}" ip link set lo up
@@ -176,7 +185,7 @@ sudo ip netns exec "${NETNS}" ip route add default via "${VETH_H_IP}"
 # here — the packets were getting to the tap but dying in the
 # netns's forwarding path.
 sudo ip netns exec "${NETNS}" sysctl -w net.ipv4.ip_forward=1 >/dev/null
-pass "veth pair up: ${VETH_H}=${VETH_H_IP} <-> ${VETH_G}=${VETH_G_IP} (VETH_SUBNET=${VETH_SUBNET}), netns ip_forward=1"
+pass "veth pair up: ${VETH_H}=${VETH_H_IP} <-> ${VETH_G}=${VETH_G_IP} (VETH_SUBNET=${VETH_SUBNET}); root route for ${GUEST_SUBNET} via ${VETH_G_IP}; netns ip_forward=1"
 
 # Tap device — lives in the netns so Firecracker can attach it.
 sudo ip netns exec "${NETNS}" ip tuntap add "${TAP}" mode tap
@@ -303,8 +312,8 @@ echo "  host ip rule (policy routing — Tailscale + others may divert):"
 ip rule show 2>&1 | sed 's/^/    /'
 echo "  host routing decision for a guest packet (1.1.1.1 from 10.200.0.2 in via ${VETH_H}):"
 sudo ip route get 1.1.1.1 from 10.200.0.2 iif "${VETH_H}" 2>&1 | sed 's/^/    /'
-echo "  host routes: main table default + tailscale0 presence:"
-ip route show 2>&1 | grep -E '^default|tailscale' | sed 's/^/    /'
+echo "  host routes: main table default + tailscale0 presence + our return route:"
+ip route show 2>&1 | grep -E "^default|tailscale|${VETH_H}|${GUEST_SUBNET%/*}" | sed 's/^/    /'
 ip -4 route show table all 2>&1 | grep -E '1\.1\.1\.1|^default.*tailscale|unreachable' | head -n 20 | sed 's/^/    /'
 
 echo "  netns state:"
@@ -607,9 +616,9 @@ echo "${OUT}"
 info "Post-probe state"
 set +eo pipefail
 echo "  ${TAP} counters (post-probe — should be non-zero if guest sent anything):"
-sudo ip netns exec "${NETNS}" ip -s link show "${TAP}" 2>&1 | grep -E 'RX:|TX:|bytes' | sed 's/^/    /'
+sudo ip netns exec "${NETNS}" ip -s link show "${TAP}" 2>&1 | sed 's/^/    /'
 echo "  ${VETH_G} counters (netns side of host link — TX non-zero means guest traffic left netns):"
-sudo ip netns exec "${NETNS}" ip -s link show "${VETH_G}" 2>&1 | grep -E 'RX:|TX:|bytes' | sed 's/^/    /'
+sudo ip netns exec "${NETNS}" ip -s link show "${VETH_G}" 2>&1 | sed 's/^/    /'
 echo "  conntrack entries for 10.200.0.0/24 (did host conntrack see guest traffic?):"
 if command -v conntrack >/dev/null; then
   sudo conntrack -L -s 10.200.0.0/24 2>&1 | head -n 10 | sed 's/^/    /'
