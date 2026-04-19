@@ -317,9 +317,27 @@ function sleep(ms: number): Promise<void> {
  * returns a handle flagged `operatorManaged: true`. The netns must
  * exist and be populated with the expected shape.
  */
+/** Linux netns / interface name format. Both share the same rules:
+ *  start with a letter, only letters/digits/`_`/`-`, ≤ 15 chars
+ *  (kernel IFNAMSIZ minus trailing NUL). Tightening this check at the
+ *  boundary follows the same "validate operator-supplied names before
+ *  they reach a path/argv slot" stance the Ruby DSL takes (RED-214
+ *  pack-name regex, RED-215 memory-pool regex). No injection risk
+ *  today (all spawn calls use argv arrays, not shell), but a
+ *  format-checked value gives a clear "your env var is malformed"
+ *  error instead of a confusing `ip netns exec: no such namespace`. */
+const NETNS_NAME_RE = /^[a-zA-Z][a-zA-Z0-9_-]{0,14}$/;
+
 export async function setupNetns(opts: SetupOpts): Promise<NetnsHandle> {
   const preparedNs = process.env.CAMBIUM_FC_PREPARED_NETNS;
   if (preparedNs) {
+    if (!NETNS_NAME_RE.test(preparedNs)) {
+      throw new Error(
+        `CAMBIUM_FC_PREPARED_NETNS=${JSON.stringify(preparedNs)} is malformed — ` +
+          `must match ${NETNS_NAME_RE} (start with a letter, only [a-zA-Z0-9_-], ≤ 15 chars; ` +
+          `Linux netns/interface naming rules).`,
+      );
+    }
     // Sanity: confirm the netns actually exists. A typo in the env
     // var would otherwise surface much later as "firecracker: can't
     // find tap device".

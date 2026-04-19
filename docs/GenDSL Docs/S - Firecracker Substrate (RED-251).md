@@ -259,6 +259,12 @@ Practical deployment shapes:
 
 V1 does **not** ship a "run Firecracker in Docker" flow. If the user's Docker host has `/dev/kvm` available, the flow works; we don't engineer around the cases where it doesn't.
 
+### Rootfs rebuild after agent code changes
+
+The guest agent (`crates/cambium-agent/`) is compiled INTO the rootfs at build time, not loaded dynamically. The rootfs Dockerfile (`firecracker-testbed/rootfs/Dockerfile`) takes the agent source as a build context and bakes the resulting binary at `/usr/local/bin/cambium-agent` inside the ext4 image. The kernel boots whatever binary was baked in; subsequent agent source changes do NOT propagate to running VMs.
+
+Operationally: any time `crates/cambium-agent/` changes, rebuild the rootfs (`firecracker-testbed/rootfs/build.sh` or invoke the Dockerfile directly) and re-point `CAMBIUM_FC_ROOTFS` if the build wrote to a new path. Symptoms of a stale rootfs include `result.status === 'completed'` paired with surprising guest behaviour (e.g., `eth0` not configured, `/etc/hosts` empty, mounts missing) — the binary inside the VM doesn't know about the host-side changes the substrate is making. The RED-259 escape-test debug burned several iterations on a stale rootfs whose agent didn't have `apply_net_config`; the fix was a rebuild.
+
 ### Environment variables
 
 The substrate reads four env vars at `available()` time and per dispatch. All four are operator-level (not per-gen policy — a gen can't change them via the DSL):
