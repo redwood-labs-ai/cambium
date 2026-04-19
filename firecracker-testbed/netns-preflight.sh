@@ -322,19 +322,27 @@ else:
 # doubled.
 code = """
 const {{ execSync }} = require('child_process');
-// The reference rootfs (Alpine + busybox + python3 + nodejs + ca-certs)
-// doesn't bundle iproute2, so `ip` is not on PATH. Busybox ships
-// `ifconfig` and `route` by default, which cover everything we need
-// for a flat /24 with one default gateway. The eventual RED-259
-// agent will use whichever tool the rootfs actually has; the mechanism
-// being probed here is "can the guest reach the host-assigned IP
-// space at all", not "is the ip command available".
+// The reference rootfs is Alpine + busybox + python3 + nodejs +
+// ca-certs. Neither `ip` nor `ifconfig` is on PATH as a symlink
+// (the first preflight ran showed `ifconfig: not found`), so we
+// invoke busybox's applet form directly via `busybox <applet>` —
+// the binary exists regardless of which /bin/ symlinks got
+// installed. The eventual RED-259 agent will use whichever tool
+// the rootfs has; the mechanism being probed here is "can the
+// guest reach the host-assigned IP space at all".
+//
+// Also emits an applet listing so if this STILL fails we have a
+// concrete answer to "what's actually available?" instead of
+// guessing.
 const bringUp = [
-  '(ifconfig eth0 {guest_ip} netmask 255.255.255.0 up && route add default gw {tap_ip} && echo ETH0_UP) || echo ETH0_FAIL',
-  'echo "--- ifconfig eth0 ---"',
-  'ifconfig eth0 2>&1',
+  'echo "--- busybox applets (network-related) ---"',
+  '(busybox --list 2>&1 | grep -E "^(ifconfig|route|ip|udhcpc|arp|netstat)$") || echo "(no network applets surfaced by busybox --list)"',
+  'echo "--- attempting busybox ifconfig + route ---"',
+  '(busybox ifconfig eth0 {guest_ip} netmask 255.255.255.0 up && busybox route add default gw {tap_ip} && echo ETH0_UP) || echo ETH0_FAIL',
+  'echo "--- eth0 state ---"',
+  'busybox ifconfig eth0 2>&1 || echo "(ifconfig applet unavailable)"',
   'echo "--- route ---"',
-  'route -n 2>&1',
+  'busybox route -n 2>&1 || echo "(route applet unavailable)"',
 ].join(' ; ') + ' ; exit 0';
 let setup;
 try {{
@@ -449,7 +457,7 @@ fi
 if ${eth0_up}; then
   pass "guest brought eth0 up with static IP"
 else
-  fail "guest could not bring eth0 up — check ifconfig/route (busybox) or add iproute2 to the rootfs"
+  fail "guest could not bring eth0 up — see the busybox applet listing above; may need iproute2 added to the rootfs"
 fi
 
 if ${allow_worked}; then
