@@ -322,12 +322,19 @@ else:
 # doubled.
 code = """
 const {{ execSync }} = require('child_process');
+// The reference rootfs (Alpine + busybox + python3 + nodejs + ca-certs)
+// doesn't bundle iproute2, so `ip` is not on PATH. Busybox ships
+// `ifconfig` and `route` by default, which cover everything we need
+// for a flat /24 with one default gateway. The eventual RED-259
+// agent will use whichever tool the rootfs actually has; the mechanism
+// being probed here is "can the guest reach the host-assigned IP
+// space at all", not "is the ip command available".
 const bringUp = [
-  '(ip addr add {guest_ip}/{netmask} dev eth0 && ip link set eth0 up && ip route add default via {tap_ip} && echo ETH0_UP) || echo ETH0_FAIL',
-  'echo "--- ip addr ---"',
-  'ip addr show eth0 2>&1',
+  '(ifconfig eth0 {guest_ip} netmask 255.255.255.0 up && route add default gw {tap_ip} && echo ETH0_UP) || echo ETH0_FAIL',
+  'echo "--- ifconfig eth0 ---"',
+  'ifconfig eth0 2>&1',
   'echo "--- route ---"',
-  'ip route 2>&1',
+  'route -n 2>&1',
 ].join(' ; ') + ' ; exit 0';
 let setup;
 try {{
@@ -442,7 +449,7 @@ fi
 if ${eth0_up}; then
   pass "guest brought eth0 up with static IP"
 else
-  fail "guest could not bring eth0 up — check ip/iproute2 in the rootfs"
+  fail "guest could not bring eth0 up — check ifconfig/route (busybox) or add iproute2 to the rootfs"
 fi
 
 if ${allow_worked}; then
@@ -451,20 +458,31 @@ else
   fail "guest could NOT reach ${ALLOW_IP} — the allowlist mechanism doesn't get traffic through"
 fi
 
-if ${block_worked}; then
-  pass "guest → ${BLOCK_IP} blocked (default DROP works)"
+# IMPORTANT: block_worked and metadata_worked are only meaningful
+# signals when the guest actually has network AT ALL. Otherwise every
+# fetch fails for the wrong reason and we false-positive on DROPPED /
+# BLOCKED. Gate these checks on eth0_up && allow_worked.
+if ${eth0_up} && ${allow_worked}; then
+  if ${block_worked}; then
+    pass "guest → ${BLOCK_IP} blocked (default DROP works)"
+  else
+    fail "guest REACHED ${BLOCK_IP} — iptables default DROP leaked"
+  fi
+  if ${metadata_worked}; then
+    pass "guest → ${METADATA_IP} blocked (block_metadata works)"
+  else
+    warn "guest metadata probe inconclusive — ${METADATA_IP} is not routable from this network anyway; impl tests will re-verify"
+  fi
 else
-  fail "guest REACHED ${BLOCK_IP} — iptables default DROP leaked"
-fi
-
-if ${metadata_worked}; then
-  pass "guest → ${METADATA_IP} blocked (block_metadata works)"
-else
-  warn "guest metadata probe inconclusive — ${METADATA_IP} is not routable from this network anyway; impl tests will re-verify"
+  warn "skipping drop-rule + metadata checks because allow path didn't work — their markers would be false positives"
 fi
 
 echo
 info "Conclusion"
+# Metadata is intentionally a nice-to-have: on many host networks the
+# metadata IP simply isn't routable, so the iptables DROP rule can't
+# distinguish "blocked by us" from "blocked by network". Treat eth0 up
+# + allow reachable + block dropped as the GREEN threshold.
 if ${eth0_up} && ${allow_worked} && ${block_worked} && ${metadata_worked}; then
   printf '  \033[32mGREEN\033[0m  netns + veth + tap + iptables mechanism works end-to-end.\n'
   printf '         RED-259 impl proceeds with this topology as designed.\n'
