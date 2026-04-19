@@ -118,6 +118,7 @@ import {
   TAP,
   TAP_IP,
   chmodSocketIfNetns,
+  reUpTapAfterStart,
   setupNetns,
   teardownNetns,
   type NetnsHandle,
@@ -441,6 +442,15 @@ async function coldBootToAccept(
   // so dialAndHandshake (below) can connect.
   await chmodSocketIfNetns(netnsHandle, ctx.vsockUds);
   await apiPutExpect204(ctx.apiSock, '/actions', { action_type: 'InstanceStart' });
+
+  // RED-259 preflight finding: the tap's OPER state can transiently
+  // drop to DOWN when FC opens its fd at /network-interfaces config
+  // time, and the netns kernel marks the guest-subnet route as
+  // `linkdown` until the tap is explicitly re-upped. Without this,
+  // the guest brings up eth0 + adds default route cleanly but
+  // `connect()` returns ENETUNREACH because the netns can't route
+  // to its own tap. No-op when not in the netns path.
+  await reUpTapAfterStart(netnsHandle);
 
   const { sock } = await dialAndHandshake(ctx.vsockUds, VSOCK_GUEST_PORT, bootDeadline);
   return { fc, sock, bootDeadline };
