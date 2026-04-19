@@ -58,14 +58,25 @@ VSOCK_PORT=52717
 
 # Network plumbing identifiers. Short names — ip link name has a
 # 15-char cap.
+#
+# The veth pair (host↔netns) and the tap (netns↔guest) MUST live on
+# different subnets. Earlier iteration put them both on 10.79.0.0/24
+# and the kernel got route-ambiguous — both interfaces claimed the
+# same subnet, and the tap's oper-state-DOWN surfaced as
+# `linkdown` on the shared route, making ARP-for-gateway silently
+# fail. Two disjoint /24s is the textbook FC+netns topology.
 NETNS="cambpf"
 VETH_H="cambpf-h"
 VETH_G="cambpf-g"
 TAP="cambpf-tap"
-NETNS_CIDR="10.79.0.0/24"
-VETH_G_IP="10.79.0.1"
-TAP_IP="10.79.0.2"
-GUEST_IP="10.79.0.3"
+# Host ↔ netns link
+VETH_SUBNET="10.100.0.0/24"
+VETH_H_IP="10.100.0.1"
+VETH_G_IP="10.100.0.2"
+# netns ↔ guest link (and MASQUERADE source for the guest)
+GUEST_SUBNET="10.200.0.0/24"
+TAP_IP="10.200.0.1"
+GUEST_IP="10.200.0.2"
 GUEST_NETMASK="24"
 GUEST_MAC="aa:fc:00:00:00:01"
 
@@ -87,7 +98,7 @@ cleanup() {
   # state should still clean up what exists. The impl's finally block
   # will do the same.
   if [ -n "${HOST_OUT_IFACE}" ]; then
-    sudo iptables -t nat -D POSTROUTING -s "${NETNS_CIDR}" -o "${HOST_OUT_IFACE}" -j MASQUERADE 2>/dev/null || true
+    sudo iptables -t nat -D POSTROUTING -s "${GUEST_SUBNET}" -o "${HOST_OUT_IFACE}" -j MASQUERADE 2>/dev/null || true
     sudo iptables -D FORWARD -i "${VETH_H}" -j ACCEPT 2>/dev/null || true
     sudo iptables -D FORWARD -o "${VETH_H}" -j ACCEPT 2>/dev/null || true
   fi
@@ -149,13 +160,13 @@ pass "netns created: ${NETNS}"
 
 sudo ip link add "${VETH_H}" type veth peer name "${VETH_G}"
 sudo ip link set "${VETH_G}" netns "${NETNS}"
-sudo ip addr add "${VETH_G_IP}/24" dev "${VETH_H}" 2>&1 \
+sudo ip addr add "${VETH_H_IP}/24" dev "${VETH_H}" 2>&1 \
   || fail "ip addr add veth-h IP failed — a stale veth may exist"
 sudo ip link set "${VETH_H}" up
-sudo ip netns exec "${NETNS}" ip addr add "10.79.0.254/24" dev "${VETH_G}"
+sudo ip netns exec "${NETNS}" ip addr add "${VETH_G_IP}/24" dev "${VETH_G}"
 sudo ip netns exec "${NETNS}" ip link set "${VETH_G}" up
 sudo ip netns exec "${NETNS}" ip link set lo up
-sudo ip netns exec "${NETNS}" ip route add default via "${VETH_G_IP}"
+sudo ip netns exec "${NETNS}" ip route add default via "${VETH_H_IP}"
 # A new netns has its own sysctl tree; ip_forward defaults to 0
 # inside the netns regardless of the root netns's value. Without
 # this, the netns kernel won't forward packets between tap (coming
@@ -164,24 +175,28 @@ sudo ip netns exec "${NETNS}" ip route add default via "${VETH_G_IP}"
 # here — the packets were getting to the tap but dying in the
 # netns's forwarding path.
 sudo ip netns exec "${NETNS}" sysctl -w net.ipv4.ip_forward=1 >/dev/null
-pass "veth pair up: ${VETH_H} <-> ${VETH_G} (netns side .254, host side ${VETH_G_IP}), netns ip_forward=1"
+pass "veth pair up: ${VETH_H}=${VETH_H_IP} <-> ${VETH_G}=${VETH_G_IP} (VETH_SUBNET=${VETH_SUBNET}), netns ip_forward=1"
 
 # Tap device — lives in the netns so Firecracker can attach it.
 sudo ip netns exec "${NETNS}" ip tuntap add "${TAP}" mode tap
 sudo ip netns exec "${NETNS}" ip addr add "${TAP_IP}/${GUEST_NETMASK}" dev "${TAP}"
 sudo ip netns exec "${NETNS}" ip link set "${TAP}" up
-pass "tap device up: ${TAP} (${TAP_IP}/${GUEST_NETMASK}) inside netns"
+pass "tap device up: ${TAP}=${TAP_IP} (GUEST_SUBNET=${GUEST_SUBNET}) inside netns"
 
-# MASQUERADE so netns outbound gets NAT'd through the host default gw.
+# MASQUERADE so packets from the GUEST subnet get NAT'd to the host's
+# public interface on the way out. The source IP on these packets when
+# they exit the root netns on eth1 is the GUEST's address (10.200.0.2);
+# MASQUERADE rewrites that to the host's outbound IP.
+#
 # On a hardened host the FORWARD chain often has DROP as default policy
 # plus specific rules near the top; appending our ACCEPT with -A would
 # sit below those drops and never trigger. Insert at position 1 so our
 # veth-specific ACCEPT is the first match evaluated. The rule is
 # scoped to VETH_H so it doesn't loosen forwarding for anything else.
-sudo iptables -t nat -A POSTROUTING -s "${NETNS_CIDR}" -o "${HOST_OUT_IFACE}" -j MASQUERADE
+sudo iptables -t nat -A POSTROUTING -s "${GUEST_SUBNET}" -o "${HOST_OUT_IFACE}" -j MASQUERADE
 sudo iptables -I FORWARD 1 -i "${VETH_H}" -j ACCEPT
 sudo iptables -I FORWARD 1 -o "${VETH_H}" -j ACCEPT
-pass "host MASQUERADE + FORWARD rules installed (ACCEPTs inserted at head)"
+pass "host MASQUERADE (source ${GUEST_SUBNET}) + FORWARD rules installed"
 
 # Allowlist enforcement — iptables OUTPUT in the netns. RED-137 maps
 # to this shape:
@@ -278,7 +293,9 @@ for k in \
 done
 
 echo "  netns state:"
-echo "    interfaces:"
+echo "    interfaces (link: admin/oper state):"
+sudo ip netns exec "${NETNS}" ip -brief link 2>&1 | sed 's/^/      /'
+echo "    interfaces (addr):"
 sudo ip netns exec "${NETNS}" ip -brief addr 2>&1 | sed 's/^/      /'
 echo "    routes:"
 sudo ip netns exec "${NETNS}" ip route 2>&1 | sed 's/^/      /'
@@ -352,7 +369,17 @@ JSON
 )"); expect_204 "${HTTP}" /vsock
 
 HTTP=$(api_put /actions '{"action_type":"InstanceStart"}'); expect_204 "${HTTP}" /actions
-pass "VM started with virtio-net attached to ${TAP}"
+
+# Firecracker holds an fd on the tap but doesn't necessarily keep its
+# OPER state UP — the first run showed `linkdown` in the netns route
+# table AFTER InstanceStart, which means ARP-for-gateway from the
+# guest was failing silently. Bring the tap back up explicitly. If it
+# was already UP this is a no-op.
+sudo ip netns exec "${NETNS}" ip link set "${TAP}" up
+# Brief settle — give the kernel a tick to propagate the link-up to
+# the routing stack before the probe starts sending packets.
+sleep 0.3
+pass "VM started with virtio-net attached to ${TAP}, tap re-upped post-start"
 
 # ── Probe the guest ─────────────────────────────────────────────────
 info "Probing guest — bring eth0 up then test connectivity"
