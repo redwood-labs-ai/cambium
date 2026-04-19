@@ -232,31 +232,57 @@ function runCommand(cmd: string, args: readonly string[]): Promise<void> {
 
 /** Detect the host's default IPv4 route egress interface. Fails
  *  cleanly if there's no default route — a host with no upstream
- *  connectivity can't usefully MASQUERADE outbound guest traffic. */
+ *  connectivity can't usefully MASQUERADE outbound guest traffic.
+ *
+ *  Retries up to 3 times with a 200 ms gap between attempts. The R1
+ *  escape-test run showed an intermittent failure where `ip -4 route
+ *  show default` returned empty for a single tick (likely DHCP
+ *  renew or NetworkManager reconcile briefly removing then re-adding
+ *  the default route). One retry would absorb single-tick flaps; 3
+ *  with backoff covers slower reconciles without hanging the test
+ *  forever. The whole probe is < 700 ms in the worst case.
+ *
+ *  When all attempts fail, the error includes the actual output from
+ *  the LAST attempt of `ip -4 route show default` AND `ip -4 route`
+ *  (full table) — far more diagnostic than the prior bare "no
+ *  default IPv4 route" message. */
 export async function detectHostOutIface(): Promise<string> {
+  let lastDefault = '';
+  let lastFull = '';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await sleep(200);
+    lastDefault = await runIpCapture(['-4', 'route', 'show', 'default']);
+    const match = lastDefault.match(/^default .* dev (\S+)/m);
+    if (match) return match[1]!;
+  }
+  // All attempts failed — capture the full route table for the
+  // diagnostic. If THIS also fails, swallow that secondary error so
+  // we surface the original "no default" cause.
+  try {
+    lastFull = await runIpCapture(['-4', 'route']);
+  } catch { /* keep lastFull empty */ }
+  throw new Error(
+    'no default IPv4 route on host after 3 attempts — cannot MASQUERADE outbound traffic.\n' +
+      `last 'ip -4 route show default' output: ${JSON.stringify(lastDefault.trim())}\n` +
+      `full 'ip -4 route' table:\n${lastFull.trim() || '(empty)'}`,
+  );
+}
+
+function runIpCapture(args: readonly string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn('ip', ['-4', 'route', 'show', 'default'], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const child = spawn('ip', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     child.stdout?.on('data', (c) => (stdout += c.toString()));
-    child.once('error', (err) => reject(new Error(`ip route: ${err.message}`)));
+    child.once('error', (err) => reject(new Error(`ip ${args.join(' ')}: ${err.message}`)));
     child.once('exit', (code) => {
-      if (code !== 0) {
-        reject(new Error(`ip route show default: exit ${code}`));
-        return;
-      }
-      // Output shape: `default via 192.168.1.1 dev eth0 proto dhcp ...`
-      const match = stdout.match(/^default .* dev (\S+)/m);
-      if (!match) {
-        reject(
-          new Error('no default IPv4 route on host — cannot MASQUERADE outbound traffic'),
-        );
-        return;
-      }
-      resolve(match[1]!);
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`ip ${args.join(' ')}: exit ${code}`));
     });
   });
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 /**
