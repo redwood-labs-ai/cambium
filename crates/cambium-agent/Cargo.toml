@@ -29,7 +29,10 @@ vsock = "0.5"
 [dev-dependencies]
 # Kept minimal by design — the protocol + framing modules test themselves
 # with stdlib Cursor/Vec. Any dev-dep bloat on the critical guest binary
-# would pad the rootfs unnecessarily.
+# would pad the rootfs unnecessarily. The one exception is `tempfile`,
+# which net.rs tests need to point `append_hosts_entries` at a throwaway
+# path (so tests don't need root + can't clobber the host's /etc/hosts).
+tempfile = "3"
 
 [profile.release]
 # Tight release profile for the guest binary — strip symbols, LTO, and

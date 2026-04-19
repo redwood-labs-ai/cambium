@@ -16,13 +16,15 @@
 pub mod agent;
 pub mod frame;
 pub mod mounts;
+pub mod net;
 pub mod protocol;
 pub mod spawn;
 
 pub use agent::handle_one;
 pub use frame::{read_frame, write_frame, MAX_FRAME_BYTES};
 pub use mounts::apply_mounts;
-pub use protocol::{ExecRequest, ExecResponse, Language, Mount, Status};
+pub use net::apply_net_config;
+pub use protocol::{ExecRequest, ExecResponse, HostMapping, Language, Mount, NetConfig, Status};
 pub use spawn::{run_exec, run_process};
 
 /// The vsock port the agent listens on inside the guest. Host side

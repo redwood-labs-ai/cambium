@@ -10,6 +10,7 @@ use std::io::{Read, Write};
 
 use crate::frame::{read_frame, write_frame};
 use crate::mounts::apply_mounts;
+use crate::net::apply_net_config;
 use crate::protocol::{ExecRequest, ExecResponse};
 use crate::spawn::run_exec;
 
@@ -32,6 +33,24 @@ use crate::spawn::run_exec;
 pub fn handle_one<S: Read + Write>(stream: &mut S) -> Result<(), String> {
     let request: ExecRequest =
         read_frame(stream).map_err(|e| format!("failed to read ExecRequest: {e}"))?;
+
+    // Apply network config before mounts + interpreter. A net-config
+    // failure aborts the request with a Crashed response; we never
+    // want to run guest code with a half-configured network, which
+    // would silently fail to reach hosts the gen expects to be
+    // reachable (and the iptables policy on the host would look like
+    // it's DROPping them, producing a confusing diagnostic). See
+    // RED-259 for the full design. Ordering: net first, then mounts
+    // — both must fully succeed before the interpreter runs, and
+    // net-config is cheaper to fail fast on.
+    if let Some(net_cfg) = &request.net {
+        if let Err(e) = apply_net_config(net_cfg) {
+            let response = ExecResponse::crashed(format!("net setup failed: {e}"));
+            write_frame(stream, &response)
+                .map_err(|e| format!("failed to write ExecResponse: {e}"))?;
+            return Ok(());
+        }
+    }
 
     // Apply allowlist mounts before spawning the interpreter. A mount
     // failure aborts the request with a Crashed response; we never
