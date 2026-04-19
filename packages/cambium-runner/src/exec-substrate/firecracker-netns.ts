@@ -181,6 +181,28 @@ async function runPrivileged(argv: readonly string[]): Promise<void> {
 }
 
 /**
+ * Re-up the tap device after Firecracker has started. Firecracker
+ * opens the tap fd at `PUT /network-interfaces/<id>` time, and the
+ * tap can briefly drop OPER state DOWN until FC actually starts
+ * transmitting — long enough that the netns kernel marks the
+ * 10.200.0.0/24 route as `linkdown` and refuses to use it for
+ * forwarding. Symptom: guest brings up eth0 + adds default route
+ * cleanly, then `connect()` to any allowlisted IP returns
+ * ENETUNREACH because the netns can't route to its own tap.
+ *
+ * The RED-259 preflight discovered this and worked around it with an
+ * explicit `ip link set <tap> up` after `/actions InstanceStart`.
+ * The substrate has the same structural need; this helper is the
+ * substrate equivalent. Idempotent (no-op if already up). No-op when
+ * `handle` is null OR operator-managed (operator owns lifecycle).
+ */
+export async function reUpTapAfterStart(handle: NetnsHandle | null): Promise<void> {
+  if (!handle) return;
+  if (handle.operatorManaged) return;
+  await runPrivileged(['ip', 'netns', 'exec', handle.netns, 'ip', 'link', 'set', handle.tap, 'up']);
+}
+
+/**
  * Make a UNIX socket created by Firecracker (running as root via sudo
  * inside the netns) connectable by the unprivileged Cambium runner
  * process. UNIX socket connect requires write access on the socket
