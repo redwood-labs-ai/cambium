@@ -64,16 +64,19 @@ export const GUEST_IP = '10.200.0.2';
 export const GUEST_IP_CIDR = '10.200.0.2/24';
 export const GUEST_MAC = 'aa:fc:00:00:00:01';
 
-/** RFC 1918 + loopback — what `block_private: true` rejects. The
- *  rules drop traffic DESTINED to these ranges regardless of allowlist
- *  (defense-in-depth: an allowlist entry that resolves to a private IP
- *  must not slip through). */
+/** RFC 1918 + loopback + unspecified — what `block_private: true`
+ *  rejects. The rules drop traffic DESTINED to these ranges regardless
+ *  of allowlist (defense-in-depth: an allowlist entry that resolves
+ *  to a private IP must not slip through). Parity with the CIDR table
+ *  in `packages/cambium-runner/src/tools/network-guard.ts` — any IP
+ *  rejected by `guardedFetch` should also be rejected here. */
 export const PRIVATE_CIDRS: readonly string[] = [
+  '0.0.0.0/8',        // unspecified — parity with network-guard
   '10.0.0.0/8',
   '172.16.0.0/12',
   '192.168.0.0/16',
   '127.0.0.0/8',
-  '169.254.0.0/16', // link-local — metadata is a subset but this covers the whole range
+  '169.254.0.0/16',   // link-local — metadata is a subset but this covers the whole range
 ];
 
 /** Cloud metadata IP — what `block_metadata: true` rejects explicitly.

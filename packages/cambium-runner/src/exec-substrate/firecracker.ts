@@ -77,6 +77,7 @@ import {
   apiPatchExpect204,
   apiPutExpect204,
   makeLogAccumulator,
+  drainFirecracker,
   killFirecracker,
   spawnFirecracker,
   waitForApiSocket,
@@ -566,10 +567,15 @@ async function executeCold(
     return crashedWithLog(startedAt, ctx, e);
   } finally {
     cleanupRunContext(ctx, fc, sock);
-    // Netns teardown after FC is dead — tearing down the tap while
-    // FC still holds an fd would leak state. cleanupRunContext
-    // SIGKILLs + drains FC before returning.
+    // Netns teardown MUST happen after FC has released the tap fd.
+    // cleanupRunContext sends SIGKILL but doesn't wait; without an
+    // explicit drain, tearing down the tap while FC still holds its
+    // fd leaks kernel state (the tap persists under the fd and
+    // `ip netns delete` silently fails). drainFirecracker awaits the
+    // exit event with a 1s deadline — SIGKILL is immediate at the
+    // kernel level so the typical wait is microseconds.
     if (netnsHandle) {
+      try { await drainFirecracker(fc); } catch { /* best-effort */ }
       try { await teardownNetns(netnsHandle); } catch { /* best-effort */ }
     }
   }

@@ -78,11 +78,36 @@ export async function resolveAllowlist(
   policy: NetworkPolicy,
   options: { resolver?: (hostname: string) => Promise<string[]> } = {},
 ): Promise<ResolvedAllowlist> {
-  if (policy.allowlist.includes('*')) {
+  // Reject any entry containing a glob character. The `includes('*')`
+  // check on the array catches exactly `"*"`; a `.some(e => e.includes('*'))`
+  // also catches `"*.example.com"` / `"api.*.com"` — those wouldn't pass
+  // DNS resolution anyway, but the error message here points directly
+  // at the root cause rather than surfacing as a confusing NXDOMAIN.
+  const wildcard = policy.allowlist.find((e) => e.includes('*'));
+  if (wildcard !== undefined) {
     throw new Error(
-      'NetworkPolicy.allowlist contains "*" (any host) — :firecracker requires ' +
-        'an enumerable allowlist. Declare the specific hosts your gen needs, or ' +
-        "switch to runtime: :native if truly unrestricted network access is required.",
+      `NetworkPolicy.allowlist entry ${JSON.stringify(wildcard)} contains a wildcard — ` +
+        ':firecracker requires an enumerable allowlist. Declare the specific hosts your ' +
+        'gen needs, or switch to runtime: :native if truly unrestricted network access is required.',
+    );
+  }
+
+  // v1 refuses to silently ignore denylist. RED-137 says denylist wins
+  // over allowlist, and the `network-guard.ts` path enforces that
+  // universally. :firecracker's netns path doesn't have denylist
+  // enforcement yet (v1.5 adds per-denylist-entry DROP rules). Until
+  // then, fail fast if the policy carries one — a gen that was relying
+  // on denylist under :native would otherwise get silently broader
+  // access under :firecracker, which is exactly the escalation
+  // direction we never want.
+  if (policy.denylist.length > 0) {
+    throw new Error(
+      `NetworkPolicy.denylist is not yet enforced by :firecracker (v1.5 follow-up). ` +
+        `The gen's policy includes ${policy.denylist.length} denylist ` +
+        `${policy.denylist.length === 1 ? 'entry' : 'entries'} (${policy.denylist.slice(0, 3).join(', ')}` +
+        `${policy.denylist.length > 3 ? ', ...' : ''}). ` +
+        `Either remove the denylist OR tighten the allowlist so the denylist would be ` +
+        `redundant; running :firecracker with a silently-ignored denylist is refused.`,
     );
   }
 
@@ -159,6 +184,7 @@ export function ipIsPrivateV4(ip: string): boolean {
   if (isIP(ip) !== 4) return false;
   const [a, b] = ip.split('.').map((s) => Number.parseInt(s, 10));
   if (a === undefined || b === undefined) return false;
+  if (a === 0) return true;  // 0.0.0.0/8 unspecified — parity with network-guard
   if (a === 10) return true;
   if (a === 172 && b >= 16 && b <= 31) return true;
   if (a === 192 && b === 168) return true;

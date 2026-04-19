@@ -69,7 +69,16 @@ export function spawnFirecracker(
   let binary: string;
   let argv: string[];
   if (opts.netns) {
-    const needsSudo = opts.nsPrivileged ?? (process.getuid?.() !== 0);
+    // Mirror firecracker-netns.ts::runPrivileged so the NOSUDO escape
+    // hatch works consistently: operators who set up CAP_NET_ADMIN
+    // via setcap instead of sudo can set CAMBIUM_FC_NETNS_NOSUDO=1
+    // and BOTH the setup commands AND the FC spawn skip the sudo
+    // prefix. Prior to this, the escape hatch was half-wired — netns
+    // setup worked without sudo but the FC spawn still prepended
+    // `sudo -n`, causing the dispatch to fail.
+    const needsSudo =
+      opts.nsPrivileged ??
+      (process.getuid?.() !== 0 && process.env.CAMBIUM_FC_NETNS_NOSUDO !== '1');
     const full = needsSudo
       ? ['sudo', '-n', 'ip', 'netns', 'exec', opts.netns, FC_BINARY, '--api-sock', apiSock]
       : ['ip', 'netns', 'exec', opts.netns, FC_BINARY, '--api-sock', apiSock];
@@ -87,13 +96,43 @@ export function spawnFirecracker(
   return fc;
 }
 
-/** Kill the firecracker child and drain the exit so no zombies
- *  accumulate. Idempotent — safe to call on already-exited children. */
+/** Kill the firecracker child. Idempotent — safe to call on
+ *  already-exited children. Does NOT wait for exit; use
+ *  `drainFirecracker` when the caller needs to be sure FC has
+ *  released its resources (tap fds, netns refs) before tearing them
+ *  down. Kept sync so the common-case cleanup path stays simple. */
 export function killFirecracker(fc: ChildProcess | null): void {
   if (!fc) return;
   if (fc.exitCode === null) {
     try { fc.kill('SIGKILL'); } catch { /* already dead */ }
   }
+}
+
+/** Wait for FC to actually exit after a `killFirecracker` — SIGKILL
+ *  is immediate at the kernel level, but Node doesn't observe the
+ *  exit until the next event-loop turn (and FC's own cleanup can
+ *  hold file descriptors briefly). Tearing down the netns + tap
+ *  device while FC still holds the tap fd leaks kernel state (the
+ *  tap persists under the fd, and `ip netns delete` silently fails
+ *  or leaves a zombie netns). This helper awaits `exit` with a short
+ *  deadline so the cleanup-then-teardown ordering is correct.
+ *
+ *  Returns when FC is known dead OR the deadline elapses. A timeout
+ *  is not an error — the caller treats it as "best-effort; FC is
+ *  probably reaped by now, teardown proceeds either way." */
+export function drainFirecracker(
+  fc: ChildProcess | null,
+  timeoutMs = 1_000,
+): Promise<void> {
+  if (!fc) return Promise.resolve();
+  if (fc.exitCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, timeoutMs);
+    fc.once('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
 }
 
 /** Wait up to `timeoutMs` for a UNIX socket to appear at `path`. */

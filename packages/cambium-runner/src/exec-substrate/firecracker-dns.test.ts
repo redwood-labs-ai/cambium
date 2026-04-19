@@ -23,6 +23,11 @@ function resolverFrom(map: Record<string, string[]>) {
 }
 
 describe('ipIsPrivateV4', () => {
+  it('classifies 0.0.0.0/8 (unspecified — parity with network-guard)', () => {
+    expect(ipIsPrivateV4('0.0.0.0')).toBe(true);
+    expect(ipIsPrivateV4('0.1.2.3')).toBe(true);
+  });
+
   it('classifies 10.0.0.0/8', () => {
     expect(ipIsPrivateV4('10.0.0.1')).toBe(true);
     expect(ipIsPrivateV4('10.255.255.255')).toBe(true);
@@ -133,6 +138,36 @@ describe('resolveAllowlist', () => {
         { resolver: resolverFrom({ 'api.example.com': ['1.1.1.1'] }) },
       ),
     ).rejects.toThrow(/enumerable allowlist/);
+  });
+
+  it('rejects glob patterns like "*.example.com" with a clear message', async () => {
+    // The old guard was `includes('*')` on the array — exact-string
+    // match. A glob pattern like `*.example.com` would slip past and
+    // surface as a confusing NXDOMAIN. The tightened guard catches
+    // any entry containing a `*`.
+    await expect(
+      resolveAllowlist(
+        { ...BASE_POLICY, allowlist: ['*.example.com'] },
+        { resolver: resolverFrom({}) },
+      ),
+    ).rejects.toThrow(/wildcard/);
+  });
+
+  it('rejects non-empty denylist (v1 refuses to silently ignore)', async () => {
+    // RED-137 says denylist wins over allowlist; :firecracker's netns
+    // path doesn't enforce denylist yet (v1.5). Rather than silently
+    // give a gen broader access than its :native equivalent, refuse
+    // to dispatch.
+    await expect(
+      resolveAllowlist(
+        {
+          ...BASE_POLICY,
+          allowlist: ['api.example.com'],
+          denylist: ['evil.example.com'],
+        },
+        { resolver: resolverFrom({ 'api.example.com': ['1.1.1.1'] }) },
+      ),
+    ).rejects.toThrow(/denylist is not yet enforced/);
   });
 
   it('surfaces DNS resolution failures with the hostname in the message', async () => {
