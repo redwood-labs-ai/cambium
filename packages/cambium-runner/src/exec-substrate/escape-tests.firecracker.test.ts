@@ -254,6 +254,12 @@ describe('Firecracker substrate — escape tests (RED-257)', () => {
         }
       `,
     });
+    if (result.status !== 'completed') {
+      console.error('[debug RED-258 allow-dir]', {
+        status: result.status, reason: result.reason, allowDir,
+        stderr: result.stderr?.slice(0, 500), stdout: result.stdout?.slice(0, 500),
+      });
+    }
     expect(result.status).toBe('completed');
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain('READ:');
@@ -384,6 +390,12 @@ describe('Firecracker substrate — escape tests (RED-257)', () => {
       language: 'js',
       code: tcpConnectProbe(NET_ALLOW_IP, 80, 'ALLOW'),
     });
+    if (result.status !== 'completed') {
+      console.error('[debug RED-259 allow-ip]', {
+        status: result.status, reason: result.reason,
+        stderr: result.stderr?.slice(0, 500), stdout: result.stdout?.slice(0, 500),
+      });
+    }
     expect(result.status).toBe('completed');
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain('ALLOW_OK');
