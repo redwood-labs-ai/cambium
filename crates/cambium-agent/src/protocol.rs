@@ -51,8 +51,35 @@ pub enum Status {
     Crashed,
 }
 
+/// One mount the host wants the agent to apply inside the guest
+/// BEFORE spawning the interpreter. Each mount targets an additional
+/// virtio-blk drive Firecracker attached at boot time (the rootfs is
+/// always `/dev/vda`; allowlist drives follow as `/dev/vdb`,
+/// `/dev/vdc`, ...). The host tells the agent the device path
+/// explicitly — it's computed on the host from drive-attach order
+/// and passed over the wire so the agent doesn't have to guess or
+/// rely on label-based discovery (the reference rootfs's busybox
+/// mdev doesn't populate `/dev/disk/by-label/`; RED-258 preflight
+/// confirmed this 2026-04-19).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Mount {
+    /// Guest-side device node path, e.g. "/dev/vdb". The host fills
+    /// this based on the order it issued `PUT /drives/<id>` calls to
+    /// Firecracker.
+    pub device: String,
+    /// Absolute guest path the device gets mounted at. The agent
+    /// ensures this directory exists (`mkdir -p`) before mounting.
+    pub guest_path: String,
+    /// Whether to mount with `-o ro`. v1 requires read-only for
+    /// every mount (enforced at the policy layer, RED-258); a future
+    /// revision may relax this for specific use cases. The field is
+    /// on the wire now so callers can be explicit and future-compat.
+    pub read_only: bool,
+}
+
 /// Single-call request from host to agent. The agent reads exactly
-/// one of these per VM (per-call VM lifecycle per the RED-251 design).
+/// one of these per connection (one-request-per-connection by
+/// design — the host destroys the VM after reading the response).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExecRequest {
     pub language: Language,
@@ -70,6 +97,13 @@ pub struct ExecRequest {
     /// Total stdout + stderr cap. Excess bytes are dropped with a
     /// truncation marker; the corresponding `truncated_*` flag flips.
     pub max_output_bytes: u64,
+    /// Additional filesystem mounts the agent applies before
+    /// spawning the interpreter. Empty when the caller doesn't need
+    /// filesystem access beyond the guest rootfs. Backward-compatible
+    /// via `#[serde(default)]`: older hosts that don't send this
+    /// field parse cleanly as an empty vec.
+    #[serde(default)]
+    pub mounts: Vec<Mount>,
 }
 
 /// Single-call response from agent back to host. Written after the
@@ -172,10 +206,79 @@ mod tests {
             memory_mb: 256,
             timeout_seconds: 30,
             max_output_bytes: 50_000,
+            mounts: vec![],
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: ExecRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(req, parsed);
+    }
+
+    #[test]
+    fn exec_request_with_mounts_round_trip() {
+        // A request carrying allowlist mounts must serialize + parse
+        // symmetrically. The host side builds these from
+        // `ExecPolicy.filesystem.allowlist_paths` at dispatch time.
+        let req = ExecRequest {
+            language: Language::Python,
+            code: "import os; print(os.listdir('/data'))".to_string(),
+            cpu: 1.0,
+            memory_mb: 512,
+            timeout_seconds: 30,
+            max_output_bytes: 50_000,
+            mounts: vec![
+                Mount {
+                    device: "/dev/vdb".to_string(),
+                    guest_path: "/data".to_string(),
+                    read_only: true,
+                },
+                Mount {
+                    device: "/dev/vdc".to_string(),
+                    guest_path: "/cfg".to_string(),
+                    read_only: true,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: ExecRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req, parsed);
+        assert_eq!(parsed.mounts.len(), 2);
+        assert_eq!(parsed.mounts[0].device, "/dev/vdb");
+    }
+
+    #[test]
+    fn exec_request_without_mounts_field_parses_as_empty() {
+        // Backward-compat: older hosts don't send `mounts`. The field
+        // has `#[serde(default)]`; JSON without `mounts` must parse
+        // cleanly with an empty vec rather than failing. This is
+        // load-bearing — if it fails, RED-258 agent changes would
+        // break every existing host that hasn't been updated yet.
+        let json = r#"{
+            "language": "js",
+            "code": "console.log(1)",
+            "cpu": 1.0,
+            "memory_mb": 128,
+            "timeout_seconds": 5,
+            "max_output_bytes": 50000
+        }"#;
+        let parsed: ExecRequest =
+            serde_json::from_str(json).expect("legacy request shape must parse");
+        assert!(parsed.mounts.is_empty());
+    }
+
+    #[test]
+    fn mount_serializes_as_snake_case_fields() {
+        let m = Mount {
+            device: "/dev/vdb".to_string(),
+            guest_path: "/data".to_string(),
+            read_only: true,
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        // Field names on the wire match the Rust struct verbatim
+        // (snake_case already). The host-side TypeScript marshals
+        // against these exact keys.
+        assert!(json.contains(r#""device":"/dev/vdb""#));
+        assert!(json.contains(r#""guest_path":"/data""#));
+        assert!(json.contains(r#""read_only":true"#));
     }
 
     #[test]

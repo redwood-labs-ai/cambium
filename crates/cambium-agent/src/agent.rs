@@ -9,7 +9,8 @@
 use std::io::{Read, Write};
 
 use crate::frame::{read_frame, write_frame};
-use crate::protocol::ExecRequest;
+use crate::mounts::apply_mounts;
+use crate::protocol::{ExecRequest, ExecResponse};
 use crate::spawn::run_exec;
 
 /// Handle exactly one request/response cycle on `stream`. The caller
@@ -31,6 +32,21 @@ use crate::spawn::run_exec;
 pub fn handle_one<S: Read + Write>(stream: &mut S) -> Result<(), String> {
     let request: ExecRequest =
         read_frame(stream).map_err(|e| format!("failed to read ExecRequest: {e}"))?;
+
+    // Apply allowlist mounts before spawning the interpreter. A mount
+    // failure aborts the request with a Crashed response; we never
+    // want to run guest code with a partial mount set (some paths
+    // silently missing would look like ENOENT to the gen, which
+    // would falsely look like "file doesn't exist on host"). See
+    // RED-258 for the full design.
+    if !request.mounts.is_empty() {
+        if let Err(e) = apply_mounts(&request.mounts) {
+            let response = ExecResponse::crashed(format!("mount setup failed: {e}"));
+            write_frame(stream, &response)
+                .map_err(|e| format!("failed to write ExecResponse: {e}"))?;
+            return Ok(());
+        }
+    }
 
     let response = run_exec(&request);
 
@@ -85,6 +101,7 @@ mod tests {
             memory_mb: 64,
             timeout_seconds: 5,
             max_output_bytes: 10_000,
+            mounts: vec![],
         };
         let (mut cursor, response_start) = framed_request_stream(&req);
 
@@ -127,6 +144,7 @@ mod tests {
             memory_mb: 64,
             timeout_seconds: 5,
             max_output_bytes: 10_000,
+            mounts: vec![],
         };
         let (mut cursor, response_start) = framed_request_stream(&req);
 
@@ -153,6 +171,7 @@ mod tests {
             memory_mb: 64,
             timeout_seconds: 5,
             max_output_bytes: 10_000,
+            mounts: vec![],
         };
         let (mut cursor, _) = framed_request_stream(&req);
         handle_one(&mut cursor).expect("unicode handled without panic");

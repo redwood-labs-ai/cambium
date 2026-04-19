@@ -82,6 +82,7 @@ mod tests {
             memory_mb: 64,
             timeout_seconds: 5,
             max_output_bytes: 50_000,
+            mounts: vec![],
         };
 
         let mut buf: Vec<u8> = Vec::new();
@@ -176,6 +177,7 @@ mod tests {
             memory_mb: 64,
             timeout_seconds: 5,
             max_output_bytes: 50_000,
+            mounts: vec![],
         };
 
         let mut producer: Vec<u8> = Vec::new();
