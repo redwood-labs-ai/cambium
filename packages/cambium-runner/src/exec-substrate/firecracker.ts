@@ -110,6 +110,43 @@ import {
   type AllowlistDrive,
   type AllowlistEntry,
 } from './firecracker-allowlist.js';
+import { resolveAllowlist, type ResolvedAllowlist } from './firecracker-dns.js';
+import {
+  GUEST_IP_CIDR,
+  GUEST_MAC,
+  TAP,
+  TAP_IP,
+  setupNetns,
+  teardownNetns,
+  type NetnsHandle,
+} from './firecracker-netns.js';
+
+/** Network scope distinguished at resolveScope: 'none' preserves the
+ *  original no-netns flow; 'policy' triggers the full RED-259 path
+ *  (netns setup, virtio-net attach, NetConfig to agent). */
+type NetworkScope =
+  | { kind: 'none' }
+  | { kind: 'policy'; policy: NetworkPolicy };
+
+/** Agent-side NetConfig shape. Matches `NetConfig` in
+ *  `crates/cambium-agent/src/protocol.rs`. Kept here as a private
+ *  substrate contract — the agent wire format is the substrate's
+ *  responsibility. */
+interface AgentNetConfig {
+  iface_ip: string;
+  gateway: string;
+  hosts: Array<{ name: string; ip: string }>;
+}
+
+/** Build the NetConfig the guest agent needs from a ResolvedAllowlist.
+ *  Pure function; netns constants supply the fixed iface_ip / gateway. */
+function buildAgentNetConfig(resolved: ResolvedAllowlist): AgentNetConfig {
+  return {
+    iface_ip: GUEST_IP_CIDR,
+    gateway: TAP_IP,
+    hosts: resolved.hosts.map((h) => ({ name: h.name, ip: h.ip })),
+  };
+}
 
 const KERNEL_ENV = 'CAMBIUM_FC_KERNEL';
 const ROOTFS_ENV = 'CAMBIUM_FC_ROOTFS';
@@ -215,6 +252,7 @@ export class FirecrackerSubstrate implements ExecSubstrate {
     const scope = resolveScope(opts);
     if ('error' in scope) return crashed(startedAt, scope.error);
     const allowlist = scope.allowlist;
+    const networkScope = scope.networkScope;
 
     const reason = this.available();
     if (reason !== null) return crashed(startedAt, reason);
@@ -233,11 +271,21 @@ export class FirecrackerSubstrate implements ExecSubstrate {
     const snapshotsDisabled = process.env[DISABLE_SNAPSHOTS_ENV] === '1';
 
     // Branch: warm-restore, cold-and-save, or cold-only.
+    //
+    // Network policy forces cold-only in v1: the virtio-net device is
+    // baked into the snapshot at save time, and a saved snapshot holds
+    // a specific tap device reference. Combining net-allowlist with
+    // warm-restore is a v1.5 optimization (needs a net-enabled vs
+    // net-disabled cache-key axis). For now, gens using network
+    // policy pay ~200ms per-call cold-boot overhead.
+    if (networkScope.kind === 'policy') {
+      return executeCold(opts, rootfsPath, kernelPath, allowlist, networkScope, startedAt);
+    }
     if (snapshotsDisabled) {
-      return executeCold(opts, rootfsPath, kernelPath, allowlist, startedAt);
+      return executeCold(opts, rootfsPath, kernelPath, allowlist, networkScope, startedAt);
     }
     if (!isCanonicalSizing(opts)) {
-      return executeCold(opts, rootfsPath, kernelPath, allowlist, startedAt, {
+      return executeCold(opts, rootfsPath, kernelPath, allowlist, networkScope, startedAt, {
         snapshotFallbackReason: 'non_canonical_sizing',
       });
     }
@@ -264,7 +312,7 @@ export class FirecrackerSubstrate implements ExecSubstrate {
       // unreadable. Fall back to cold-only with a reason that names
       // the allowlist as the cause — `load_failed` would be
       // misleading here because no snapshot load was ever attempted.
-      return executeCold(opts, rootfsPath, kernelPath, allowlist, startedAt, {
+      return executeCold(opts, rootfsPath, kernelPath, allowlist, networkScope, startedAt, {
         snapshotFallbackReason: 'allowlist_hash_failed',
       });
     }
@@ -275,7 +323,7 @@ export class FirecrackerSubstrate implements ExecSubstrate {
     } catch (e: any) {
       // Hash failure (e.g. rootfs unreadable between existsSync and
       // read). Fall back to cold without trying to snapshot.
-      return executeCold(opts, rootfsPath, kernelPath, allowlist, startedAt, {
+      return executeCold(opts, rootfsPath, kernelPath, allowlist, networkScope, startedAt, {
         snapshotFallbackReason: 'load_failed',
       });
     }
@@ -342,9 +390,10 @@ async function coldBootToAccept(
   opts: ExecOpts,
   kernelPath: string,
   allowlistDrives: AllowlistDrive[],
+  netnsHandle: NetnsHandle | null,
   ctx: RunContext,
 ): Promise<{ fc: ChildProcess; sock: BufferedSocketLike; bootDeadline: number }> {
-  const fc = spawnFirecracker(ctx.apiSock, ctx.log);
+  const fc = spawnFirecracker(ctx.apiSock, ctx.log, netnsHandle ? { netns: netnsHandle.netns } : {});
   await waitForApiSocket(ctx.apiSock, 5_000);
   const bootDeadline = Date.now() + 20_000;
 
@@ -363,6 +412,18 @@ async function coldBootToAccept(
     is_read_only: false,
   });
   await attachAllowlistDrives(ctx.apiSock, allowlistDrives);
+  // Attach virtio-net when a netns is present. The tap was created
+  // inside the netns during `setupNetns`; FC (running inside the
+  // same netns via ip netns exec) opens it by name. GUEST_MAC is
+  // fixed so the guest-side ARP cache + agent's /etc/hosts entries
+  // stay stable across runs.
+  if (netnsHandle) {
+    await apiPutExpect204(ctx.apiSock, `/network-interfaces/eth0`, {
+      iface_id: 'eth0',
+      host_dev_name: netnsHandle.tap,
+      guest_mac: GUEST_MAC,
+    });
+  }
   await apiPutExpect204(ctx.apiSock, '/vsock', {
     vsock_id: 'vsock0',
     guest_cid: GUEST_CID,
@@ -424,6 +485,7 @@ async function runExecAgainst(
   opts: ExecOpts,
   sock: BufferedSocketLike,
   mounts: AgentMount[],
+  net: AgentNetConfig | null,
   responseDeadline: number,
   startedAt: number,
 ): Promise<ExecResult> {
@@ -435,6 +497,12 @@ async function runExecAgainst(
     timeout_seconds: Math.max(1, Math.round(opts.timeout)),
     max_output_bytes: opts.maxOutputBytes,
     mounts,
+    // `net` is included unconditionally. When null, serde on the
+    // agent side treats a missing or explicit-null `net` the same
+    // (Option<NetConfig> + #[serde(default)]). When an object, the
+    // agent brings eth0 up and writes /etc/hosts before spawning
+    // the interpreter.
+    net,
   });
   const readTimeoutMs = Math.max(1_000, responseDeadline - Date.now());
   const raw = await readFrame(sock, readTimeoutMs);
@@ -454,24 +522,43 @@ async function executeCold(
   rootfsPath: string,
   kernelPath: string,
   allowlist: AllowlistEntry[],
+  networkScope: NetworkScope,
   startedAt: number,
   meta: { snapshotFallbackReason?: FallbackReason; cacheKey?: string } = {},
 ): Promise<ExecResult> {
   const ctx = makeRunContext();
   let fc: ChildProcess | null = null;
   let sock: BufferedSocketLike | null = null;
+  let netnsHandle: NetnsHandle | null = null;
+  let agentNet: AgentNetConfig | null = null;
   try {
     copyFileSync(rootfsPath, ctx.stagedRootfs);
+
+    // Network path (RED-259): resolve allowlist hostnames via host
+    // DNS, setup the netns + tap + iptables + return route, build
+    // the NetConfig the agent needs. Resolution happens BEFORE
+    // netns setup so a bad allowlist fails fast without any
+    // privileged ops. If anything here throws, the finally block
+    // tears down whatever partial state exists.
+    if (networkScope.kind === 'policy') {
+      const resolved = await resolveAllowlist(networkScope.policy);
+      netnsHandle = await setupNetns({
+        policy: networkScope.policy,
+        allowedIps: resolved.allowedIps,
+      });
+      agentNet = buildAgentNetConfig(resolved);
+    }
+
     // Build per-call allowlist drives in the tempdir. They're
     // disposable (same lifecycle as the rootfs copy) since cold-only
     // doesn't persist any cache state.
     const allowlistDrives = buildAllowlistDrives(allowlist, ctx.workDir);
-    const booted = await coldBootToAccept(opts, kernelPath, allowlistDrives, ctx);
+    const booted = await coldBootToAccept(opts, kernelPath, allowlistDrives, netnsHandle, ctx);
     fc = booted.fc;
     sock = booted.sock;
     const responseDeadline = Date.now() + opts.timeout * 1000 + 5_000;
     const mounts = drivesToAgentMounts(allowlistDrives);
-    const result = await runExecAgainst(opts, sock, mounts, responseDeadline, startedAt);
+    const result = await runExecAgainst(opts, sock, mounts, agentNet, responseDeadline, startedAt);
     return withSnapshotMeta(result, meta.snapshotFallbackReason
       ? { path: 'cold_boot_fallback', fallbackReason: meta.snapshotFallbackReason, cacheKey: meta.cacheKey }
       : undefined);
@@ -479,6 +566,12 @@ async function executeCold(
     return crashedWithLog(startedAt, ctx, e);
   } finally {
     cleanupRunContext(ctx, fc, sock);
+    // Netns teardown after FC is dead — tearing down the tap while
+    // FC still holds an fd would leak state. cleanupRunContext
+    // SIGKILLs + drains FC before returning.
+    if (netnsHandle) {
+      try { await teardownNetns(netnsHandle); } catch { /* best-effort */ }
+    }
   }
 }
 
@@ -497,7 +590,7 @@ async function executeColdAndSave(
   ensureCacheDir(handle);
   const lockFd = tryAcquireCacheLock(handle);
   if (lockFd === null) {
-    return executeCold(opts, rootfsPath, kernelPath, allowlist, startedAt, {
+    return executeCold(opts, rootfsPath, kernelPath, allowlist, { kind: 'none' }, startedAt, {
       snapshotFallbackReason: 'build_locked',
       cacheKey: handle.cacheKey,
     });
@@ -585,7 +678,7 @@ async function executeColdAndSave(
 
     if (phase1Degraded) {
       return withSnapshotMeta(
-        await executeCold(opts, rootfsPath, kernelPath, allowlist, startedAt),
+        await executeCold(opts, rootfsPath, kernelPath, allowlist, { kind: 'none' }, startedAt),
         { path: 'cold_boot_fallback', fallbackReason: 'load_failed', cacheKey: handle.cacheKey },
       );
     }
@@ -608,7 +701,7 @@ async function executeColdAndSave(
         restored = await restoreFromSnapshot(handle, ctx.apiSock, ctx.log);
       } catch (e: any) {
         return withSnapshotMeta(
-          await executeCold(opts, rootfsPath, kernelPath, allowlist, startedAt),
+          await executeCold(opts, rootfsPath, kernelPath, allowlist, { kind: 'none' }, startedAt),
           { path: 'cold_boot_fallback', fallbackReason: 'load_failed', cacheKey: handle.cacheKey },
         );
       }
@@ -616,7 +709,10 @@ async function executeColdAndSave(
       sock = restored.sock;
 
       const responseDeadline = Date.now() + opts.timeout * 1000 + 5_000;
-      const result = await runExecAgainst(opts, sock, mounts, responseDeadline, startedAt);
+      // executeColdAndSave / executeWarm never touch network policy
+      // in v1 — the `execute()` dispatcher routes net-policy gens to
+      // executeCold. Pass net:null explicitly.
+      const result = await runExecAgainst(opts, sock, mounts, null, responseDeadline, startedAt);
       return withSnapshotMeta(result, {
         path: 'cold_boot_and_save',
         createMs,
@@ -649,7 +745,7 @@ async function executeWarm(
   // different cache keys still run in parallel unaffected.
   const lockFd = tryAcquireCacheLock(handle);
   if (lockFd === null) {
-    return executeCold(opts, rootfsPath, kernelPath, allowlist, startedAt, {
+    return executeCold(opts, rootfsPath, kernelPath, allowlist, { kind: 'none' }, startedAt, {
       snapshotFallbackReason: 'build_locked',
       cacheKey: handle.cacheKey,
     });
@@ -675,7 +771,7 @@ async function executeWarm(
       // Cold-only doesn't interact with the cache, so holding the
       // lock through the fallback is safe (and keeps the lock
       // state simple — one release in the finally, always).
-      return executeCold(opts, rootfsPath, kernelPath, allowlist, startedAt, {
+      return executeCold(opts, rootfsPath, kernelPath, allowlist, { kind: 'none' }, startedAt, {
         snapshotFallbackReason: 'load_failed',
         cacheKey: handle.cacheKey,
       });
@@ -692,7 +788,9 @@ async function executeWarm(
     const mounts = drivesToAgentMounts(allowlistDrives);
 
     const responseDeadline = Date.now() + opts.timeout * 1000 + 5_000;
-    const result = await runExecAgainst(opts, sock, mounts, responseDeadline, startedAt);
+    // Warm-restore is only reachable for networkScope.kind === 'none'
+    // in v1 — see the dispatch branching in execute().
+    const result = await runExecAgainst(opts, sock, mounts, null, responseDeadline, startedAt);
     return withSnapshotMeta(result, {
       path: 'warm_restore',
       restoreMs: restored.restoreMs,
@@ -715,25 +813,45 @@ async function executeWarm(
  * filesystem allowlist into structured entries. Returns either an
  * error string (to surface as `crashed`) or the normalized scope.
  *
- * Network is still `'none'`-only (RED-259 follow-up). Filesystem
- * accepts `'none'` OR a validated, canonicalized allowlist per
- * RED-258. Validation covers absoluteness, normalized form,
+ * Network accepts `'none'` OR a NetworkPolicy (RED-259): allowlist +
+ * denylist + block_private + block_metadata. The policy itself is
+ * validated shape-wise here; hostname resolution + iptables rule
+ * generation happen later in the dispatch path (requires async +
+ * system calls and shouldn't run before filesystem / availability
+ * checks).
+ *
+ * Filesystem accepts `'none'` OR a validated, canonicalized allowlist
+ * per RED-258. Validation covers absoluteness, normalized form,
  * rootfs-owned prefix collision, source directory existence, and
  * the `MAX_ALLOWLIST_ENTRIES` cap.
  */
 function resolveScope(opts: ExecOpts):
   | { error: string }
-  | { allowlist: AllowlistEntry[] } {
-  if (opts.network !== 'none') {
+  | { allowlist: AllowlistEntry[]; networkScope: NetworkScope } {
+  // Network shape check. 'none' is the no-netns fast path; any other
+  // value must be a NetworkPolicy (RED-137 shape) — we validate the
+  // critical fields here and defer async resolution to dispatch time.
+  let networkScope: NetworkScope;
+  if (opts.network === 'none') {
+    networkScope = { kind: 'none' };
+  } else {
     const np = opts.network as NetworkPolicy;
-    return {
-      error: `:firecracker v1 supports network: 'none' only (got allowlist: ${
-        np?.allowlist?.join(', ') ?? 'unknown'
-      }). Host-side netns + iptables resolution is RED-259; for network access, use runtime: :native (unsandboxed) or file a ticket.`,
-    };
+    if (
+      !np ||
+      !Array.isArray(np.allowlist) ||
+      !np.allowlist.every((e): e is string => typeof e === 'string') ||
+      typeof np.block_private !== 'boolean' ||
+      typeof np.block_metadata !== 'boolean'
+    ) {
+      return {
+        error: `network policy must be 'none' or a NetworkPolicy { allowlist: string[], block_private: boolean, block_metadata: boolean, ... } (got ${JSON.stringify(opts.network).slice(0, 200)})`,
+      };
+    }
+    networkScope = { kind: 'policy', policy: np };
   }
+
   if (opts.filesystem === 'none') {
-    return { allowlist: [] };
+    return { allowlist: [], networkScope };
   }
   const rawPaths = (opts.filesystem as { allowlist_paths?: unknown })?.allowlist_paths;
   if (!Array.isArray(rawPaths) || !rawPaths.every((p): p is string => typeof p === 'string')) {
@@ -745,7 +863,7 @@ function resolveScope(opts: ExecOpts):
   if (!Array.isArray(resolved)) {
     return { error: formatAllowlistError(resolved) };
   }
-  return { allowlist: resolved };
+  return { allowlist: resolved, networkScope };
 }
 
 function crashed(startedAt: number, reason: string): ExecResult {

@@ -145,8 +145,10 @@ export interface ExecResult {
      *  `shared_mem_unsupported` fires if the Firecracker version
      *  doesn't expose the File backend; `build_locked` fires when
      *  a concurrent caller holds the per-cache-entry lock — we
-     *  cold-boot this request rather than waiting for them. */
-    fallbackReason?: 'missing' | 'non_canonical_sizing' | 'load_failed' | 'shared_mem_unsupported' | 'build_locked';
+     *  cold-boot this request rather than waiting for them;
+     *  `allowlist_hash_failed` fires when hashing the filesystem
+     *  allowlist's source directories threw (RED-258). */
+    fallbackReason?: 'missing' | 'non_canonical_sizing' | 'load_failed' | 'shared_mem_unsupported' | 'build_locked' | 'allowlist_hash_failed';
     /** Content-addressed cache key for the `(rootfs, kernel, canonical)`
      *  tuple. Present on all three paths so the trace can be
      *  cross-referenced to the cache directory. */
