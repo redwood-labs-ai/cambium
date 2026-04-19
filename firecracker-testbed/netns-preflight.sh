@@ -156,7 +156,15 @@ sudo ip netns exec "${NETNS}" ip addr add "10.79.0.254/24" dev "${VETH_G}"
 sudo ip netns exec "${NETNS}" ip link set "${VETH_G}" up
 sudo ip netns exec "${NETNS}" ip link set lo up
 sudo ip netns exec "${NETNS}" ip route add default via "${VETH_G_IP}"
-pass "veth pair up: ${VETH_H} <-> ${VETH_G} (netns side .254, host side ${VETH_G_IP})"
+# A new netns has its own sysctl tree; ip_forward defaults to 0
+# inside the netns regardless of the root netns's value. Without
+# this, the netns kernel won't forward packets between tap (coming
+# from guest) and veth-g (going out to the host). The FIRST
+# preflight that got eth0 up but never got a fetch reply landed
+# here — the packets were getting to the tap but dying in the
+# netns's forwarding path.
+sudo ip netns exec "${NETNS}" sysctl -w net.ipv4.ip_forward=1 >/dev/null
+pass "veth pair up: ${VETH_H} <-> ${VETH_G} (netns side .254, host side ${VETH_G_IP}), netns ip_forward=1"
 
 # Tap device — lives in the netns so Firecracker can attach it.
 sudo ip netns exec "${NETNS}" ip tuntap add "${TAP}" mode tap
