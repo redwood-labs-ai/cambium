@@ -128,6 +128,7 @@ output.json + trace.json
 │       ├── builtin-tools/     # Framework tools — paired .tool.json + .tool.ts
 │       ├── builtin-actions/   # Framework trigger actions (notify_stderr, ...)
 │       ├── exec-substrate/    # ExecSubstrate adapter + :wasm/:firecracker/:native (RED-213)
+│       │                      #   :firecracker incl. firecracker-{snapshot,allowlist,netns,dns,protocol,api}.ts
 │       ├── tools/             # Tool infra (registry, ToolContext, network-guard)
 │       ├── actions/           # Action registry (parallel to tools/)
 │       ├── memory/            # Memory subsystem (backend, path, keys, retro-agent)

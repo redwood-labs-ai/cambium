@@ -130,16 +130,28 @@ See Architecture. Memory-safe, small static binary, vsock transport in stdlib, a
 
 See Architecture. Reference image hosted as a release artifact; production users bake their own.
 
-### 5. Network in v1: `:none` only.
+### 5. Network: per-call netns + iptables allowlist (RED-259).
 
-Symmetric with `:wasm`. The substrate accepts `network:` in the DSL but implements `:none` behavior only — any guest network attempt surfaces as `ExecEgressDenied` (no tap device provisioned, no route out of the VM).
+`network: :none` → no tap, no network device in the VM. Guest code that calls `fetch()` gets connection refused immediately.
 
-When a concrete use case demands network-from-exec, two implementation paths:
+`network: { allowlist: ['api.github.com', '1.1.1.1'], block_private: true, block_metadata: true }` → the host builds a per-call network namespace + veth pair + tap device + iptables filter chain before spawning Firecracker:
 
-a) **Tap device + iptables rules** from the allowlist. Per-VM network namespace; host-side iptables enforces the egress policy.
-b) **HTTP proxy through the runner.** The agent makes outbound HTTP calls via a runner-provided proxy URL; the proxy is bound to the gen's `NetworkPolicy` and reuses the SSRF guard from RED-137 verbatim.
+- **Netns topology**: two disjoint /24s. Host ↔ netns veth pair on `10.100.0.0/24`, netns ↔ guest tap on `10.200.0.0/24`. MASQUERADE on `POSTROUTING` rewrites guest-sourced packets as they exit the host's default interface; a return-path route on the root netns (`ip route add 10.200.0.0/24 via 10.100.0.2 dev <veth-h>`) makes reply packets un-NAT back to the guest. Same topology the RED-259 preflight (`firecracker-testbed/netns-preflight.sh`) proved GREEN on the MS-R1.
+- **iptables policy in the netns**: FORWARD chain defaults to DROP. Stateful `ESTABLISHED,RELATED` ACCEPT first (so TCP replies to allowed outbound connections come back). Then `block_metadata` DROP at the top of the allow-list (so even an adversarial allowlist pointing at metadata can't slip through). Then `block_private` DROPs covering `0.0.0.0/8`, RFC 1918, loopback, link-local. Then one ACCEPT per resolved allowlist IP. Order matters — the DROPs deliberately precede any ACCEPT so defense-in-depth holds even under an adversarial allowlist.
+- **DNS pre-resolution on the host**: `firecracker-dns.ts::resolveAllowlist` walks the policy's allowlist, treats literal IPs as-is, runs each hostname through `node:dns/promises.resolve4`, filters blocked IPs out of the results, and fails cleanly if any name resolves only to blocked addresses. The guest rootfs has no resolver — adding one would require a stub server inside the netns and a second allowlist for which resolvers the guest may contact, which compounds rather than simplifies the security story. Instead, the agent receives a pre-baked `/etc/hosts` map via `ExecRequest.net.hosts`.
+- **Firecracker runs inside the netns** via `sudo -n ip netns exec <name> firecracker --api-sock …`, so its virtio-net device attaches to the tap from the right namespace.
+- **Privilege model**: netns + iptables manipulation needs CAP_NET_ADMIN. Default is `sudo -n` (non-interactive — cache via `sudo -v` first); `CAMBIUM_FC_NETNS_NOSUDO=1` skips the sudo prefix for environments that grant CAP_NET_ADMIN via setcap; `CAMBIUM_FC_PREPARED_NETNS=<name>` is the operator-managed escape hatch — Cambium skips setup/teardown entirely and uses a pre-configured netns (must match the `NETNS_NAME` / tap / subnets / IPs `firecracker-netns.ts` pins).
+- **Cleanup**: `executeCold`'s finally block drains FC (awaits the SIGKILL'd child's exit) before tearing down the tap + netns — tearing down the tap while FC still holds an fd leaks kernel state.
 
-Either path adds surface area we should only add with a driver. V1 ships without, DSL shape already accepts it.
+**v1 constraints documented in the impl:**
+
+- **Cold-only.** Snapshot caching is skipped when network policy is in play. A net-enabled-vs-net-disabled cache-key axis is a v1.5 follow-up. Gens with network policy pay ~200 ms per-call cold-boot.
+- **Sequential only.** Device names are fixed (`cambium-fc` / `cam-fc-h` / `cam-fc-g` / `cam-fc-tap`); two concurrent `:firecracker` runs with network policy race. Callers serialize or use `CAMBIUM_FC_PREPARED_NETNS` with externally-managed per-caller names.
+- **IPv4 only.** Allowlist IPv6 literals are accepted shape-wise but don't produce rules. IPv6 iptables is a v1.5 extension.
+- **Wildcard allowlists rejected.** `allowlist: ['*']` and glob patterns like `'*.example.com'` refuse at resolve time — `:firecracker` requires an enumerable allowlist. Gens that need unrestricted network should use `runtime: :native`.
+- **Denylist refused, not silently ignored.** `NetworkPolicy.denylist` is carried through the policy shape but `resolveAllowlist` throws on any non-empty denylist. RED-137's invariant says denylist wins over allowlist, and v1 doesn't implement per-denylist DROP rules yet — silently dropping the denylist would let a `:firecracker` gen have broader access than its `:native` equivalent. v1.5 adds real enforcement.
+
+An alternative we considered but didn't ship: **HTTP proxy through the runner**. The agent would make outbound HTTP calls via a runner-provided proxy URL, reusing the SSRF guard from RED-137 verbatim. Rejected for v1 because it breaks arbitrary protocols (would only cover HTTP/HTTPS) and couples the guest's network path to the runner process's event loop.
 
 ### 6. Filesystem in v1: virtio-blk ext4 allowlist, read-only only (RED-258).
 
@@ -326,7 +338,10 @@ Code is transmitted over vsock in the `ExecRequest`. A 1 MB code blob is ~instan
 
 - **Pooling warm VMs.** Snapshots give us per-call pristine state + fast boot; pooling on top adds state-management complexity for a smaller win. Follow-up when perf data demands it.
 - **GPU access.** Not in the DSL, not requested, not worth engineering speculatively.
-- **Network-from-exec.** DSL shape accepts it; the substrate's v1 implementation is `:none`-only. The two real implementation paths (tap + iptables vs host proxy) get picked when a driver names the use case.
+- **Warm-restore + network policy.** Network-enabled gens always cold-boot in v1 (see §5); the snapshot cache doesn't key on network-presence. v1.5 adds the axis.
+- **Concurrent network-enabled `:firecracker` calls.** v1 uses fixed device names; two concurrent runs race. Serialize at the caller or use `CAMBIUM_FC_PREPARED_NETNS` with externally-managed per-caller names. Per-call unique names are a v1.5 follow-up.
+- **IPv6 iptables.** Allowlist v6 literals are accepted shape-wise but don't produce rules in v1. v1.5 extends.
+- **Denylist enforcement in `:firecracker`.** Policy shape carries `denylist` through v1; `resolveAllowlist` refuses any non-empty denylist at dispatch time rather than silently ignoring. v1.5 adds per-denylist-entry DROP rules in the netns.
 - **Windows hosts.** No path; `:wasm` covers it.
 - **Sandboxing the Cambium runner itself.** Different threat model.
 - **Multi-tenant Firecracker on shared hosts.** The design assumes the runner has exclusive use of the Firecracker daemon / rootfs images. Running multiple Cambium instances against shared Firecracker infra is a deployment concern, not a substrate concern.

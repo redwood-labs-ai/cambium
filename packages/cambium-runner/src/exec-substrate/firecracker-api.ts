@@ -47,9 +47,48 @@ export function makeLogAccumulator(): LogAccumulator {
 
 /** Spawn a firecracker child process attached to the given API
  *  socket. The caller is responsible for waiting until the socket
- *  appears (via `waitForApiSocket`) before making any API calls. */
-export function spawnFirecracker(apiSock: string, log: LogAccumulator): ChildProcess {
-  const fc = spawn(FC_BINARY, ['--api-sock', apiSock], {
+ *  appears (via `waitForApiSocket`) before making any API calls.
+ *
+ *  When `netns` is provided, runs firecracker inside that network
+ *  namespace via `ip netns exec <name> firecracker ...` — this is
+ *  the RED-259 network-allowlist path, where the tap device the
+ *  guest's virtio-net binds to lives inside the netns. FC opens its
+ *  tap fd from whatever netns its process lives in, so dispatching
+ *  via `ip netns exec` is the mechanism.
+ *
+ *  The netns path needs CAP_NET_ADMIN to invoke `ip netns exec`.
+ *  Default is to prefix with `sudo -n`; `nsPrivileged: false` skips
+ *  the prefix for environments that are already root or that grant
+ *  the capability via setcap.
+ */
+export function spawnFirecracker(
+  apiSock: string,
+  log: LogAccumulator,
+  opts: { netns?: string; nsPrivileged?: boolean } = {},
+): ChildProcess {
+  let binary: string;
+  let argv: string[];
+  if (opts.netns) {
+    // Mirror firecracker-netns.ts::runPrivileged so the NOSUDO escape
+    // hatch works consistently: operators who set up CAP_NET_ADMIN
+    // via setcap instead of sudo can set CAMBIUM_FC_NETNS_NOSUDO=1
+    // and BOTH the setup commands AND the FC spawn skip the sudo
+    // prefix. Prior to this, the escape hatch was half-wired — netns
+    // setup worked without sudo but the FC spawn still prepended
+    // `sudo -n`, causing the dispatch to fail.
+    const needsSudo =
+      opts.nsPrivileged ??
+      (process.getuid?.() !== 0 && process.env.CAMBIUM_FC_NETNS_NOSUDO !== '1');
+    const full = needsSudo
+      ? ['sudo', '-n', 'ip', 'netns', 'exec', opts.netns, FC_BINARY, '--api-sock', apiSock]
+      : ['ip', 'netns', 'exec', opts.netns, FC_BINARY, '--api-sock', apiSock];
+    binary = full[0]!;
+    argv = full.slice(1);
+  } else {
+    binary = FC_BINARY;
+    argv = ['--api-sock', apiSock];
+  }
+  const fc = spawn(binary, argv, {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   fc.stdout?.on('data', log.append);
@@ -57,13 +96,43 @@ export function spawnFirecracker(apiSock: string, log: LogAccumulator): ChildPro
   return fc;
 }
 
-/** Kill the firecracker child and drain the exit so no zombies
- *  accumulate. Idempotent — safe to call on already-exited children. */
+/** Kill the firecracker child. Idempotent — safe to call on
+ *  already-exited children. Does NOT wait for exit; use
+ *  `drainFirecracker` when the caller needs to be sure FC has
+ *  released its resources (tap fds, netns refs) before tearing them
+ *  down. Kept sync so the common-case cleanup path stays simple. */
 export function killFirecracker(fc: ChildProcess | null): void {
   if (!fc) return;
   if (fc.exitCode === null) {
     try { fc.kill('SIGKILL'); } catch { /* already dead */ }
   }
+}
+
+/** Wait for FC to actually exit after a `killFirecracker` — SIGKILL
+ *  is immediate at the kernel level, but Node doesn't observe the
+ *  exit until the next event-loop turn (and FC's own cleanup can
+ *  hold file descriptors briefly). Tearing down the netns + tap
+ *  device while FC still holds the tap fd leaks kernel state (the
+ *  tap persists under the fd, and `ip netns delete` silently fails
+ *  or leaves a zombie netns). This helper awaits `exit` with a short
+ *  deadline so the cleanup-then-teardown ordering is correct.
+ *
+ *  Returns when FC is known dead OR the deadline elapses. A timeout
+ *  is not an error — the caller treats it as "best-effort; FC is
+ *  probably reaped by now, teardown proceeds either way." */
+export function drainFirecracker(
+  fc: ChildProcess | null,
+  timeoutMs = 1_000,
+): Promise<void> {
+  if (!fc) return Promise.resolve();
+  if (fc.exitCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, timeoutMs);
+    fc.once('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
 }
 
 /** Wait up to `timeoutMs` for a UNIX socket to appear at `path`. */

@@ -34,7 +34,12 @@ describe('FirecrackerSubstrate.execute — scope gates', () => {
     filesystem: 'none' as const,
   };
 
-  it('rejects a non-"none" network policy with a pointer to the follow-up path', async () => {
+  it('accepts a NetworkPolicy shape at the scope gate (RED-259)', async () => {
+    // With RED-259 landed, a well-formed NetworkPolicy passes the
+    // scope check. The dispatch still crashes downstream here — this
+    // test runs on macOS and the substrate is unavailable — but the
+    // reason should be about the availability check, NOT a policy
+    // rejection.
     const sub = new FirecrackerSubstrate();
     const result = await sub.execute({
       ...baseOpts,
@@ -46,8 +51,23 @@ describe('FirecrackerSubstrate.execute — scope gates', () => {
       },
     });
     expect(result.status).toBe('crashed');
-    expect(result.reason).toMatch(/network: 'none' only/);
-    expect(result.reason).toMatch(/allowlist/);
+    // On non-Linux hosts the substrate is unavailable — the error
+    // should be about platform, not about the network policy.
+    expect(result.reason).not.toMatch(/network: 'none' only/);
+    expect(result.reason).not.toMatch(/network policy must be/);
+  });
+
+  it('rejects a malformed network policy with a shape-check error', async () => {
+    // A bad shape (object but missing required fields) must surface
+    // as a clean policy error, not a TypeError from a later
+    // destructuring step.
+    const sub = new FirecrackerSubstrate();
+    const result = await sub.execute({
+      ...baseOpts,
+      network: { allowlist: 'not-an-array' } as any,
+    });
+    expect(result.status).toBe('crashed');
+    expect(result.reason).toMatch(/network policy must be/);
   });
 
   it('rejects an allowlist path that collides with a deep-forbidden rootfs prefix', async () => {
