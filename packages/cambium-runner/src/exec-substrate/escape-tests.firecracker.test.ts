@@ -374,6 +374,20 @@ describe('Firecracker substrate — escape tests (RED-257)', () => {
     block_metadata: true,
   };
 
+  /** Print result.reason + truncated stderr/stdout when the test
+   *  status is unexpected. Vitest only shows test stdout on failure,
+   *  so this is informational-only on a green run and saves a
+   *  diagnostic round-trip when a test breaks against a real VM. */
+  function logIfNotCompleted(label: string, result: Awaited<ReturnType<typeof sub.execute>>): void {
+    if (result.status === 'completed') return;
+    console.error(`[debug ${label}]`, {
+      status: result.status,
+      reason: result.reason,
+      stderr: result.stderr?.slice(0, 600),
+      stdout: result.stdout?.slice(0, 600),
+    });
+  }
+
   it('allowlisted IP IS reachable via TCP from the guest', async () => {
     // The positive-path test: a gen with an allowlist containing
     // 1.1.1.1 must be able to reach 1.1.1.1. If this fails, the
@@ -384,6 +398,7 @@ describe('Firecracker substrate — escape tests (RED-257)', () => {
       language: 'js',
       code: tcpConnectProbe(NET_ALLOW_IP, 80, 'ALLOW'),
     });
+    logIfNotCompleted('RED-259 allow-ip', result);
     expect(result.status).toBe('completed');
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain('ALLOW_OK');
@@ -400,6 +415,7 @@ describe('Firecracker substrate — escape tests (RED-257)', () => {
       language: 'js',
       code: tcpConnectProbe(NET_BLOCK_IP, 80, 'BLOCK'),
     });
+    logIfNotCompleted('RED-259 block-ip', result);
     expect(result.status).toBe('completed');
     // A blocked IP surfaces as either TIMEOUT (iptables silently drops
     // the SYN) or ERROR:EHOSTUNREACH (kernel short-circuits); what we
