@@ -216,32 +216,40 @@ else:
 # all the paths the agent might later use to mount allowlist drives.
 code = r"""
 const { execSync } = require('child_process');
+// Force the pipeline to exit 0 so execSync always returns the real
+// captured stdout; individual commands might legitimately exit
+// non-zero (grep-no-match, mount-fail) and that's the signal we
+// want to see, not a thrown exception that swallows it.
+const script = [
+  'echo "--- /dev/disk/by-label/ CONTENTS ---"',
+  '(ls -la /dev/disk/by-label/ 2>&1 && echo "BY_LABEL_DIR_EXISTS") || echo "BY_LABEL_DIR_MISSING"',
+  'echo "--- /dev/vd* ---"',
+  'ls -la /dev/vd* 2>&1',
+  'echo "--- blkid ---"',
+  '(blkid 2>&1 || echo "(blkid unavailable)")',
+  'echo "--- mount by label (ext4 explicit) ---"',
+  'mkdir -p /mnt/testlabel',
+  '(mount -t ext4 /dev/disk/by-label/CAMBIUMPREFL /mnt/testlabel 2>&1 && echo "MOUNTED_BY_LABEL") || echo "FAILED_BY_LABEL"',
+  '(cat /mnt/testlabel/sentinel 2>&1 | sed "s/^/LABEL_READ: /") || true',
+  'umount /mnt/testlabel 2>/dev/null || true',
+  'echo "--- mount by device (ext4 explicit) ---"',
+  'mkdir -p /mnt/testdev',
+  '(mount -t ext4 /dev/vdb /mnt/testdev 2>&1 && echo "MOUNTED_BY_DEV") || echo "FAILED_BY_DEV"',
+  '(cat /mnt/testdev/sentinel 2>&1 | sed "s/^/DEV_READ: /") || true',
+  'umount /mnt/testdev 2>/dev/null || true',
+  'echo "--- /proc/filesystems (ext*) ---"',
+  '(grep -E "ext4|ext3|ext2" /proc/filesystems 2>&1 || echo "(no ext* in /proc/filesystems)")',
+].join(' ; ') + ' ; exit 0';
 let out;
 try {
-  out = execSync([
-    'echo "--- /dev/disk/by-label/ CONTENTS ---"',
-    '(ls -la /dev/disk/by-label/ 2>&1 && echo "BY_LABEL_DIR_EXISTS") || echo "BY_LABEL_DIR_MISSING"',
-    'echo "--- /dev/vd* ---"',
-    'ls -la /dev/vd* 2>&1',
-    'echo "--- blkid ---"',
-    'blkid 2>&1 || echo "(blkid unavailable)"',
-    'echo "--- mount by label (ext4 explicit) ---"',
-    'mkdir -p /mnt/testlabel',
-    'mount -t ext4 /dev/disk/by-label/CAMBIUMPREFL /mnt/testlabel 2>&1 && echo "MOUNTED_BY_LABEL" || echo "FAILED_BY_LABEL"',
-    'cat /mnt/testlabel/sentinel 2>&1 | sed "s/^/LABEL_READ: /"',
-    'umount /mnt/testlabel 2>/dev/null',
-    'echo "--- mount by device (ext4 explicit) ---"',
-    'mkdir -p /mnt/testdev',
-    'mount -t ext4 /dev/vdb /mnt/testdev 2>&1 && echo "MOUNTED_BY_DEV" || echo "FAILED_BY_DEV"',
-    'cat /mnt/testdev/sentinel 2>&1 | sed "s/^/DEV_READ: /"',
-    'umount /mnt/testdev 2>/dev/null',
-    'echo "--- /etc/filesystems + /proc/filesystems ---"',
-    'cat /etc/filesystems 2>&1 || echo "(no /etc/filesystems)"',
-    'echo "---"',
-    'grep -E "ext4|ext3|ext2" /proc/filesystems 2>&1',
-  ].join(' ; '), { shell: '/bin/sh' }).toString();
+  out = execSync(script, { shell: '/bin/sh' }).toString();
 } catch (e) {
-  out = 'EXEC ERROR: ' + (e.stderr?.toString() || e.message);
+  // Keep this path for unexpected shell-invocation failures. Include
+  // stdout AND stderr so diagnostic info isn't lost on throw.
+  const so = e.stdout ? e.stdout.toString() : '';
+  const se = e.stderr ? e.stderr.toString() : '';
+  out = 'EXEC ERROR (code=' + e.status + ')\n--- stdout ---\n' + so +
+        '\n--- stderr ---\n' + se + '\n--- message ---\n' + e.message;
 }
 console.log(out);
 """
