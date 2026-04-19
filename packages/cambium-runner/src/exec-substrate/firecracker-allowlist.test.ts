@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 // NOTE: we cannot use `os.tmpdir()` as the scratch base: on macOS it
@@ -14,6 +14,7 @@ import {
   normalizeAllowlistPaths,
   canonicalizeAllowlist,
   hashAllowlist,
+  hashDirectoryTree,
   indexToVirtioBlkDevice,
   drivesToAgentMounts,
   formatAllowlistError,
@@ -55,16 +56,41 @@ describe('validateAllowlistPath', () => {
     expect(e?.kind).toBe('has_traversal');
   });
 
-  it('rejects a rootfs-owned exact prefix', () => {
+  it('rejects a deep-forbidden prefix at the prefix itself', () => {
     const e = validateAllowlistPath('/etc');
     expect(e?.kind).toBe('rootfs_collision');
     if (e?.kind === 'rootfs_collision') expect(e.prefix).toBe('/etc');
   });
 
-  it('rejects a rootfs-owned subpath', () => {
-    const e = validateAllowlistPath('/var/data');
+  it('rejects a deep-forbidden prefix subpath', () => {
+    // /etc is system-owned; /etc/myapp would shadow a potentially
+    // existing config.
+    const e = validateAllowlistPath('/etc/myapp');
+    expect(e?.kind).toBe('rootfs_collision');
+    if (e?.kind === 'rootfs_collision') expect(e.prefix).toBe('/etc');
+  });
+
+  it('rejects exact mount at an EXACT_FORBIDDEN user-land prefix', () => {
+    // /var itself shadows the whole /var tree (logs, lib, ...).
+    const e = validateAllowlistPath('/var');
     expect(e?.kind).toBe('rootfs_collision');
     if (e?.kind === 'rootfs_collision') expect(e.prefix).toBe('/var');
+  });
+
+  it('accepts deep subpaths under an EXACT_FORBIDDEN user-land prefix (Cambium opinion)', () => {
+    // /var/data should not be rejected by prefix — it may fail with
+    // source_missing if the dir doesn't exist, but the prefix gate
+    // passes. This is the Rails-style opinion: user-land FHS
+    // directories are open to deep use.
+    const e = validateAllowlistPath('/var/data');
+    // Either source_missing (dir doesn't exist) OR source_not_directory.
+    // What we're asserting: NOT rootfs_collision.
+    expect(e?.kind).not.toBe('rootfs_collision');
+  });
+
+  it('accepts deep subpaths under /home (user home directories)', () => {
+    const e = validateAllowlistPath('/home/someone/project/data');
+    expect(e?.kind).not.toBe('rootfs_collision');
   });
 
   it('rejects root itself', () => {
@@ -80,6 +106,19 @@ describe('validateAllowlistPath', () => {
   it('rejects a path that points at a file, not a directory', () => {
     const e = validateAllowlistPath(join(scratch, 'file.txt'));
     expect(e?.kind).toBe('source_not_directory');
+  });
+
+  it('rejects a symlinked directory (defense against FORBIDDEN_GUEST_PREFIXES bypass)', () => {
+    // Create a symlink under scratch that points at `dir`. Even though
+    // the resolved target is a real directory, the symlink itself is
+    // rejected. This is the guard against a gen declaring
+    // `/opt/mydata` where `/opt/mydata` is a symlink to `/etc`: the
+    // top-level prefix check passes, but `lstatSync` catches the
+    // symlink and refuses.
+    const link = join(scratch, 'dir-symlink');
+    symlinkSync(join(scratch, 'dir'), link);
+    const e = validateAllowlistPath(link);
+    expect(e?.kind).toBe('is_symlink');
   });
 });
 
@@ -179,6 +218,50 @@ describe('hashAllowlist', () => {
       { _hashDir: () => 'same' },
     );
     expect(a).not.toBe(b);
+  });
+});
+
+describe('hashDirectoryTree — symlink handling', () => {
+  let scratch: string;
+
+  beforeAll(() => {
+    scratch = mkdtempSync(join(SCRATCH_BASE, '.cambium-test-symlinks-'));
+  });
+
+  afterAll(() => {
+    rmSync(scratch, { recursive: true, force: true });
+  });
+
+  it('does not follow symlinks, so symlink targets cannot contribute to the hash', () => {
+    // Two source trees:
+    //   A: just a regular file
+    //   B: same regular file + a symlink pointing at an *entirely
+    //      separate* dir whose contents would change the hash if we
+    //      followed links
+    // Hashes must be identical — the symlink contributes nothing.
+    const a = join(scratch, 'tree-a');
+    const b = join(scratch, 'tree-b');
+    const external = join(scratch, 'external');
+    mkdirSync(a, { recursive: true });
+    mkdirSync(b, { recursive: true });
+    mkdirSync(external, { recursive: true });
+    writeFileSync(join(a, 'readme.txt'), 'hello');
+    writeFileSync(join(b, 'readme.txt'), 'hello');
+    writeFileSync(join(external, 'sensitive.txt'), 'PRETEND-THIS-IS-/etc/passwd');
+    symlinkSync(external, join(b, 'link-to-external'));
+
+    // mtime-based equality can be flaky if `readme.txt` writes take
+    // different nanoseconds on each side. We assert the hashes differ
+    // ONLY in a way that reflects the files walked, not the symlink
+    // target. A strict equality check over mtimeMs would be brittle,
+    // so we re-hash both trees and accept them as either equal (if
+    // both files got the same mtime) or non-equal. What we DO assert
+    // is that appending MORE files under `external` has no effect on
+    // b's hash — which is the security-relevant invariant.
+    const bEmptyExternal = hashDirectoryTree(b);
+    writeFileSync(join(external, 'more.txt'), 'MORE-SENSITIVE-DATA');
+    const bAfterExternalGrow = hashDirectoryTree(b);
+    expect(bEmptyExternal).toBe(bAfterExternalGrow);
   });
 });
 

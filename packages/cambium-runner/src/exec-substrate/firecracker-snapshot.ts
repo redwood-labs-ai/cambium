@@ -86,7 +86,8 @@ export type FallbackReason =
   | 'missing'
   | 'load_failed'
   | 'shared_mem_unsupported'
-  | 'build_locked';
+  | 'build_locked'
+  | 'allowlist_hash_failed';
 
 /**
  * Check whether the ExecOpts match canonical sizing AFTER the

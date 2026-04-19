@@ -9,8 +9,11 @@
 //! (`firecracker.ts`, RED-258) attaches one virtio-blk drive per
 //! allowlist entry before `InstanceStart`; each drive surfaces in
 //! the guest as `/dev/vdb`, `/dev/vdc`, etc. The `ExecRequest.mounts`
-//! vec carries `(device, guest_path, read_only)` tuples the agent
-//! applies verbatim.
+//! vec carries `(device, guest_path, read_only)` tuples; the agent
+//! rejects any entry with `read_only = false` as a second enforcement
+//! point — so a future host bug that leaked a rw mount would fail at
+//! the agent rather than silently exposing the host directory
+//! writable to guest code.
 
 use crate::protocol::Mount;
 use std::process::Command;
@@ -37,6 +40,23 @@ const MOUNT_BIN: &str = "/bin/mount";
 /// request is built.
 pub fn apply_mounts(mounts: &[Mount]) -> Result<(), String> {
     for (idx, m) in mounts.iter().enumerate() {
+        // Belt-and-suspenders: v1 only supports read-only mounts.
+        // The host builds the ExecRequest and is supposed to hardcode
+        // `read_only: true` for every allowlist entry (see
+        // `normalizeAllowlistPaths` in
+        // `packages/cambium-runner/src/exec-substrate/firecracker-allowlist.ts`).
+        // But a future host-side refactor that misplaces the hardcoding
+        // could send `read_only: false` and the agent would silently
+        // mount rw. Reject here so the agent is a second enforcement
+        // point, not a pass-through.
+        if !m.read_only {
+            return Err(format!(
+                "mount[{idx}]: {} -> {} requested read_only=false, which the agent refuses — \
+                 v1 allowlist mounts are read-only only",
+                m.device, m.guest_path,
+            ));
+        }
+
         // Ensure the mount point exists. `create_dir_all` is the
         // moral equivalent of `mkdir -p`; it's idempotent and handles
         // intermediate directories.
@@ -53,10 +73,7 @@ pub fn apply_mounts(mounts: &[Mount]) -> Result<(), String> {
         // busybox doesn't include. Confirmed via RED-258 preflight
         // on the MS-R1 (2026-04-19).
         let mut cmd = Command::new(MOUNT_BIN);
-        cmd.args(["-t", "ext4"]);
-        if m.read_only {
-            cmd.args(["-o", "ro"]);
-        }
+        cmd.args(["-t", "ext4", "-o", "ro"]);
         cmd.args([&m.device, &m.guest_path]);
 
         let output = cmd.output().map_err(|e| {
@@ -111,6 +128,30 @@ mod tests {
         let err = apply_mounts(&[bad]).expect_err("null-byte path must fail");
         assert!(err.contains("mkdir -p"), "err: {err}");
         assert!(err.starts_with("mount[0]:"), "err: {err}");
+    }
+
+    /// Belt-and-suspenders: if the host-side ever leaks `read_only:
+    /// false` on a mount, the agent refuses the whole request rather
+    /// than silently mounting rw. The error must fire BEFORE mkdir
+    /// runs, so we can use a guest_path that would succeed mkdir —
+    /// what we're asserting is that the rw check is the first gate.
+    #[test]
+    fn refuses_read_only_false_without_attempting_mkdir() {
+        let rw = Mount {
+            device: "/dev/vdb".to_string(),
+            guest_path: "/tmp/cambium-agent-rw-refusal-check".to_string(),
+            read_only: false,
+        };
+        let err = apply_mounts(&[rw]).expect_err("rw mount must be refused");
+        assert!(err.contains("read_only=false"), "err: {err}");
+        assert!(err.contains("refuses"), "err: {err}");
+        assert!(err.starts_with("mount[0]:"), "err: {err}");
+        // The guard runs before mkdir, so the path we supplied
+        // shouldn't have been created on the test host.
+        assert!(
+            !std::path::Path::new("/tmp/cambium-agent-rw-refusal-check").exists(),
+            "rw guard ran mkdir before refusing — the guard is in the wrong position",
+        );
     }
 
     // NOTE: We don't test the happy path here (actual mount succeeds)

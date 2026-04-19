@@ -50,19 +50,43 @@ describe('FirecrackerSubstrate.execute — scope gates', () => {
     expect(result.reason).toMatch(/allowlist/);
   });
 
-  it('rejects an allowlist path that collides with a rootfs-owned prefix', async () => {
-    // RED-258: filesystem allowlist is now supported (via virtio-blk
-    // ext4 images), but paths that would collide with the rootfs's
-    // own directories are rejected at policy-check time — mounting
-    // over /var / /etc / /bin etc. would break the guest.
+  it('rejects an allowlist path that collides with a deep-forbidden rootfs prefix', async () => {
+    // RED-258: filesystem allowlist is supported via virtio-blk ext4
+    // images, but system-owned trees like /etc are DEEP_FORBIDDEN —
+    // the prefix itself AND any subpath are rejected because mounting
+    // under them would shadow the guest's own config / binaries /
+    // kernel interfaces / agent scratch.
     const sub = new FirecrackerSubstrate();
     const result = await sub.execute({
       ...baseOpts,
-      filesystem: { allowlist_paths: ['/var/data'] },
+      filesystem: { allowlist_paths: ['/etc/myapp'] },
     });
     expect(result.status).toBe('crashed');
     expect(result.reason).toMatch(/rootfs-owned prefix/);
-    expect(result.reason).toMatch(/\/var\/data/);
+    expect(result.reason).toMatch(/\/etc\/myapp/);
+  });
+
+  it('rejects exact-mount at a user-land prefix (e.g. /var) but allows subpaths', async () => {
+    // EXACT_FORBIDDEN: /var itself is rejected (exact-match shadows
+    // the whole tree), but a subpath like /var/app/input is allowed
+    // at policy-validation time — it would then be stat-checked for
+    // existence, and if absent fail with source_missing. That's the
+    // Cambium opinion: user-land FHS prefixes are open to deep use.
+    const sub = new FirecrackerSubstrate();
+    const exact = await sub.execute({
+      ...baseOpts,
+      filesystem: { allowlist_paths: ['/var'] },
+    });
+    expect(exact.status).toBe('crashed');
+    expect(exact.reason).toMatch(/rootfs-owned prefix/);
+
+    const subpath = await sub.execute({
+      ...baseOpts,
+      filesystem: { allowlist_paths: ['/var/probably-does-not-exist-cambium'] },
+    });
+    expect(subpath.status).toBe('crashed');
+    // source_missing, NOT rootfs_collision — the prefix check passed
+    expect(subpath.reason).toMatch(/does not exist on host/);
   });
 
   it('rejects a relative allowlist path', async () => {

@@ -261,10 +261,11 @@ export class FirecrackerSubstrate implements ExecSubstrate {
       allowlistSig = hashAllowlist(allowlist);
     } catch (e: any) {
       // Hashing can throw if a source dir is huge (> max entries) or
-      // unreadable. Fall back to cold-only; the snapshot path wouldn't
-      // work either way.
+      // unreadable. Fall back to cold-only with a reason that names
+      // the allowlist as the cause — `load_failed` would be
+      // misleading here because no snapshot load was ever attempted.
       return executeCold(opts, rootfsPath, kernelPath, allowlist, startedAt, {
-        snapshotFallbackReason: 'load_failed',
+        snapshotFallbackReason: 'allowlist_hash_failed',
       });
     }
 

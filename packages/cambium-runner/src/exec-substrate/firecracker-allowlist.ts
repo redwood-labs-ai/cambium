@@ -32,11 +32,11 @@ import {
   closeSync,
   existsSync,
   ftruncateSync,
+  lstatSync,
   openSync,
   readdirSync,
   renameSync,
   rmSync,
-  statSync,
 } from 'node:fs';
 import { isAbsolute, join, normalize } from 'node:path';
 
@@ -59,30 +59,48 @@ export interface AllowlistEntry {
   read_only: boolean;
 }
 
-/** Prefixes owned by the rootfs. Mounting an allowlist drive over
- *  any of these would break the guest — the rootfs's version of
- *  `/etc`, `/usr`, etc. becomes invisible, and interpreter startup
- *  fails in surprising ways. Reject at policy-check time. */
-const FORBIDDEN_GUEST_PREFIXES: readonly string[] = [
-  '/', // exact match only — subpaths like /data are fine
-  '/bin',
-  '/boot',
-  '/dev',
-  '/etc',
-  '/home',
-  '/init',
+/** Prefixes the guest's rootfs *owns entirely* — their subtrees are
+ *  system-managed (binaries, kernel interfaces, config files, agent
+ *  scratch) and a user mount anywhere inside would either shadow real
+ *  files on startup or collide with the agent's own scratch writes.
+ *  Both the prefix itself AND any subpath under it are rejected. */
+const DEEP_FORBIDDEN_GUEST_PREFIXES: readonly string[] = [
+  '/bin',   // guest binaries (busybox symlinks)
+  '/boot',  // kernel artifacts
+  '/dev',   // device nodes — including our own vda..vdy
+  '/etc',   // config files (users should not shadow /etc/*)
+  '/init',  // PID 1 binary
   '/lib',
   '/lib64',
-  '/mnt', // reserved for future use by Cambium conventions
-  '/proc',
-  '/root',
-  '/run',
-  '/sbin',
-  '/srv',
-  '/sys',
-  '/tmp', // agent writes scripts here; user-mount would shadow
-  '/usr',
-  '/var',
+  '/proc',  // kernel interface
+  '/root',  // root's home — run Cambium as a non-root user
+  '/run',   // runtime state
+  '/sbin',  // system binaries
+  '/sys',   // kernel interface
+  '/tmp',   // agent writes scripts here; user-mount would shadow
+  '/usr',   // read-only system data
+];
+
+/** Prefixes that exist as top-level directories in the guest rootfs
+ *  but whose subtrees are *user land* by POSIX convention. Mounting
+ *  exactly AT one of these shadows the whole tree (and with it any
+ *  conventional layout the guest expects), but creating a fresh
+ *  subdirectory like `/home/user/project/data` or `/var/app/input`
+ *  under them is the common real-world case — a gen author's
+ *  `~/project/data` maps cleanly through identity mapping without
+ *  forcing them to first `cp` everything into a synthetic
+ *  `/opt/my-gen-inputs/`. Only the exact prefix is rejected.
+ *
+ *  This is Cambium's opinionated stance: the substrate takes a side on
+ *  what's user space vs system space rather than refusing the whole
+ *  FHS top-level. If you need to mount `/etc/myapp/config`, you're in
+ *  the wrong namespace — copy it to `/opt/...` or `/home/...` first. */
+const EXACT_FORBIDDEN_GUEST_PREFIXES: readonly string[] = [
+  '/',      // root itself — mounting at / shadows the entire rootfs
+  '/home',  // whole-/home shadow; /home/user/... is allowed
+  '/mnt',   // conventional mount point; /mnt/data is allowed
+  '/srv',   // service data area
+  '/var',   // variable data; /var/app/... is allowed
 ];
 
 export type AllowlistValidationError =
@@ -92,6 +110,7 @@ export type AllowlistValidationError =
   | { kind: 'not_normalized'; path: string; normalized: string }
   | { kind: 'source_missing'; path: string }
   | { kind: 'source_not_directory'; path: string }
+  | { kind: 'is_symlink'; path: string }
   | { kind: 'too_many_entries'; count: number; limit: number };
 
 /** Max allowlist entries. Bounded because virtio-blk device naming
@@ -118,21 +137,36 @@ export function validateAllowlistPath(path: string): AllowlistValidationError | 
   if (norm !== path) {
     return { kind: 'not_normalized', path, normalized: norm };
   }
-  if (path === '/') {
-    return { kind: 'rootfs_collision', path, prefix: '/' };
+  // Exact-match guards first — these are the prefixes where mounting
+  // AT the prefix would shadow the whole tree, but subpaths under them
+  // are the common real-world case (a gen's `/home/user/data` should
+  // "just work").
+  for (const prefix of EXACT_FORBIDDEN_GUEST_PREFIXES) {
+    if (path === prefix) {
+      return { kind: 'rootfs_collision', path, prefix };
+    }
   }
-  for (const prefix of FORBIDDEN_GUEST_PREFIXES) {
-    if (prefix === '/') continue; // handled above
+  // Deep guards — the prefix OR any subpath under it is rejected.
+  // These are system-owned trees where any user-side mount would
+  // shadow guest binaries, config, or the agent's own scratch.
+  for (const prefix of DEEP_FORBIDDEN_GUEST_PREFIXES) {
     if (path === prefix || path.startsWith(prefix + '/')) {
       return { kind: 'rootfs_collision', path, prefix };
     }
   }
   // Source existence check — the host dir we'd build an ext4 from.
+  // Use lstatSync so a symlinked `/opt/mydata -> /etc` is rejected at
+  // this layer; without this, the statSync-follows-links behavior
+  // would let a gen bypass FORBIDDEN_GUEST_PREFIXES by interposing a
+  // symlink outside the forbidden list pointing at something inside.
   let st;
   try {
-    st = statSync(path);
+    st = lstatSync(path);
   } catch {
     return { kind: 'source_missing', path };
+  }
+  if (st.isSymbolicLink()) {
+    return { kind: 'is_symlink', path };
   }
   if (!st.isDirectory()) {
     return { kind: 'source_not_directory', path };
@@ -156,6 +190,8 @@ export function formatAllowlistError(e: AllowlistValidationError): string {
       return `allowlist source directory does not exist on host: ${JSON.stringify(e.path)}`;
     case 'source_not_directory':
       return `allowlist source is not a directory: ${JSON.stringify(e.path)}`;
+    case 'is_symlink':
+      return `allowlist source must be a real directory, not a symlink: ${JSON.stringify(e.path)} (symlinks can interpose into rootfs-owned paths and bypass the prefix check)`;
     case 'too_many_entries':
       return `too many allowlist entries: ${e.count} > max ${e.limit}`;
   }
@@ -182,9 +218,15 @@ export function normalizeAllowlistPaths(
 }
 
 /** Sort by host_path so same-logical-allowlist produces same cache
- *  key regardless of declaration order. */
+ *  key regardless of declaration order. Uses byte-order comparison
+ *  (NOT `localeCompare`) so the ordering is deterministic across
+ *  hosts — `localeCompare` without an explicit locale varies by the
+ *  runtime's default locale and could produce different cache keys
+ *  for the same logical allowlist when non-ASCII paths are involved. */
 export function canonicalizeAllowlist(entries: AllowlistEntry[]): AllowlistEntry[] {
-  return [...entries].sort((a, b) => a.host_path.localeCompare(b.host_path));
+  return [...entries].sort((a, b) =>
+    a.host_path < b.host_path ? -1 : a.host_path > b.host_path ? 1 : 0,
+  );
 }
 
 /**
@@ -205,8 +247,10 @@ export function hashDirectoryTree(
   const hasher = createHash('sha256');
   const entries: string[] = [];
   const walk = (dir: string, rel: string) => {
+    // byte-order sort is locale-independent; localeCompare would vary
+    // by host locale and could desync the cache key across machines.
     const items = readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
-      a.name.localeCompare(b.name),
+      a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
     );
     for (const item of items) {
       if (entries.length > maxEntries) {
@@ -216,13 +260,19 @@ export function hashDirectoryTree(
       }
       const full = join(dir, item.name);
       const relPath = rel === '' ? item.name : `${rel}/${item.name}`;
-      if (item.isDirectory()) {
+      // Defense in depth: re-check with lstatSync before recursing.
+      // `Dirent.isDirectory()` returns true for symlinks that *point* at
+      // a directory, so a subtree symlink like `<allowed>/link -> /etc`
+      // would otherwise get walked and its contents baked into the
+      // image. lstat gives us the entry's OWN type, not the target's.
+      const lst = lstatSync(full);
+      if (lst.isSymbolicLink()) continue; // don't follow symlinks — target data shouldn't cross the allowlist boundary
+      if (lst.isDirectory()) {
         walk(full, relPath);
         continue;
       }
-      if (!item.isFile()) continue; // skip sockets, fifos, symlinks — won't survive ext4 anyway
-      const st = statSync(full);
-      entries.push(`${relPath}\0${st.size}\0${st.mtimeMs}\0${st.ino}`);
+      if (!lst.isFile()) continue; // skip sockets, fifos — won't survive ext4 anyway
+      entries.push(`${relPath}\0${lst.size}\0${lst.mtimeMs}\0${lst.ino}`);
     }
   };
   walk(root, '');
@@ -346,10 +396,15 @@ function computeDirectoryContentSize(dir: string): number {
   const walk = (d: string) => {
     for (const entry of readdirSync(d, { withFileTypes: true })) {
       const p = join(d, entry.name);
-      if (entry.isDirectory()) {
+      // Same symlink-skip rationale as hashDirectoryTree — if we ever
+      // size a symlink-followed directory, mke2fs would also include
+      // it, expanding the image to cover forbidden host content.
+      const lst = lstatSync(p);
+      if (lst.isSymbolicLink()) continue;
+      if (lst.isDirectory()) {
         walk(p);
-      } else if (entry.isFile()) {
-        total += statSync(p).size;
+      } else if (lst.isFile()) {
+        total += lst.size;
       }
     }
   };
