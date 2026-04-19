@@ -173,10 +173,15 @@ sudo ip netns exec "${NETNS}" ip link set "${TAP}" up
 pass "tap device up: ${TAP} (${TAP_IP}/${GUEST_NETMASK}) inside netns"
 
 # MASQUERADE so netns outbound gets NAT'd through the host default gw.
+# On a hardened host the FORWARD chain often has DROP as default policy
+# plus specific rules near the top; appending our ACCEPT with -A would
+# sit below those drops and never trigger. Insert at position 1 so our
+# veth-specific ACCEPT is the first match evaluated. The rule is
+# scoped to VETH_H so it doesn't loosen forwarding for anything else.
 sudo iptables -t nat -A POSTROUTING -s "${NETNS_CIDR}" -o "${HOST_OUT_IFACE}" -j MASQUERADE
-sudo iptables -A FORWARD -i "${VETH_H}" -j ACCEPT
-sudo iptables -A FORWARD -o "${VETH_H}" -j ACCEPT
-pass "host MASQUERADE + FORWARD rules installed"
+sudo iptables -I FORWARD 1 -i "${VETH_H}" -j ACCEPT
+sudo iptables -I FORWARD 1 -o "${VETH_H}" -j ACCEPT
+pass "host MASQUERADE + FORWARD rules installed (ACCEPTs inserted at head)"
 
 # Allowlist enforcement — iptables OUTPUT in the netns. RED-137 maps
 # to this shape:
@@ -209,6 +214,75 @@ if sudo ip netns exec "${NETNS}" curl -sS --connect-timeout 3 "http://${BLOCK_IP
 else
   pass "netns→${BLOCK_IP} blocked (baseline — iptables DROP works in netns context)"
 fi
+
+# ── Diagnostic dump — what's the host firewall / sysctl actually doing ───
+#
+# The baseline netns→1.1.1.1 check earlier works, so MASQUERADE + the
+# netns iptables are in principle OK. If the guest still can't reach
+# the allow IP, the difference is the FORWARD path (packet arrives on
+# the tap in the netns, needs to be forwarded out via veth-g → veth-h
+# → host default gw). Things that can silently block here include:
+#   - nft rules in a different table than iptables (shim vs native)
+#   - UFW/firewalld managing FORWARD with DROP as default
+#   - rp_filter=1 on veth-h dropping return packets of MASQUERADE
+#     connections because the reverse path looks asymmetric
+#   - AppArmor or a sysctl lockdown reverting ip_forward inside netns
+#
+# Dump everything relevant so we can see the actual state, not guess.
+info "Diagnostic dump — host network state"
+echo "  iptables version:"
+iptables -V 2>&1 | sed 's/^/    /'
+
+echo "  host iptables FORWARD + nat POSTROUTING:"
+sudo iptables -S FORWARD 2>&1 | sed 's/^/    /'
+sudo iptables -t nat -S POSTROUTING 2>&1 | sed 's/^/    /'
+
+echo "  host nftables ruleset (may overlap or override iptables):"
+if command -v nft >/dev/null; then
+  sudo nft list ruleset 2>&1 | head -n 100 | sed 's/^/    /'
+else
+  echo "    (nft not on PATH — pure iptables-legacy host, good)"
+fi
+
+echo "  UFW status:"
+if command -v ufw >/dev/null; then
+  sudo ufw status verbose 2>&1 | sed 's/^/    /'
+else
+  echo "    (ufw not installed)"
+fi
+
+echo "  firewalld status:"
+if command -v firewall-cmd >/dev/null; then
+  sudo firewall-cmd --state 2>&1 | sed 's/^/    /'
+else
+  echo "    (firewalld not installed)"
+fi
+
+echo "  relevant host sysctls:"
+for k in \
+  net.ipv4.ip_forward \
+  net.ipv4.conf.all.rp_filter \
+  net.ipv4.conf.default.rp_filter \
+  "net.ipv4.conf.${VETH_H}.rp_filter" \
+  "net.ipv4.conf.${HOST_OUT_IFACE}.rp_filter" \
+  net.ipv4.conf.all.forwarding \
+  net.bridge.bridge-nf-call-iptables; do
+  v=$(sudo sysctl -n "$k" 2>/dev/null || echo "(unavailable)")
+  printf '    %s = %s\n' "$k" "$v"
+done
+
+echo "  netns state:"
+echo "    interfaces:"
+sudo ip netns exec "${NETNS}" ip -brief addr 2>&1 | sed 's/^/      /'
+echo "    routes:"
+sudo ip netns exec "${NETNS}" ip route 2>&1 | sed 's/^/      /'
+echo "    iptables in netns:"
+sudo ip netns exec "${NETNS}" iptables -S 2>&1 | sed 's/^/      /'
+echo "    sysctls in netns:"
+for k in net.ipv4.ip_forward net.ipv4.conf.all.rp_filter; do
+  v=$(sudo ip netns exec "${NETNS}" sysctl -n "$k" 2>/dev/null || echo "(unavailable)")
+  printf '      %s = %s\n' "$k" "$v"
+done
 
 # ── Firecracker API helpers ─────────────────────────────────────────
 FC_RESP="${WORKDIR}/fc-resp"
