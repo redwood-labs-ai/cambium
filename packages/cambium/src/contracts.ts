@@ -111,6 +111,52 @@ export const MemoryWrites = Type.Object(
   { additionalProperties: false, $id: 'MemoryWrites' },
 )
 
+// RED-260: Pattern Engineer agent schemas.
+// Used by the pattern-engineer GenModel to add security patterns to redwood-scanner.
+
+export const PatternProposal = Type.Object(
+  {
+    name: Type.String({ description: 'Human-readable pattern name' }),
+    regex: Type.String({ description: 'JavaScript regex as a string, e.g. "/fetch\\s*\\([^)]+/g"' }),
+    severity: Type.Union([
+      Type.Literal('critical'),
+      Type.Literal('high'),
+      Type.Literal('medium'),
+      Type.Literal('low'),
+    ]),
+    message: Type.String({ description: 'One-line description of the security risk' }),
+    fix: Type.String({ description: 'What to do instead of the dangerous pattern' }),
+    fileTypes: Type.Optional(
+      Type.Array(Type.String(), { description: "File extensions, e.g. ['.js', '.ts']" })
+    ),
+    safeContext: Type.Optional(
+      Type.Array(Type.String(), { description: 'Strings that suppress false positives, e.g. ["path.join("]' })
+    ),
+    language: Type.String({
+      description: 'Target language directory: javascript, python, ruby, go, rust, php, cpp, common, config',
+    }),
+    rationale: Type.String({ description: 'Why this pattern, what vulnerability it catches, CVE reference if any' }),
+  },
+  { additionalProperties: false, $id: 'PatternProposal' }
+)
+
+export const PatternTransaction = Type.Object(
+  {
+    branch: Type.String({ description: 'Git branch name, e.g. "RED-157/axios-ssrf"' }),
+    pr_url: Type.Optional(Type.String({ description: 'Forgejo PR URL if created successfully' })),
+    compare_url: Type.String({
+      description: 'Forgejo compare URL for manual PR creation if FORGEJO_TOKEN is not configured',
+    }),
+    pattern_added: Type.String({ description: 'Name of the pattern that was added' }),
+    language: Type.String({ description: 'Language directory the pattern was added to' }),
+    tests_passed: Type.Boolean({ description: 'Whether npm test passed without regressions' }),
+    test_output: Type.Optional(Type.String({ description: 'Relevant excerpt of test output' })),
+    files_modified: Type.Array(Type.String(), { description: 'Files changed by this transaction' }),
+    summary: Type.String({ description: 'One-paragraph summary of what was done' }),
+  },
+  { additionalProperties: false, $id: 'PatternTransaction' }
+)
+
 // RED-216: agentic tool scaffolder output.
 // The gen produces a typed plan for a new plugin tool; the CLI writes
 // it to disk on user confirm.
