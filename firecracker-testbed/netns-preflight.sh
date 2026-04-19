@@ -311,40 +311,54 @@ else:
 
 # Guest agent does NOT bring eth0 up on its own in v0 — RED-259 will
 # add that as part of the ExecRequest.net path. For this preflight we
-# do it in-line via a shell pipeline, then run curl against each
-# target. Force exit 0 so execSync captures stdout even when any
-# individual command fails (curl timeouts, non-match, etc).
+# do it in-line: first bring eth0 up via busybox `ip` commands, then
+# run three Node fetch() probes against allowed / blocked / metadata
+# targets. Using fetch() (not curl) because the reference rootfs has
+# no curl — busybox + node + python3 + ca-certificates only. This
+# also matches how real gens will hit the network.
 #
 # Values are interpolated Python-side into the JS source via
-# str.format — placeholders are `{name}`, which is safe here because
-# the JS code uses no literal `{`/`}` outside of the block comments
-# removed for this template.
+# str.format — placeholders are `{name}`, and JS literal `{`/`}` are
+# doubled.
 code = """
 const {{ execSync }} = require('child_process');
-const script = [
-  // Bring eth0 up + configure.
+const bringUp = [
   '(ip addr add {guest_ip}/{netmask} dev eth0 && ip link set eth0 up && ip route add default via {tap_ip} && echo ETH0_UP) || echo ETH0_FAIL',
   'echo "--- ip addr ---"',
   'ip addr show eth0 2>&1',
   'echo "--- route ---"',
   'ip route 2>&1',
-  'echo "--- curl ALLOW ({allow}) ---"',
-  '(curl -s --connect-timeout 3 -o /dev/null -w "http_code=%{{http_code}}\\n" http://{allow}/ && echo CURL_ALLOW_OK) || echo CURL_ALLOW_FAIL',
-  'echo "--- curl BLOCK ({block}) ---"',
-  '(curl -s --connect-timeout 3 -o /dev/null -w "http_code=%{{http_code}}\\n" http://{block}/ && echo CURL_BLOCK_LEAKED) || echo CURL_BLOCK_DROPPED',
-  'echo "--- curl METADATA ({metadata}) ---"',
-  '(curl -s --connect-timeout 3 -o /dev/null -w "http_code=%{{http_code}}\\n" http://{metadata}/ && echo CURL_METADATA_LEAKED) || echo CURL_METADATA_BLOCKED',
 ].join(' ; ') + ' ; exit 0';
-let out;
+let setup;
 try {{
-  out = execSync(script, {{ shell: '/bin/sh' }}).toString();
+  setup = execSync(bringUp, {{ shell: '/bin/sh' }}).toString();
 }} catch (e) {{
-  const so = e.stdout ? e.stdout.toString() : '';
-  const se = e.stderr ? e.stderr.toString() : '';
-  out = 'EXEC ERROR (code=' + e.status + ')\\n--- stdout ---\\n' + so +
-        '\\n--- stderr ---\\n' + se + '\\n--- message ---\\n' + e.message;
+  setup = 'BRING-UP ERROR (code=' + e.status + ')\\nstdout: ' +
+          (e.stdout ? e.stdout.toString() : '') + '\\nstderr: ' +
+          (e.stderr ? e.stderr.toString() : '');
 }}
-console.log(out);
+console.log(setup);
+
+async function probe(label, url, okMarker, failMarker) {{
+  try {{
+    const r = await fetch(url, {{ signal: AbortSignal.timeout(3000) }});
+    console.log(`--- ${{label}} ---`);
+    console.log(`status=${{r.status}}`);
+    console.log(okMarker);
+  }} catch (e) {{
+    console.log(`--- ${{label}} ---`);
+    console.log(`error=${{e.name}}: ${{e.message}}`);
+    console.log(failMarker);
+  }}
+}}
+
+(async () => {{
+  await probe('ALLOW ({allow})',    'http://{allow}/',    'FETCH_ALLOW_OK',       'FETCH_ALLOW_FAIL');
+  await probe('BLOCK ({block})',    'http://{block}/',    'FETCH_BLOCK_LEAKED',   'FETCH_BLOCK_DROPPED');
+  await probe('META ({metadata})',  'http://{metadata}/', 'FETCH_META_LEAKED',    'FETCH_META_BLOCKED');
+}})().catch(e => {{
+  console.log('PROBE_CRASH: ' + e.stack);
+}});
 """.format(
     guest_ip=GUEST_IP,
     netmask=NETMASK,
@@ -413,15 +427,15 @@ metadata_worked=false
 if echo "${OUT}" | grep -q "ETH0_UP"; then
   eth0_up=true
 fi
-if echo "${OUT}" | grep -q "CURL_ALLOW_OK"; then
+if echo "${OUT}" | grep -q "FETCH_ALLOW_OK"; then
   allow_worked=true
 fi
-# For BLOCK and METADATA: the SUCCESS case is that curl FAILED —
-# i.e. iptables DROP worked.
-if echo "${OUT}" | grep -q "CURL_BLOCK_DROPPED"; then
+# For BLOCK and META: the SUCCESS case is that fetch FAILED —
+# i.e. iptables DROP caused a connection error/timeout.
+if echo "${OUT}" | grep -q "FETCH_BLOCK_DROPPED"; then
   block_worked=true
 fi
-if echo "${OUT}" | grep -q "CURL_METADATA_BLOCKED"; then
+if echo "${OUT}" | grep -q "FETCH_META_BLOCKED"; then
   metadata_worked=true
 fi
 
