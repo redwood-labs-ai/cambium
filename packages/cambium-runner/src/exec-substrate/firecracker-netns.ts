@@ -180,6 +180,29 @@ async function runPrivileged(argv: readonly string[]): Promise<void> {
   return runCommand(full[0]!, full.slice(1));
 }
 
+/**
+ * Make a UNIX socket created by Firecracker (running as root via sudo
+ * inside the netns) connectable by the unprivileged Cambium runner
+ * process. UNIX socket connect requires write access on the socket
+ * file; FC's default umask creates sockets as 0755 (no write for
+ * non-owner), so a non-root caller would get EACCES.
+ *
+ * No-op when `handle` is null (no netns → FC ran as the regular user
+ * → no permission gap) OR when the runner is itself root. Per-call
+ * tmpdir is mode 0700 (mkdtemp default), so a 0666 socket inside it
+ * is only reachable by callers who already own / can chdir into the
+ * tmpdir — broad perms on a per-call random-name socket aren't a
+ * real-world risk.
+ */
+export async function chmodSocketIfNetns(
+  handle: NetnsHandle | null,
+  socketPath: string,
+): Promise<void> {
+  if (!handle) return;
+  if (process.getuid?.() === 0) return;
+  await runPrivileged(['chmod', '0666', socketPath]);
+}
+
 /** Run an arbitrary command, awaiting exit. Rejects on non-zero exit
  *  with a message including argv + stderr + exit code. */
 function runCommand(cmd: string, args: readonly string[]): Promise<void> {

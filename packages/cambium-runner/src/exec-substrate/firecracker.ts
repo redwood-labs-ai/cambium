@@ -117,6 +117,7 @@ import {
   GUEST_MAC,
   TAP,
   TAP_IP,
+  chmodSocketIfNetns,
   setupNetns,
   teardownNetns,
   type NetnsHandle,
@@ -396,6 +397,11 @@ async function coldBootToAccept(
 ): Promise<{ fc: ChildProcess; sock: BufferedSocketLike; bootDeadline: number }> {
   const fc = spawnFirecracker(ctx.apiSock, ctx.log, netnsHandle ? { netns: netnsHandle.netns } : {});
   await waitForApiSocket(ctx.apiSock, 5_000);
+  // FC running under sudo (netns path) creates the API socket as
+  // root with default 0755 perms; the unprivileged runner can't
+  // connect (EACCES on the first apiPutExpect204). chmod 0666 lets
+  // the connect through. No-op when there's no netns.
+  await chmodSocketIfNetns(netnsHandle, ctx.apiSock);
   const bootDeadline = Date.now() + 20_000;
 
   await apiPutExpect204(ctx.apiSock, '/machine-config', {
@@ -430,6 +436,10 @@ async function coldBootToAccept(
     guest_cid: GUEST_CID,
     uds_path: ctx.vsockUds,
   });
+  // The vsock UDS is created by FC at PUT /vsock time, again as root
+  // when running under sudo. Same chmod treatment as the API socket
+  // so dialAndHandshake (below) can connect.
+  await chmodSocketIfNetns(netnsHandle, ctx.vsockUds);
   await apiPutExpect204(ctx.apiSock, '/actions', { action_type: 'InstanceStart' });
 
   const { sock } = await dialAndHandshake(ctx.vsockUds, VSOCK_GUEST_PORT, bootDeadline);

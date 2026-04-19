@@ -318,7 +318,11 @@ export function hashAllowlist(
  * path the guest agent will `mount -t ext4` from.
  */
 export interface AllowlistDrive {
-  /** Firecracker drive_id, e.g. "alw-0". */
+  /** Firecracker drive_id, e.g. "alw_0". Underscores not hyphens —
+   *  the FC API rejects hyphens in resource IDs (alphanumeric + `_`
+   *  only). The escape-test matrix surfaced this as a 400 from
+   *  PUT /drives/alw-0 the first time it ran end-to-end against a
+   *  real VM (preflight used `drive_id: "test"` so didn't catch it). */
   driveId: string;
   /** Host-side path to the ext4 image. Lives in the cache dir. */
   imagePath: string;
@@ -430,7 +434,7 @@ export function buildAllowlistDrives(
     const imagePath = join(cacheDir, `allowlist-${i}.ext4`);
     ensureExt4Image(e.host_path, imagePath);
     drives.push({
-      driveId: `alw-${i}`,
+      driveId: `alw_${i}`,
       imagePath,
       hostPath: e.host_path,
       guestPath: e.guest_path,

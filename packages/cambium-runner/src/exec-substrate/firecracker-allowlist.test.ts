@@ -301,7 +301,7 @@ describe('drivesToAgentMounts', () => {
   it('strips host-only fields, keeps device/guest_path/read_only', () => {
     const drives: AllowlistDrive[] = [
       {
-        driveId: 'alw-0',
+        driveId: 'alw_0',
         imagePath: '/cache/allowlist-0.ext4',
         hostPath: '/host/data',
         guestPath: '/guest/data',
