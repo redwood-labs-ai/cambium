@@ -1,10 +1,21 @@
 #!/usr/bin/env node
 import 'dotenv/config';
 import { spawnSync } from 'node:child_process';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { runGenerate } from './generate.mjs';
 import { runLint } from './lint.mjs';
 import { runInit } from './init.mjs';
 import { runDoctor } from './doctor.mjs';
+
+// Framework files resolved relative to the CLI's own location, not cwd.
+// External apps (app-mode, cf. RED-220 / RED-274) run `cambium run` from
+// their own project directory — a cwd-relative `./ruby/...` or
+// `./packages/...` is nowhere on their filesystem. `compile.mjs` already
+// took this stance; this mirrors it. (RED-274)
+const CLI_DIR = dirname(fileURLToPath(import.meta.url));
+const RUBY_COMPILE_SCRIPT = resolve(CLI_DIR, '..', 'ruby', 'cambium', 'compile.rb');
+const RUNNER_SCRIPT = resolve(CLI_DIR, '..', 'packages', 'cambium-runner', 'src', 'runner.ts');
 
 function usage(msg) {
   if (msg) console.error(`\n${msg}`);
@@ -146,7 +157,7 @@ if (!arg) usage('Missing --arg\nRun "cambium run --help" for usage.');
 // Compile with Ruby → IR JSON (stdout)
 const compileEnv = { ...process.env };
 if (mock) compileEnv.CAMBIUM_ALLOW_MOCK = '1';
-const compile = spawnSync('ruby', ['./ruby/cambium/compile.rb', file, '--method', method, '--arg', arg], {
+const compile = spawnSync('ruby', [RUBY_COMPILE_SCRIPT, file, '--method', method, '--arg', arg], {
   encoding: 'utf8',
   maxBuffer: 50 * 1024 * 1024
 });
@@ -158,7 +169,7 @@ if (compile.status !== 0) {
 const irJson = compile.stdout;
 
 // Run IR with TS runner
-const runnerArgs = ['--import', 'tsx', './packages/cambium-runner/src/runner.ts', '--ir', '-'];
+const runnerArgs = ['--import', 'tsx', RUNNER_SCRIPT, '--ir', '-'];
 if (traceOut) runnerArgs.push('--trace', traceOut);
 if (outputOut) runnerArgs.push('--out', outputOut);
 if (mock) runnerArgs.push('--mock');

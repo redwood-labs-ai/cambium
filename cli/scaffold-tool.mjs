@@ -9,13 +9,24 @@
 
 import { spawnSync } from 'node:child_process';
 import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 
+// Framework files resolved relative to the CLI's own location, not cwd
+// (RED-274 — mirrors cambium.mjs and compile.mjs). The scaffolder gen,
+// Ruby compile script, and TS runner are all shipped with the framework;
+// `PKG` below stays cwd-relative because it controls where the scaffolder
+// writes the generated tool files, which is project-local.
+const CLI_DIR = dirname(fileURLToPath(import.meta.url));
+const FRAMEWORK_ROOT = resolve(CLI_DIR, '..');
+const RUBY_COMPILE_SCRIPT = resolve(FRAMEWORK_ROOT, 'ruby', 'cambium', 'compile.rb');
+const RUNNER_SCRIPT = resolve(FRAMEWORK_ROOT, 'packages', 'cambium-runner', 'src', 'runner.ts');
+const GEN_PATH = resolve(FRAMEWORK_ROOT, 'packages', 'cambium', 'app', 'gens', 'tool_scaffold.cmb.rb');
+
 const PKG = 'packages/cambium';
-const GEN_PATH = `${PKG}/app/gens/tool_scaffold.cmb.rb`;
 
 function bail(msg, code = 1) {
   console.error(msg);
@@ -48,7 +59,7 @@ export async function runAgenticToolScaffold(description) {
     // Compile
     const compile = spawnSync(
       'ruby',
-      ['./ruby/cambium/compile.rb', GEN_PATH, '--method', 'scaffold', '--arg', argFile],
+      [RUBY_COMPILE_SCRIPT, GEN_PATH, '--method', 'scaffold', '--arg', argFile],
       { encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 },
     );
     if (compile.status !== 0) {
@@ -60,7 +71,7 @@ export async function runAgenticToolScaffold(description) {
     // Run
     const run = spawnSync(
       'node',
-      ['--import', 'tsx', './src/runner.ts', '--ir', '-', '--out', outFile],
+      ['--import', 'tsx', RUNNER_SCRIPT, '--ir', '-', '--out', outFile],
       {
         input: compile.stdout,
         encoding: 'utf8',

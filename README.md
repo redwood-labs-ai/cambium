@@ -138,6 +138,7 @@ output.json + trace.json
 │       ├── triggers.ts        # Trigger evaluation (tool_call + action_call)
 │       ├── compound.ts        # Review + consensus
 │       ├── enrich.ts          # Sub-agent enrichment
+│       ├── genfile.ts         # Genfile.toml [types].contracts resolver (RED-274)
 │       └── schema-describe.ts # Auto-generated schema descriptions
 ├── ruby/cambium/
 │   ├── runtime.rb         # GenModel DSL primitives

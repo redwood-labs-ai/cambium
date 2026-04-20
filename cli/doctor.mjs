@@ -5,7 +5,14 @@
 
 import { execSync } from 'node:child_process';
 import { existsSync, writeFileSync, unlinkSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// Framework Ruby scripts resolved relative to the CLI's own location
+// (RED-274). `node_modules/`, `runs/`, `.env` stay cwd-relative — those
+// are legitimately project-local.
+const CLI_DIR = dirname(fileURLToPath(import.meta.url));
+const FRAMEWORK_ROOT = resolve(CLI_DIR, '..');
 
 export function runDoctor() {
   process.exit(doctorMain());
@@ -86,13 +93,13 @@ check('Ruby gem: json', () => {
 });
 
 check('Ruby compile.rb exists', () => {
-  const path = join(process.cwd(), 'ruby/cambium/compile.rb');
+  const path = resolve(FRAMEWORK_ROOT, 'ruby', 'cambium', 'compile.rb');
   if (existsSync(path)) return { ok: true, detail: path };
-  return { ok: false, detail: `${path} not found. Are you in the cambium repo root?` };
+  return { ok: false, detail: `${path} not found. Framework install may be incomplete.` };
 });
 
 check('Ruby runtime.rb exists', () => {
-  const path = join(process.cwd(), 'ruby/cambium/runtime.rb');
+  const path = resolve(FRAMEWORK_ROOT, 'ruby', 'cambium', 'runtime.rb');
   if (existsSync(path)) return { ok: true, detail: path };
   return { ok: false, detail: `${path} not found.` };
 });

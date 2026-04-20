@@ -1,6 +1,6 @@
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import process from 'node:process';
 
 // Framework-builtin tools live next to this file, so their path is
@@ -44,6 +44,7 @@ import {
   invokeRetroAgent,
   applyRetroWrites,
 } from './memory/retro-agent.js';
+import { resolveGenfileContracts, loadContractsFromGenfile } from './genfile.js';
 
 type IR = any;
 
@@ -425,8 +426,11 @@ export interface RunGenOptions {
   /** Pre-parsed IR (the JSON the Ruby compiler emitted). */
   ir: IR;
   /** Schemas keyed by `$id` — must contain `ir.returnSchemaId`. App-mode
-   *  callers pass `await import('packages/cambium/src/contracts.ts')`;
-   *  engine-mode callers pass their sibling `schemas.ts` module. */
+   *  callers: the CLI resolves this from the app's Genfile.toml
+   *  `[types].contracts` list (RED-274), or falls back to
+   *  `packages/cambium/src/contracts.ts` relative to cwd when no
+   *  Genfile.toml is present. Engine-mode callers pass their sibling
+   *  `schemas.ts` module directly. */
   schemas: Record<string, any>;
   /** Force the deterministic mock generator instead of a live LLM.
    *
@@ -499,7 +503,8 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   if (!schema) {
     throw new Error(
       `Schema not found in injected schemas for id: ${ir.returnSchemaId}. ` +
-      `Provide it via opts.schemas (app-mode CLI passes packages/cambium/src/contracts.ts).`,
+      `Provide it via opts.schemas — app-mode CLI resolves from Genfile.toml ` +
+      `[types].contracts, or falls back to packages/cambium/src/contracts.ts.`,
     );
   }
 
@@ -1133,15 +1138,32 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
 
 // ── CLI entry point ───────────────────────────────────────────────────
 //
-// argv parsing + IR file read + contracts.ts import + runGen + file writes
-// + exit code. Engine-mode callers do not go through this — they import
-// runGen directly and supply their own schemas.
+// argv parsing + IR file read + contracts resolution + runGen + file
+// writes + exit code. Engine-mode callers do not go through this — they
+// import runGen directly and supply their own schemas.
+//
+// Contracts resolution (RED-274): if cwd has a Genfile.toml with a
+// [types].contracts list, load from there. Otherwise fall back to
+// packages/cambium/src/contracts.ts relative to cwd — preserves
+// back-compat for the cambium repo's own example app, whose workspace
+// Genfile at the repo root has no [types].contracts.
 async function main() {
   const { irPath, traceOut, outputOut, mock, memoryKeys } = parseArgs(process.argv.slice(2));
   const irText = irPath === '-' ? readFileSync(0, 'utf8') : readFileSync(irPath, 'utf8');
   const ir: IR = JSON.parse(irText);
 
-  const contractsMod: any = await import(join(process.cwd(), 'packages/cambium/src/contracts.ts'));
+  let contractsMod: Record<string, any>;
+  const genfile = resolveGenfileContracts(process.cwd());
+  if (genfile) {
+    contractsMod = await loadContractsFromGenfile(genfile);
+  } else {
+    // pathToFileURL is not strictly required on POSIX (`import()` of a
+    // bare absolute path works) but is required on Windows, where a
+    // bare `C:\...` path is not a valid ESM specifier. Matches the
+    // genfile-path loader in `genfile.ts`.
+    const fallback = pathToFileURL(join(process.cwd(), 'packages/cambium/src/contracts.ts')).href;
+    contractsMod = await import(fallback);
+  }
 
   const result = await runGen({ ir, schemas: contractsMod, mock, memoryKeys });
 
