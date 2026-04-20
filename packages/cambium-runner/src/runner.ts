@@ -653,6 +653,22 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     }
   }
 
+  /**
+   * Append a `handleRepair` result to the trace AND track its token
+   * usage against the budget (RED-280). Use this instead of a bare
+   * `trace.steps.push(repair.result)` anywhere in runGen — five repair
+   * call sites exist (schema repair, Review, Consensus, corrector
+   * feedback, grounding) and hand-maintained pairs had drifted:
+   * Review and the schema loop called both, Consensus and grounding
+   * silently lacked the budget track. Keeping the pair behind one
+   * helper makes a future sixth call site structurally impossible to
+   * get wrong.
+   */
+  function pushRepairStep(repair: { result: any }): void {
+    trace.steps.push(repair.result);
+    budgetTrack(repair.result);
+  }
+
   // Wrap the orchestration so BudgetExceededError thrown from budgetTrack
   // unwinds cleanly into a `{ ok: false, ... }` result. Other exceptions
   // propagate to the caller (CLI main() rethrows after stack-trace logging).
@@ -787,8 +803,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
 
       // Repair
       const repair = await handleRepair(raw, errors, schema, ir, attempt + 1, generateText, extractJsonObject);
-      trace.steps.push(repair.result);
-      budgetTrack(repair.result);
+      pushRepairStep(repair);
       raw = repair.raw;
       parsed = repair.parsed;
     }
@@ -823,8 +838,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
           JSON.stringify(parsed, null, 2), reviewErrors, schema, ir,
           maxRepairAttempts + 1, generateText, extractJsonObject,
         );
-        trace.steps.push(repair.result);
-        budgetTrack(repair.result);
+        pushRepairStep(repair);
 
         if (repair.parsed) {
           const revalidate = handleValidate(repair.parsed, validate, 'ValidateAfterReview');
@@ -897,7 +911,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
             JSON.stringify(consensus.agreed, null, 2), consensusErrors, schema, ir,
             maxRepairAttempts + 1, generateText, extractJsonObject,
           );
-          trace.steps.push(repair.result);
+          pushRepairStep(repair);
 
           if (repair.parsed) {
             const revalidate = handleValidate(repair.parsed, validate, 'ValidateAfterConsensus');
@@ -949,12 +963,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
           JSON.stringify(parsed, null, 2), repairErrors, schema, ir,
           maxRepairAttempts + 1, generateText, extractJsonObject,
         );
-        trace.steps.push(repair.result);
-        // Without this budgetTrack, the LLM tokens spent on the
-        // corrector-feedback repair don't count toward max_tokens /
-        // max_duration. (The grounding-path mirror at ~line 996 has
-        // the same pre-existing gap; tracked separately.)
-        budgetTrack(repair.result);
+        pushRepairStep(repair);
 
         if (repair.parsed) {
           const revalidate = handleValidate(repair.parsed, validate, 'ValidateAfterCorrectorRepair');
@@ -999,7 +1008,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
           JSON.stringify(parsed, null, 2), repairErrors, schema, ir,
           maxRepairAttempts + 1, generateText, extractJsonObject,
         );
-        trace.steps.push(repair.result);
+        pushRepairStep(repair);
 
         if (repair.parsed) {
           const revalidate = handleValidate(repair.parsed, validate, 'ValidateAfterGrounding');

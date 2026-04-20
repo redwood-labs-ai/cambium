@@ -1231,9 +1231,24 @@ module Cambium
 
       # Grounding: declare that outputs must be grounded in a source.
       #   grounded_in :document, require_citations: true
+      #
+      # RED-283: the source symbol becomes the key under `ir.context`
+      # (via RED-276) and the prompt's DOCUMENT: section. Enforce the
+      # same `/^[a-z][a-z0-9_]*$/` regex every other named-symbol
+      # surface in Cambium uses (RED-214 pack names, RED-215 pool names,
+      # RED-215 phase 3 memory keys, RED-275 corrector basenames). A
+      # typo like `grounded_in :"has space"` or a silly choice like
+      # `grounded_in :__proto__` is rejected at compile time instead of
+      # producing a brittle IR.
+      GROUNDING_SOURCE_REGEX = /\A[a-z][a-z0-9_]*\z/
       def grounded_in(source, require_citations: false)
+        source_str = source.to_s
+        unless source_str.match?(GROUNDING_SOURCE_REGEX)
+          raise ArgumentError,
+                "grounded_in source must match /^[a-z][a-z0-9_]*$/, got: #{source.inspect}"
+        end
         _cambium_defaults[:grounding] = {
-          'source' => source.to_s,
+          'source' => source_str,
           'require_citations' => require_citations
         }
       end
