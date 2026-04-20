@@ -1,7 +1,16 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, dirname, resolve } from 'node:path';
 import { detectWorkspaceShape } from './workspace-shape.mjs';
+
+// Engine-mode sentinel — RED-246 / RED-220. A directory marked with
+// this file is a self-contained engine folder; lint scans siblings
+// rather than walking app/<type>/ subdirs.
+const ENGINE_SENTINEL = 'cambium.engine.json';
+
+// Pack / pool / corrector / alias basename regex (RED-214/215/275/237).
+// Shared across every engine-mode lint check that validates a name.
+const NAME_REGEX = /^[a-z][a-z0-9_]*$/;
 
 const PASS = '\x1b[32m✓\x1b[0m';
 const FAIL = '\x1b[31m✗\x1b[0m';
@@ -320,17 +329,284 @@ function lintPackage(pkgDir) {
   }
 }
 
+// ── Engine-mode sentinel detection ────────────────────────────────────
+
+// Walk up from cwd looking for an engine folder. Returns the directory
+// containing cambium.engine.json, or null. Stops at the filesystem root.
+// No package.json boundary (matches `cambium run` — a user invoking
+// lint from inside a host project's engine folder should still lint it).
+function resolveEngineDir(cwd) {
+  let dir = resolve(cwd);
+  while (true) {
+    if (existsSync(join(dir, ENGINE_SENTINEL))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+// ── Engine-folder lint ─────────────────────────────────────────────────
+//
+// Engine mode (RED-220 / RED-246) keeps every surface as a **sibling**
+// of the gen file. Lint walks the engine folder with suffix-based
+// filters and runs the same regex + JSON-shape checks that `lintPackage`
+// runs against `app/<type>/` directories.
+//
+// Unlike app-mode lint, engine mode has one gen per folder (the design
+// note calls this out — a folder with multiple gens has outgrown engine
+// mode). We still walk every `.cmb.rb` we find, which supports the
+// multi-gen case for completeness.
+
+function lintEngine(engineDir) {
+  const name = basename(engineDir);
+  console.log(`\n\x1b[1mEngine: ${name}\x1b[0m (${engineDir})\n`);
+
+  // 1. Sentinel shape
+  const sentinelPath = join(engineDir, ENGINE_SENTINEL);
+  try {
+    const sentinel = JSON.parse(readFileSync(sentinelPath, 'utf8'));
+    if (sentinel.name) pass(`${ENGINE_SENTINEL}.name = "${sentinel.name}"`);
+    else warn(`${ENGINE_SENTINEL}: missing "name"`);
+    if (sentinel.version) pass(`${ENGINE_SENTINEL}.version = "${sentinel.version}"`);
+    else warn(`${ENGINE_SENTINEL}: missing "version"`);
+  } catch (e) {
+    fail(`${ENGINE_SENTINEL}: invalid JSON — ${e.message}`);
+    return;
+  }
+
+  const entries = readdirSync(engineDir);
+
+  // 2. Schemas — parse schemas.ts for top-level exports, we'll validate
+  //    `returns <Schema>` against these below.
+  const availableSchemas = new Set();
+  const schemasPath = join(engineDir, 'schemas.ts');
+  if (existsSync(schemasPath)) {
+    pass('schemas.ts');
+    const content = readFileSync(schemasPath, 'utf8');
+    for (const m of content.matchAll(/^\s*export\s+const\s+([A-Z][A-Za-z0-9_]*)\b/gm)) {
+      availableSchemas.add(m[1]);
+    }
+  } else {
+    warn('no schemas.ts (required for `returns <Schema>` validation)');
+  }
+
+  // 3. Tools — *.tool.json must have sibling *.tool.ts + required fields.
+  const toolFiles = entries.filter(f => f.endsWith('.tool.json'));
+  const knownTools = new Set();
+  for (const f of toolFiles) {
+    const toolName = f.replace('.tool.json', '');
+    pass(`tool: ${f}`);
+    knownTools.add(toolName);
+    try {
+      const def = JSON.parse(readFileSync(join(engineDir, f), 'utf8'));
+      if (!def.name) fail(`  ${f}: missing "name"`);
+      if (!def.inputSchema) fail(`  ${f}: missing "inputSchema"`);
+      if (!def.outputSchema) fail(`  ${f}: missing "outputSchema"`);
+      if (def.permissions?.network) warn(`  ${f}: declares network access`);
+      if (def.permissions?.filesystem) warn(`  ${f}: declares filesystem access`);
+      if (def.permissions?.exec) warn(`  ${f}: declares exec access — review carefully`);
+    } catch (e) {
+      fail(`  ${f}: invalid JSON — ${e.message}`);
+    }
+    if (!existsSync(join(engineDir, `${toolName}.tool.ts`))
+        && !existsSync(join(engineDir, `${toolName}.tool.js`))) {
+      warn(`  no implementation for tool "${toolName}" (expected ${toolName}.tool.ts)`);
+    }
+  }
+
+  // 4. Actions — same shape as tools (RED-212).
+  const actionFiles = entries.filter(f => f.endsWith('.action.json'));
+  const knownActions = new Set();
+  for (const f of actionFiles) {
+    const actionName = f.replace('.action.json', '');
+    pass(`action: ${f}`);
+    knownActions.add(actionName);
+    try {
+      const def = JSON.parse(readFileSync(join(engineDir, f), 'utf8'));
+      if (!def.name) fail(`  ${f}: missing "name"`);
+      if (!def.inputSchema) fail(`  ${f}: missing "inputSchema"`);
+    } catch (e) {
+      fail(`  ${f}: invalid JSON — ${e.message}`);
+    }
+    if (!existsSync(join(engineDir, `${actionName}.action.ts`))
+        && !existsSync(join(engineDir, `${actionName}.action.js`))) {
+      warn(`  no implementation for action "${actionName}"`);
+    }
+  }
+
+  // 5. Correctors — basename regex + export-name match (same as
+  //    packages/cambium-runner/src/correctors/app-loader.ts enforces).
+  const correctorFiles = entries.filter(f => f.endsWith('.corrector.ts'));
+  const knownCorrectors = new Set();
+  for (const f of correctorFiles) {
+    const correctorName = f.replace('.corrector.ts', '');
+    if (!NAME_REGEX.test(correctorName)) {
+      fail(`corrector name "${correctorName}" (${f}) must match ${NAME_REGEX}`);
+      continue;
+    }
+    pass(`corrector: ${f}`);
+    knownCorrectors.add(correctorName);
+    const body = readFileSync(join(engineDir, f), 'utf8');
+    const exportRe = new RegExp(`export\\s+(?:const|function|let)\\s+${correctorName}\\b`);
+    if (!exportRe.test(body)) {
+      fail(`  ${f}: must export "${correctorName}" matching the basename`);
+    }
+  }
+
+  // 6. Policy packs — name regex (RED-214).
+  const policyFiles = entries.filter(f => f.endsWith('.policy.rb'));
+  const knownPolicies = new Set();
+  for (const f of policyFiles) {
+    const policyName = f.replace('.policy.rb', '');
+    if (!NAME_REGEX.test(policyName)) {
+      fail(`policy pack name "${policyName}" (${f}) must match ${NAME_REGEX}`);
+    } else {
+      pass(`policy pack: ${f}`);
+      knownPolicies.add(policyName);
+    }
+  }
+
+  // 7. Memory pools — name regex (RED-215).
+  const poolFiles = entries.filter(f => f.endsWith('.pool.rb'));
+  const knownPools = new Set();
+  for (const f of poolFiles) {
+    const poolName = f.replace('.pool.rb', '');
+    if (!NAME_REGEX.test(poolName)) {
+      fail(`memory pool name "${poolName}" (${f}) must match ${NAME_REGEX}`);
+    } else {
+      pass(`memory pool: ${f}`);
+      knownPools.add(poolName);
+    }
+  }
+
+  // 8. Gen validation — walk every .cmb.rb and cross-check references.
+  //    Framework-builtin tool / corrector names are legitimate refs too;
+  //    lint only warns on unknown names (not fails) since the runner has
+  //    the authoritative registry and a misspelled builtin will fail
+  //    loudly at runtime.
+  const genFiles = entries.filter(f => f.endsWith('.cmb.rb'));
+  if (genFiles.length === 0) {
+    warn('no .cmb.rb files in engine folder');
+  } else if (genFiles.length > 1) {
+    warn(`engine folder has ${genFiles.length} gens — the "one folder, one gen" convention is broken`);
+  }
+  for (const f of genFiles) {
+    const content = readFileSync(join(engineDir, f), 'utf8');
+
+    // returns <Schema>
+    const returnsMatch = content.match(/returns\s+([A-Z]\w*)/);
+    if (returnsMatch && availableSchemas.size > 0) {
+      const schemaName = returnsMatch[1];
+      if (availableSchemas.has(schemaName)) {
+        pass(`${f}: returns ${schemaName} (found in schemas.ts)`);
+      } else {
+        const sorted = [...availableSchemas].sort();
+        const suggestion = sorted.find(s => s.toLowerCase() === schemaName.toLowerCase());
+        const hint = suggestion ? ` Did you mean '${suggestion}'?` : '';
+        fail(`${f}: returns ${schemaName} — not exported from schemas.ts.${hint}`);
+      }
+    }
+
+    // system :name → <name>.system.md sibling
+    const systemMatch = content.match(/^\s*system\s+:(\w+)/m);
+    if (systemMatch) {
+      const sysName = systemMatch[1];
+      if (existsSync(join(engineDir, `${sysName}.system.md`))) {
+        pass(`${f}: system :${sysName} → ${sysName}.system.md`);
+      } else {
+        fail(`${f}: system :${sysName} — no sibling ${sysName}.system.md`);
+      }
+    }
+
+    // uses :tool — warn if no sibling .tool.json (framework builtins OK).
+    for (const m of content.matchAll(/uses\s+([^\n]+)/g)) {
+      const tools = m[1].match(/:(\w+)/g) ?? [];
+      for (const t of tools) {
+        const toolName = t.slice(1);
+        if (!knownTools.has(toolName)) {
+          warn(`${f}: uses :${toolName} — no sibling ${toolName}.tool.json (ok if framework builtin)`);
+        }
+      }
+    }
+
+    // corrects :name — warn if no sibling .corrector.ts (framework builtins OK).
+    for (const m of content.matchAll(/corrects\s+([^\n]+)/g)) {
+      const correctors = m[1].match(/:(\w+)/g) ?? [];
+      for (const c of correctors) {
+        const cname = c.slice(1);
+        if (!knownCorrectors.has(cname)) {
+          warn(`${f}: corrects :${cname} — no sibling ${cname}.corrector.ts (ok if framework builtin)`);
+        }
+      }
+    }
+
+    // security :pack → sibling <pack>.policy.rb.
+    const secMatch = content.match(/^\s*security\s+:(\w+)\s*$/m);
+    if (secMatch) {
+      const pack = secMatch[1];
+      if (!knownPolicies.has(pack)) {
+        fail(`${f}: security :${pack} — no sibling ${pack}.policy.rb`);
+      } else {
+        pass(`${f}: security :${pack} → ${pack}.policy.rb`);
+      }
+    }
+
+    // budget :pack — same.
+    const budgetMatch = content.match(/^\s*budget\s+:(\w+)\s*$/m);
+    if (budgetMatch) {
+      const pack = budgetMatch[1];
+      if (!knownPolicies.has(pack)) {
+        fail(`${f}: budget :${pack} — no sibling ${pack}.policy.rb`);
+      }
+    }
+
+    // memory :x, scope: :pool_name → sibling <pool_name>.pool.rb.
+    for (const m of content.matchAll(/scope:\s*:(\w+)/g)) {
+      const pool = m[1];
+      // Skip the reserved scope names — those don't map to pools.
+      if (pool === 'session' || pool === 'global') continue;
+      if (!knownPools.has(pool)) {
+        fail(`${f}: memory scope :${pool} — no sibling ${pool}.pool.rb`);
+      }
+    }
+
+    // action :name inside trigger blocks → sibling .action.json.
+    for (const m of content.matchAll(/\baction\s+:(\w+)/g)) {
+      const a = m[1];
+      if (!knownActions.has(a)) {
+        warn(`${f}: action :${a} — no sibling ${a}.action.json (ok if framework builtin)`);
+      }
+    }
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────────────
 
 export function runLint() {
   console.log('\x1b[1mCambium Lint\x1b[0m');
+
+  // RED-289: engine-folder detection wins. A user invoking `cambium lint`
+  // from inside an engine folder wants the engine linted, not the host
+  // workspace the engine happens to live inside.
+  const engineDir = resolveEngineDir(process.cwd());
+  if (engineDir) {
+    lintEngine(engineDir);
+    console.log(`\n${'─'.repeat(40)}`);
+    if (errors === 0 && warnings === 0) {
+      console.log(`\x1b[32m✓ All checks passed.\x1b[0m`);
+    } else {
+      if (errors > 0) console.log(`\x1b[31m${errors} error(s)\x1b[0m`);
+      if (warnings > 0) console.log(`\x1b[33m${warnings} warning(s)\x1b[0m`);
+    }
+    process.exit(errors > 0 ? 1 : 0);
+  }
 
   // Find the workspace anchor from cwd. Dispatches on shape:
   //   [workspace] → walk members, lint each
   //   [package]   → lint the single package at cwd (flat layout; RED-286)
   const shape = detectWorkspaceShape(process.cwd());
   if (!shape) {
-    console.error('No Genfile.toml found at cwd or any ancestor.');
+    console.error('No Genfile.toml or cambium.engine.json found at cwd or any ancestor.');
     process.exit(2);
   }
 
