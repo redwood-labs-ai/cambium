@@ -518,27 +518,49 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   const validate = ajv.getSchema(schema.$id);
   if (!validate) throw new Error(`AJV schema not registered: ${schema.$id}`);
 
-  // ── Resolve app-package root (RED-286) ──────────────────────────────
-  // Layout-aware lookup: [workspace] Genfile → <root>/packages/cambium;
-  // [package] Genfile → <root>. Falls back to the legacy
-  // <cwd>/packages/cambium when no Genfile is found (e.g. ad-hoc test
-  // spawns), so pre-RED-286 call sites keep working.
+  // ── Resolve tool/action discovery roots (RED-286, RED-287) ──────────
+  // Engine mode (RED-287): the gen lives inside a folder marked by
+  // `cambium.engine.json`. Tools, actions, and correctors live as
+  // **siblings** of the gen file, not under an app/<type>/ convention.
+  // Detect and scan the engine dir directly.
+  //
+  // App mode (RED-286): layout-aware lookup of the app-package root.
+  // [workspace] Genfile → <root>/packages/cambium; [package] Genfile
+  // → <root>. Falls back to the legacy <cwd>/packages/cambium when no
+  // Genfile is found.
+  //
+  // Both roots can be present — the runner scans the engine dir when
+  // the primary is engine-sourced AND still scans the app dir as a
+  // secondary, so an engine invoked from inside a workspace still has
+  // access to workspace-declared tools (e.g. shared wire protocols
+  // tooling). Engine siblings win on name collision (loadFromDir's
+  // last-write semantics).
+  const engineDir = resolveEngineDir(ir.entry?.source);
   const { appPkgRoot } = resolveAppRoot(process.cwd());
 
   // ── Load tool registry ──────────────────────────────────────────────
   const toolRegistry = new ToolRegistry();
-  // Load framework-builtin tools first, then app-supplied. loadFromDir
-  // overwrites on name collision, so app tools win (RED-221 override hook).
+  // Load framework-builtin tools first, then app-supplied, then engine
+  // siblings. loadFromDir overwrites on name collision, so:
+  //   engine-sibling > app plugin > framework builtin
+  // (RED-221 override hook; RED-287 engine extension).
   await toolRegistry.loadFromDir(join(RUNNER_DIR, 'builtin-tools'));
   await toolRegistry.loadFromDir(join(appPkgRoot, 'app/tools'));
+  if (engineDir) {
+    await toolRegistry.loadFromDir(engineDir);
+  }
 
   // ── Load action registry (RED-212) ─────────────────────────────────
-  // Same load order as tools: framework-builtin first, app second.
-  // Actions are invoked only by triggers (never by `uses :name` on a
-  // gen), so there's no compile-time allowlist to validate against.
+  // Same load order as tools: framework-builtin first, app second,
+  // engine-sibling third. Actions are invoked only by triggers (never
+  // by `uses :name` on a gen), so there's no compile-time allowlist
+  // to validate against.
   const actionRegistry = new ActionRegistry();
   await actionRegistry.loadFromDir(join(RUNNER_DIR, 'builtin-actions'));
   await actionRegistry.loadFromDir(join(appPkgRoot, 'app/actions'));
+  if (engineDir) {
+    await actionRegistry.loadFromDir(engineDir);
+  }
 
   const toolsAllowed: string[] = ir.policies?.tools_allowed ?? [];
   // Validate that all declared tools exist in the registry
