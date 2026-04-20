@@ -48,6 +48,7 @@ import { resolveGenfileContracts, loadContractsFromGenfile } from './genfile.js'
 import { loadAppCorrectors } from './correctors/app-loader.js';
 import { registerAppCorrectors } from './correctors/index.js';
 import { getGroundingDocument } from './context.js';
+import { resolveAppRoot } from './app-root.js';
 
 type IR = any;
 
@@ -516,12 +517,19 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   const validate = ajv.getSchema(schema.$id);
   if (!validate) throw new Error(`AJV schema not registered: ${schema.$id}`);
 
+  // ── Resolve app-package root (RED-286) ──────────────────────────────
+  // Layout-aware lookup: [workspace] Genfile → <root>/packages/cambium;
+  // [package] Genfile → <root>. Falls back to the legacy
+  // <cwd>/packages/cambium when no Genfile is found (e.g. ad-hoc test
+  // spawns), so pre-RED-286 call sites keep working.
+  const { appPkgRoot } = resolveAppRoot(process.cwd());
+
   // ── Load tool registry ──────────────────────────────────────────────
   const toolRegistry = new ToolRegistry();
   // Load framework-builtin tools first, then app-supplied. loadFromDir
   // overwrites on name collision, so app tools win (RED-221 override hook).
   await toolRegistry.loadFromDir(join(RUNNER_DIR, 'builtin-tools'));
-  await toolRegistry.loadFromDir(join(process.cwd(), 'packages/cambium/app/tools'));
+  await toolRegistry.loadFromDir(join(appPkgRoot, 'app/tools'));
 
   // ── Load action registry (RED-212) ─────────────────────────────────
   // Same load order as tools: framework-builtin first, app second.
@@ -529,7 +537,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   // gen), so there's no compile-time allowlist to validate against.
   const actionRegistry = new ActionRegistry();
   await actionRegistry.loadFromDir(join(RUNNER_DIR, 'builtin-actions'));
-  await actionRegistry.loadFromDir(join(process.cwd(), 'packages/cambium/app/actions'));
+  await actionRegistry.loadFromDir(join(appPkgRoot, 'app/actions'));
 
   const toolsAllowed: string[] = ir.policies?.tools_allowed ?? [];
   // Validate that all declared tools exist in the registry
@@ -1084,7 +1092,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
           errors: [{
             message:
               `write_memory_via :${agentClass} declared but no .cmb.rb file found. ` +
-              'Searched sibling of primary and packages/cambium/app/gens/.',
+              'Searched sibling of primary and the framework app/gens/ fallback.',
           }],
         });
       } else {
