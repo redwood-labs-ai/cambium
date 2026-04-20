@@ -6,6 +6,8 @@ You are helping a developer work with **Cambium**, a DSL and runtime for buildin
 
 Walk them through creating their first agent. Use the CLI generators — don't write files manually.
 
+> **Layout note (RED-286):** Cambium supports two project shapes. A `[workspace]` Genfile (the cambium monorepo's own layout) puts the app under `packages/cambium/`; a `[package]` Genfile (external apps, flat layout) puts it at the project root. The paths below use `<app>/` to stand in for either — `packages/cambium/` for workspace projects, `./` for flat `[package]` projects. `cambium new` figures out which and writes to the right place automatically.
+
 ### Step 1: Scaffold an agent
 Ask what they want to build, then:
 ```bash
@@ -17,17 +19,17 @@ This creates the `.cmb.rb` file, system prompt, and test.
 ```bash
 cambium new schema <SchemaName>
 ```
-This prints TypeBox boilerplate to add to `packages/cambium/src/contracts.ts`. Help them define the fields their agent should return.
+This prints TypeBox boilerplate to add to `<app>/src/contracts.ts`. Help them define the fields their agent should return.
 
 ### Step 3: Edit the system prompt
-Open `packages/cambium/app/systems/<agent_name>.system.md` and help them write a focused role description.
+Open `<app>/app/systems/<agent_name>.system.md` and help them write a focused role description.
 
 ### Step 4: Create a fixture
-Help them create a test document in `packages/cambium/examples/fixtures/`.
+Help them create a test document in `<app>/examples/fixtures/`.
 
 ### Step 5: Run it
 ```bash
-CAMBIUM_OMLX_API_KEY=<key> cambium run packages/cambium/app/gens/<agent_name>.cmb.rb --method analyze --arg packages/cambium/examples/fixtures/<fixture>
+CAMBIUM_OMLX_API_KEY=<key> cambium run <app>/app/gens/<agent_name>.cmb.rb --method analyze --arg <app>/examples/fixtures/<fixture>
 ```
 
 ### Step 6: Iterate
