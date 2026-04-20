@@ -19,7 +19,7 @@ This creates the `.cmb.rb` file, system prompt, and test.
 ```bash
 cambium new schema <SchemaName>
 ```
-This prints TypeBox boilerplate to add to `<app>/src/contracts.ts`. Help them define the fields their agent should return.
+In app mode, this prints TypeBox boilerplate to add to `<app>/src/contracts.ts`. In engine mode, it appends the export directly to the sibling `schemas.ts` (creating the file if absent). Help them define the fields their agent should return.
 
 ### Step 3: Edit the system prompt
 Open `<app>/app/systems/<agent_name>.system.md` and help them write a focused role description.

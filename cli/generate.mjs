@@ -488,9 +488,10 @@ export const ${pascal} = Type.Object(
     if (!existsSync(schemasPath)) {
       // No schemas.ts yet — scaffold a fresh file with the TypeBox
       // import and the new export. Every subsequent `cambium new schema`
-      // will append to this file.
-      writeFileSync(schemasPath, `import { Type } from '@sinclair/typebox';\n${exportBlock}`);
-      console.log(`  created: ${schemasPath} (new file with ${pascal})`);
+      // will append to this file. Route through writeFile (not bare
+      // writeFileSync) so the overwrite-protection invariant holds on
+      // every code path — security review flagged a TOCTOU gap here.
+      writeFile(schemasPath, `import { Type } from '@sinclair/typebox';\n${exportBlock}`);
     } else {
       const existing = readFileSync(schemasPath, 'utf8');
       const alreadyPresent = new RegExp(`^\\s*export\\s+const\\s+${pascal}\\b`, 'm').test(existing);
