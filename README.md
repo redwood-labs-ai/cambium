@@ -115,6 +115,8 @@ output.json + trace.json
 │   │   ├── systems/       # System prompts (.system.md)
 │   │   ├── tools/         # App plugin tools — paired .tool.json + .tool.ts
 │   │   ├── actions/       # App trigger actions — paired .action.json + .action.ts
+│   │   ├── correctors/    # App corrector plugins (.corrector.ts) — auto-discovered
+│   │   │                  #   in app-mode, override built-ins by name (RED-275)
 │   │   ├── policies/      # Named policy packs (.policy.rb) for security + budget
 │   │   ├── memory_pools/  # Named memory pools (.pool.rb) for shared strategy+embed
 │   │   └── config/        # Workspace config — models.rb for RED-237 aliases
@@ -134,6 +136,7 @@ output.json + trace.json
 │       ├── memory/            # Memory subsystem (backend, path, keys, retro-agent)
 │       ├── providers/         # Model + embed providers (oMLX, Ollama)
 │       ├── correctors/        # Built-in correctors (math, dates, currency, citations)
+│       │                      #   + app-loader.ts for RED-275 plugin discovery
 │       ├── signals.ts         # Signal extraction
 │       ├── triggers.ts        # Trigger evaluation (tool_call + action_call)
 │       ├── compound.ts        # Review + consensus

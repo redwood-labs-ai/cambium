@@ -45,6 +45,8 @@ import {
   applyRetroWrites,
 } from './memory/retro-agent.js';
 import { resolveGenfileContracts, loadContractsFromGenfile } from './genfile.js';
+import { loadAppCorrectors } from './correctors/app-loader.js';
+import { registerAppCorrectors } from './correctors/index.js';
 
 type IR = any;
 
@@ -925,6 +927,44 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
           break;
         }
       }
+
+      // RED-275: feed error-severity corrector issues back into repair,
+      // mirroring the grounding path below. A corrector that can verify
+      // (e.g. "does this regex match its own test cases") but can't
+      // auto-fix the problem returns `corrected: false` with issues;
+      // the LLM needs to see those issues to fix the output.
+      //
+      // Single additional repair attempt to bound cost — same stance
+      // grounding takes. If that repair fails validation, we keep the
+      // pre-repair parsed output and the trace records both outcomes.
+      const correctorErrors = (correctResult.meta?.issues ?? [])
+        .filter((i: any) => i.severity === 'error');
+      if (correctorErrors.length > 0) {
+        const repairErrors = correctorErrors.map((i: any) => ({
+          message: `Corrector: ${i.message}`,
+          instancePath: i.path,
+        }));
+        const repair = await handleRepair(
+          JSON.stringify(parsed, null, 2), repairErrors, schema, ir,
+          maxRepairAttempts + 1, generateText, extractJsonObject,
+        );
+        trace.steps.push(repair.result);
+        // Without this budgetTrack, the LLM tokens spent on the
+        // corrector-feedback repair don't count toward max_tokens /
+        // max_duration. (The grounding-path mirror at ~line 996 has
+        // the same pre-existing gap; tracked separately.)
+        budgetTrack(repair.result);
+
+        if (repair.parsed) {
+          const revalidate = handleValidate(repair.parsed, validate, 'ValidateAfterCorrectorRepair');
+          trace.steps.push(revalidate);
+          if (revalidate.ok) {
+            parsed = repair.parsed;
+          }
+          // If revalidation failed, keep original parsed — matches the
+          // grounding branch's stance.
+        }
+      }
     }
 
     // 5. Grounding: citation enforcement (auto-registered when grounded_in is declared)
@@ -1156,6 +1196,13 @@ async function main() {
   const genfile = resolveGenfileContracts(process.cwd());
   if (genfile) {
     contractsMod = await loadContractsFromGenfile(genfile);
+    // RED-275: app-mode correctors discovered under <genfileDir>/app/correctors/.
+    // Engine-mode callers using runGen directly skip this path and can
+    // call registerAppCorrectors themselves if they need app-level ones.
+    const app = await loadAppCorrectors(genfile.genfileDir);
+    if (Object.keys(app.correctors).length > 0) {
+      registerAppCorrectors(app.correctors);
+    }
   } else {
     // pathToFileURL is not strictly required on POSIX (`import()` of a
     // bare absolute path works) but is required on Windows, where a

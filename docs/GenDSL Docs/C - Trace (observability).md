@@ -25,8 +25,12 @@ A trace MUST include:
 | `Generate` | Single-turn model call. | `prompt`, `raw`, `usage` |
 | `AgenticTurn` | One iteration of the agentic loop. | `turn`, `tool_calls`, `results`, `usage` |
 | `ToolCall` | A single tool dispatch. | `tool`, `operation`, `input`, `output` |
-| `Validate` | AJV schema validation. | `errors` on failure |
-| `Repair` | Repair-loop iteration. | `attempt`, `strategy`, `errors_before`, `errors_after` |
+| `Validate` | AJV schema validation. First-attempt successes are elided from the trace; only failures and post-repair successes are pushed. | `errors` on failure |
+| `Repair` | Repair-loop iteration. Also emitted by the corrector-feedback and grounding paths (one extra attempt each). | `attempt`, `strategy`, `errors_before`, `errors_after` |
+| `ValidateAfterRepair` | AJV re-validation after a schema-failure repair attempt. | `errors` on failure |
+| `ValidateAfterCorrect` | AJV re-validation after a corrector that returned `corrected: true` modified the output. | `errors` on failure |
+| `ValidateAfterCorrectorRepair` | AJV re-validation after a corrector-feedback repair attempt (RED-275). Only emitted when a corrector returned `severity: 'error'` issues that fed back into a repair call. | `errors` on failure |
+| `ValidateAfterGrounding` | AJV re-validation after a grounding-failure repair attempt (citation errors fed back into repair). | `errors` on failure |
 | `ExtractSignals` / `Trigger` | Signal extraction + trigger evaluation (see [[C - Signals, State, and Triggers]]). |
 | `ActionCall` | A trigger's `action :name` side-effect handler invocation (RED-212). | `trigger`, `action`, `input`, `output`, `target` |
 | `GroundingCheck` | Citation verification. | `citations_verified`, `failures` |
