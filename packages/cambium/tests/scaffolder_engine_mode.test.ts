@@ -218,11 +218,18 @@ describe('cambium new <type> — engine mode places siblings of the gen', () => 
     expect(existsSync(join(scratch, 'app'))).toBe(false);
   });
 
-  it('cambium new corrector — refuses in engine mode', () => {
+  it('cambium new corrector — drops .corrector.ts as a sibling of the gen (RED-275 plugin shape)', () => {
     const result = runCli(['new', 'corrector', 'price_check'], scratch);
-    expect(result.status).not.toBe(0);
-    expect((result.stderr ?? '') + (result.stdout ?? ''))
-      .toMatch(/not supported in engine mode/);
+    expect(result.status).toBe(0);
+
+    expect(existsSync(join(scratch, 'price_check.corrector.ts'))).toBe(true);
+    expect(existsSync(join(scratch, 'app'))).toBe(false);
+
+    // Engine-mode corrector imports from the published package, not a
+    // relative framework path.
+    const body = readFileSync(join(scratch, 'price_check.corrector.ts'), 'utf8');
+    expect(body).toContain("from '@cambium/runner'");
+    expect(body).toContain('export const price_check: CorrectorFn');
   });
 });
 
@@ -265,5 +272,112 @@ describe('cambium new <type> — app mode (regression)', () => {
     expect(result.status).toBe(0);
     expect(existsSync(join(scratch, 'packages', 'cambium', 'app', 'tools', 'echo_thing.tool.json'))).toBe(true);
     expect(existsSync(join(scratch, 'packages', 'cambium', 'app', 'tools', 'echo_thing.tool.ts'))).toBe(true);
+  });
+
+  // RED-275 + RED-284: app-mode correctors now write to app/correctors/
+  // with the plugin shape, not to the framework's correctors/ directory.
+  // The pre-RED-284 scaffolder wrote `packages/cambium-runner/src/correctors/`
+  // which produced a file the runtime wouldn't discover (wrong shape, wrong path).
+  it('cambium new corrector writes <snake>.corrector.ts under packages/cambium/app/correctors/', () => {
+    mkdirSync(join(scratch, 'packages', 'cambium'), { recursive: true });
+    const result = runCli(['new', 'corrector', 'regex_verifies'], scratch);
+    expect(result.status).toBe(0);
+
+    const correctorPath = join(
+      scratch, 'packages', 'cambium', 'app', 'correctors', 'regex_verifies.corrector.ts',
+    );
+    expect(existsSync(correctorPath)).toBe(true);
+
+    // Must NOT land in the framework correctors directory (the pre-RED-284 bug).
+    expect(existsSync(join(scratch, 'packages', 'cambium-runner', 'src', 'correctors'))).toBe(false);
+
+    const body = readFileSync(correctorPath, 'utf8');
+    // App-mode template imports types via the deep relative path to the runner
+    // package — same stance generateTool takes for ToolContext.
+    expect(body).toContain("from '../../../cambium-runner/src/correctors/types.js'");
+    expect(body).toContain('export const regex_verifies: CorrectorFn');
+  });
+});
+
+// ── RED-284: new scaffolders for action / policy / memory_pool / config ──
+
+describe('cambium new <type> — RED-284 scaffolder additions', () => {
+  it('cambium new action writes paired .action.{json,ts} under packages/cambium/app/actions/', () => {
+    mkdirSync(join(scratch, 'packages', 'cambium'), { recursive: true });
+    const result = runCli(['new', 'action', 'slack_notify'], scratch);
+    expect(result.status).toBe(0);
+
+    const actionsDir = join(scratch, 'packages', 'cambium', 'app', 'actions');
+    expect(existsSync(join(actionsDir, 'slack_notify.action.json'))).toBe(true);
+    expect(existsSync(join(actionsDir, 'slack_notify.action.ts'))).toBe(true);
+
+    const def = JSON.parse(readFileSync(join(actionsDir, 'slack_notify.action.json'), 'utf8'));
+    expect(def.name).toBe('slack_notify');
+    expect(def.permissions).toEqual({ pure: true });
+    expect(def.inputSchema).toBeDefined();
+    expect(def.outputSchema).toBeDefined();
+  });
+
+  it('cambium new action works in engine mode too', () => {
+    writeFileSync(join(scratch, 'cambium.engine.json'), '{}');
+    const result = runCli(['new', 'action', 'debug_emit'], scratch);
+    expect(result.status).toBe(0);
+    expect(existsSync(join(scratch, 'debug_emit.action.json'))).toBe(true);
+    expect(existsSync(join(scratch, 'debug_emit.action.ts'))).toBe(true);
+    // Engine-mode template uses the package import.
+    const body = readFileSync(join(scratch, 'debug_emit.action.ts'), 'utf8');
+    expect(body).toContain("from '@cambium/runner'");
+  });
+
+  it('cambium new policy writes <snake>.policy.rb under packages/cambium/app/policies/', () => {
+    mkdirSync(join(scratch, 'packages', 'cambium'), { recursive: true });
+    const result = runCli(['new', 'policy', 'research_caps'], scratch);
+    expect(result.status).toBe(0);
+    const path = join(scratch, 'packages', 'cambium', 'app', 'policies', 'research_caps.policy.rb');
+    expect(existsSync(path)).toBe(true);
+    expect(readFileSync(path, 'utf8')).toMatch(/security\s*:research_caps/);
+  });
+
+  it('cambium new policy refuses in engine mode', () => {
+    writeFileSync(join(scratch, 'cambium.engine.json'), '{}');
+    const result = runCli(['new', 'policy', 'p1'], scratch);
+    expect(result.status).not.toBe(0);
+    expect((result.stderr ?? '') + (result.stdout ?? ''))
+      .toMatch(/not supported in engine mode/);
+  });
+
+  it('cambium new memory_pool writes <snake>.pool.rb under packages/cambium/app/memory_pools/', () => {
+    mkdirSync(join(scratch, 'packages', 'cambium'), { recursive: true });
+    const result = runCli(['new', 'memory_pool', 'support_team'], scratch);
+    expect(result.status).toBe(0);
+    const path = join(scratch, 'packages', 'cambium', 'app', 'memory_pools', 'support_team.pool.rb');
+    expect(existsSync(path)).toBe(true);
+    expect(readFileSync(path, 'utf8')).toMatch(/strategy :sliding_window/);
+  });
+
+  it('cambium new config models writes app/config/models.rb', () => {
+    mkdirSync(join(scratch, 'packages', 'cambium'), { recursive: true });
+    const result = runCli(['new', 'config', 'models'], scratch);
+    expect(result.status).toBe(0);
+    const path = join(scratch, 'packages', 'cambium', 'app', 'config', 'models.rb');
+    expect(existsSync(path)).toBe(true);
+    expect(readFileSync(path, 'utf8')).toMatch(/default\s+"omlx:/);
+  });
+
+  it('cambium new config memory_policy writes app/config/memory_policy.rb', () => {
+    mkdirSync(join(scratch, 'packages', 'cambium'), { recursive: true });
+    const result = runCli(['new', 'config', 'memory_policy'], scratch);
+    expect(result.status).toBe(0);
+    const path = join(scratch, 'packages', 'cambium', 'app', 'config', 'memory_policy.rb');
+    expect(existsSync(path)).toBe(true);
+    expect(readFileSync(path, 'utf8')).toMatch(/# max_ttl "90d"/);
+  });
+
+  it('cambium new config rejects unknown forms', () => {
+    mkdirSync(join(scratch, 'packages', 'cambium'), { recursive: true });
+    const result = runCli(['new', 'config', 'nonsense'], scratch);
+    expect(result.status).not.toBe(0);
+    expect((result.stderr ?? '') + (result.stdout ?? ''))
+      .toMatch(/Forms: models, memory_policy/);
   });
 });

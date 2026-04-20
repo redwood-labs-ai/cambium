@@ -25,7 +25,7 @@ Cambium — Rails for generation engineering
 Usage:
   cambium init [name]
   cambium new <type> <Name>
-  cambium run <file.cmb.rb> --method <method> --arg <path>|- [--trace <path>] [--out <path>] [--mock] [--memory-key <name>=<value> ...]
+  cambium run <file.cmb.rb> --method <method> --arg <path>|- [--trace <path>] [--out <path>] [--mock] [--memory-key <name>=<value> ...] [--session-id <id>]
   cambium compile <file.cmb.rb> --method <method> [--arg <path>|-] [-o <output>]
   cambium doctor
   cambium test
@@ -33,7 +33,7 @@ Usage:
 
 Commands:
   init      Initialize a new Cambium workspace
-  new       Scaffold a new engine, agent, tool, schema, system, or corrector
+  new       Scaffold a new engine, agent, tool, action, schema, system, corrector, policy, memory_pool, or config
   run       Compile and execute a GenModel
   compile   Compile a GenModel to IR JSON (no execution; engine-mode build step)
   doctor    Check environment setup and dependencies
@@ -47,6 +47,8 @@ Run flags:
   --memory-key <name>=<val> Value for a keyed_by slot declared by a memory/pool (repeatable).
                             :session scope auto-generates a session id and echoes it to stderr
                             unless CAMBIUM_SESSION_ID is set.
+  --session-id <id>         Explicit session id for memory :session scope. Must match
+                            /^[a-zA-Z0-9_\-]+$/ and be 1-128 chars. Wins over CAMBIUM_SESSION_ID.
 
 Compile flags:
   -o <path>                 Write IR JSON to <path> (default: <basename>.ir.json next to the input)
@@ -139,6 +141,7 @@ let arg = null;
 let traceOut = null;
 let outputOut = null;
 let mock = false;
+let sessionId = null;
 const memoryKeys = [];
 for (let i = 1; i < args.length; i++) {
   const a = args[i];
@@ -148,15 +151,31 @@ for (let i = 1; i < args.length; i++) {
   else if (a === '--out') outputOut = args[++i];
   else if (a === '--mock') mock = true;
   else if (a === '--memory-key') memoryKeys.push(args[++i]);
+  else if (a === '--session-id') sessionId = args[++i];
   else if (a === '--help' || a === '-h') usage();
   else usage(`Unknown flag: ${a}\nRun 'cambium run --help' for usage.`);
 }
 if (!method) usage('Missing --method\nRun "cambium run --help" for usage.');
 if (!arg) usage('Missing --arg\nRun "cambium run --help" for usage.');
 
+// RED-284: validate --session-id against the same regex the runner
+// enforces on CAMBIUM_SESSION_ID (keys.ts#validateSafeSegment). Failing
+// here is nicer than failing inside the subprocess.
+if (sessionId !== null) {
+  if (sessionId.length === 0 || sessionId.length > 128 || !/^[a-zA-Z0-9_\-]+$/.test(sessionId)) {
+    console.error(
+      `Invalid --session-id "${sessionId}". Must match /^[a-zA-Z0-9_\\-]+$/ and be 1-128 chars.`,
+    );
+    process.exit(2);
+  }
+}
+
 // Compile with Ruby → IR JSON (stdout)
 const compileEnv = { ...process.env };
 if (mock) compileEnv.CAMBIUM_ALLOW_MOCK = '1';
+// --session-id wins over an inherited CAMBIUM_SESSION_ID so the flag is
+// the source of truth when the user is explicit. (RED-284)
+if (sessionId !== null) compileEnv.CAMBIUM_SESSION_ID = sessionId;
 const compile = spawnSync('ruby', [RUBY_COMPILE_SCRIPT, file, '--method', method, '--arg', arg], {
   encoding: 'utf8',
   maxBuffer: 50 * 1024 * 1024

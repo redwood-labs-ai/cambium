@@ -502,55 +502,367 @@ You are a ${snake.replace(/_/g, ' ')}. TODO: describe the role, expertise, and b
 function generateCorrector(name, ctx) {
   validateName(name, 'corrector name');
 
-  if (ctx.mode === 'engine') {
-    console.error(`\n'cambium new corrector' is not supported in engine mode.`);
-    console.error(`Correctors live inside the framework — they're shared across gens.`);
-    console.error(`Add new correctors to packages/cambium-runner/src/correctors/ in the framework repo.`);
-    process.exit(2);
-  }
+  // RED-275 app-level correctors: `app/correctors/<snake>.corrector.ts`
+  // exporting a function named matching the basename. Auto-discovered
+  // by the runner at startup — no registration step. Basename must
+  // match /^[a-z][a-z0-9_]*$/ (enforced by the loader); validateName's
+  // regex is stricter (starts with A-Z) so the snake_case conversion
+  // below keeps us inside the loader's allowed set.
 
   const snake = snakeCase(name);
 
-  console.log(`\nGenerating corrector: ${snake}\n`);
+  // Extra guard: the app-corrector loader regex is /^[a-z][a-z0-9_]*$/.
+  // snakeCase(validatedName) already produces a matching string for
+  // any input validateName accepts, but assert defensively in case
+  // the conversion ever drifts.
+  if (!/^[a-z][a-z0-9_]*$/.test(snake)) {
+    console.error(`Corrector basename "${snake}" must match /^[a-z][a-z0-9_]*$/ (RED-275).`);
+    process.exit(2);
+  }
 
-  const correctorsDir = join(ctx.workspaceRoot, 'packages/cambium-runner/src/correctors');
-
-  writeFile(join(correctorsDir, `${snake}.ts`), `\
-import type { CorrectorFn, CorrectorResult, CorrectorIssue } from './types.js';
+  // Import path differs by mode to match existing scaffolder conventions:
+  //   - engine mode imports from the @cambium/runner npm package.
+  //   - in-tree app mode uses a deep relative path to the framework
+  //     correctors/types.ts (same stance generateTool takes for
+  //     ToolContext). External apps with their own Genfile + flat
+  //     layout will want @cambium/runner; that layout isn't supported
+  //     by the app-mode scaffolder today — see the CLI-parity-audit
+  //     ticket's layout-flexibility follow-up.
+  const makeBody = (typeImport) => `\
+/**
+ * App-level corrector plugin (RED-275). Auto-discovered by the runner
+ * at startup when the file lives under \`app/correctors/\` with the
+ * \`.corrector.ts\` suffix and exports a function matching the basename.
+ *
+ * Return \`corrected: true\` with an updated \`output\` when the
+ * corrector can deterministically fix the data (math recompute, date
+ * normalization, etc.). Return \`corrected: false\` with
+ * \`severity: 'error'\` issues when the data fails a domain check the
+ * corrector can verify but not auto-fix (e.g. "regex compiles and
+ * matches its own test cases") — those issues feed the repair loop,
+ * giving the LLM a shot at producing something better.
+ */
+import type { CorrectorFn, CorrectorResult, CorrectorIssue } from '${typeImport}';
 
 export const ${snake}: CorrectorFn = (data, _context): CorrectorResult => {
   const issues: CorrectorIssue[] = [];
   const output = structuredClone(data);
 
-  // TODO: implement ${snake} corrector
-  // Walk the output, validate/transform fields, push issues
+  // TODO: implement ${snake}
 
   return {
     corrected: issues.some(i => i.severity === 'fixed'),
     output,
     issues,
-    // meta: { ... }, // optional: add structured results for trace
   };
 };
+`;
+
+  if (ctx.mode === 'engine') {
+    // Engine mode: sibling of the engine's gens. Same auto-discovery
+    // semantics once the runner's discovery walk is engine-aware; today
+    // app-mode is the primary target.
+    writeFile(join(ctx.engineDir, `${snake}.corrector.ts`), makeBody('@cambium/runner'));
+    console.log(`\nNext steps:`);
+    console.log(`  1. Implement ${ctx.engineDir}/${snake}.corrector.ts`);
+    console.log(`  2. Declare in your gen: corrects :${snake}`);
+    return;
+  }
+
+  // App mode: write under <workspaceRoot>/packages/cambium/app/correctors/.
+  // NOTE: this follows the existing generateTool/generateAgent pattern
+  // which assumes the cambium-monorepo layout. External apps with a
+  // flat [package] Genfile at cwd won't have packages/cambium/ — see
+  // the CLI-parity-audit ticket's follow-up note. Fixing the flat
+  // layout is a separate concern from this P0 bug fix.
+  const PKG = join(ctx.workspaceRoot, 'packages/cambium');
+  writeFile(
+    join(PKG, 'app/correctors', `${snake}.corrector.ts`),
+    makeBody('../../../cambium-runner/src/correctors/types.js'),
+  );
+
+  console.log(`\nNext steps:`);
+  console.log(`  1. Implement ${PKG}/app/correctors/${snake}.corrector.ts`);
+  console.log(`  2. Declare in your agent: corrects :${snake}`);
+  console.log(`\n  The file is auto-discovered — no registration step needed.`);
+  console.log(`  Overrides any framework built-in with the same name (with a one-time stderr warning).`);
+}
+
+// ── Action scaffolder (RED-212, added RED-284) ────────────────────────
+
+function generateAction(name, ctx) {
+  validateName(name, 'action name');
+  const snake = snakeCase(name);
+
+  const actionJson = JSON.stringify({
+    name: snake,
+    description: `TODO: describe what the ${snake} action does when a trigger fires`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        message: { type: 'string', description: 'Signal payload or literal text.' },
+      },
+      additionalProperties: true,
+    },
+    outputSchema: {
+      type: 'object',
+      required: ['value'],
+      properties: {
+        value: { type: 'string', description: 'A short summary of what the action did.' },
+      },
+      additionalProperties: false,
+    },
+    permissions: { pure: true },
+  }, null, 2) + '\n';
+
+  const makeBody = (ctxTypeImport) => `\
+/**
+ * Plugin action handler (RED-212). Auto-discovered alongside
+ * ${snake}.action.json. Called by the trigger dispatcher when an
+ * \`on :signal do; action :${snake}, ... ; end\` fires.
+ *
+ * If this action needs network access, declare it in the .action.json
+ * permissions block and use \`ctx.fetch\` — NOT globalThis.fetch
+ * (the SSRF guard lives on ctx.fetch; direct fetch bypasses it).
+ */
+import type { ToolContext } from '${ctxTypeImport}';
+
+export async function execute(
+  input: any,
+  _ctx?: ToolContext,
+): Promise<{ value: string }> {
+  // TODO: implement ${snake}
+  return { value: String(input?.message ?? '') };
+}
+`;
+
+  if (ctx.mode === 'engine') {
+    writeFile(join(ctx.engineDir, `${snake}.action.json`), actionJson);
+    writeFile(join(ctx.engineDir, `${snake}.action.ts`), makeBody('@cambium/runner'));
+    console.log(`\nNext steps:`);
+    console.log(`  1. Edit ${ctx.engineDir}/${snake}.action.json — schemas + permissions`);
+    console.log(`  2. Implement ${ctx.engineDir}/${snake}.action.ts`);
+    console.log(`  3. Wire a trigger: on :signal_name do; action :${snake}, message: "..." ; end`);
+    return;
+  }
+
+  const PKG = join(ctx.workspaceRoot, 'packages/cambium');
+  writeFile(join(PKG, 'app/actions', `${snake}.action.json`), actionJson);
+  writeFile(
+    join(PKG, 'app/actions', `${snake}.action.ts`),
+    makeBody('../../../cambium-runner/src/tools/tool-context.js'),
+  );
+
+  console.log(`\nNext steps:`);
+  console.log(`  1. Edit ${PKG}/app/actions/${snake}.action.json — schemas + permissions`);
+  console.log(`  2. Implement ${PKG}/app/actions/${snake}.action.ts`);
+  console.log(`  3. Wire a trigger: on :signal_name do; action :${snake}, ... ; end`);
+  console.log(`\n  Default permissions are 'pure: true'. If you add ctx.fetch / fs / exec calls,`);
+  console.log(`  update the .action.json permissions block FIRST — the static check reads the`);
+  console.log(`  JSON, not the TS body.`);
+}
+
+// ── Policy pack scaffolder (RED-214, added RED-284) ───────────────────
+
+function generatePolicy(name, ctx) {
+  validateName(name, 'policy name');
+  const snake = snakeCase(name);
+
+  // RED-214 policy-pack filename regex.
+  if (!/^[a-z][a-z0-9_]*$/.test(snake)) {
+    console.error(`Policy pack name "${snake}" must match /^[a-z][a-z0-9_]*$/ (RED-214).`);
+    process.exit(2);
+  }
+
+  const policyBody = `\
+# RED-214 policy pack: reusable security + budget bundle.
+#
+# A gen pulls this in by symbol:
+#
+#   security :${snake}     # applies the network/filesystem/exec slots below
+#   budget   :${snake}     # applies the per_tool / per_run slots below
+#
+# The gen can mix slots across packs + inline — each slot
+# (network / filesystem / exec / per_tool / per_run) must be set by
+# exactly one source. Inline keyword form + pack symbol in the same
+# call is rejected.
+
+# Uncomment + customize one or more blocks. Any block left out stays
+# at its framework default (deny-by-default for network; no exec; etc.).
+
+# network \\
+#   allowlist: %w[api.example.com],
+#   block_private: true,
+#   block_metadata: true
+
+# filesystem \\
+#   allowlist_paths: %w[/data/in /tmp/cambium]
+
+# exec \\
+#   runtime: :wasm,          # :wasm | :firecracker | :native (deprecated)
+#   language: :javascript,
+#   timeout: 30,
+#   memory: 256
+
+# budget \\
+#   per_tool: { web_search: { max_calls: 5 } },
+#   per_run:  { max_calls: 20, max_tokens: 20_000 }
+`;
+
+  if (ctx.mode === 'engine') {
+    console.error(`\n'cambium new policy' is not supported in engine mode.`);
+    console.error(`Policy packs live at the workspace level — engines pull in workspace packs by symbol.`);
+    process.exit(2);
+  }
+
+  const PKG = join(ctx.workspaceRoot, 'packages/cambium');
+  writeFile(join(PKG, 'app/policies', `${snake}.policy.rb`), policyBody);
+
+  console.log(`\nNext steps:`);
+  console.log(`  1. Uncomment + customize the security/budget blocks in ${PKG}/app/policies/${snake}.policy.rb`);
+  console.log(`  2. Reference by symbol in a gen: security :${snake} (and/or budget :${snake})`);
+  console.log(`\n  Name must match /^[a-z][a-z0-9_]*$/ — enforced at both scaffold time and`);
+  console.log(`  PolicyPack.load to prevent path traversal via symbol.`);
+}
+
+// ── Memory pool scaffolder (RED-215, added RED-284) ───────────────────
+
+function generateMemoryPool(name, ctx) {
+  validateName(name, 'memory pool name');
+  const snake = snakeCase(name);
+
+  // RED-215 memory-pool filename regex.
+  if (!/^[a-z][a-z0-9_]*$/.test(snake)) {
+    console.error(`Memory pool name "${snake}" must match /^[a-z][a-z0-9_]*$/ (RED-215).`);
+    process.exit(2);
+  }
+
+  const poolBody = `\
+# RED-215 memory pool: authoritative strategy + embed + keyed_by for one
+# or more gens that opt in via \`memory :<slot>, scope: :${snake}, ...\`.
+#
+# The gen at the use site can only set reader knobs (size / top_k).
+# Strategy, embed, keyed_by, retain all come from here.
+
+# Pick ONE strategy:
+#   :sliding_window — last N entries, cheap, no embeddings
+#   :semantic       — vec-search against ctx.input; requires embed
+#   :log            — append-only; no read-inject into prompts
+strategy :sliding_window
+
+# Only required for :semantic:
+# embed "omlx:bge-small-en"
+
+# Scope key required at run time (cambium run --memory-key <key>=<value>).
+# Omit for "singleton" pools where every gen shares one bucket.
+# keyed_by :team_id
+
+# Retention (RED-239). Optional; the workspace's memory_policy.rb may
+# enforce a max_ttl.
+# retain ttl: "30d", max_entries: 1000
+`;
+
+  if (ctx.mode === 'engine') {
+    console.error(`\n'cambium new memory_pool' is not supported in engine mode.`);
+    console.error(`Memory pools live at the workspace level — engines pull in workspace pools by symbol.`);
+    process.exit(2);
+  }
+
+  const PKG = join(ctx.workspaceRoot, 'packages/cambium');
+  writeFile(join(PKG, 'app/memory_pools', `${snake}.pool.rb`), poolBody);
+
+  console.log(`\nNext steps:`);
+  console.log(`  1. Pick the strategy + embed (for :semantic) in ${PKG}/app/memory_pools/${snake}.pool.rb`);
+  console.log(`  2. Reference from a gen: memory :<slot>, scope: :${snake}, top_k: 5`);
+  console.log(`\n  Name must match /^[a-z][a-z0-9_]*$/ — enforced at both scaffold time and`);
+  console.log(`  MemoryPool.load to prevent path traversal via symbol.`);
+}
+
+// ── Config scaffolder (RED-237 + RED-239, added RED-284) ──────────────
+//
+// `cambium new config models`          → app/config/models.rb (RED-237)
+// `cambium new config memory_policy`   → app/config/memory_policy.rb (RED-239)
+//
+// "name" here is the form (`models` or `memory_policy`), not an
+// identifier the user picks. Kept under `cambium new <type> <form>` for
+// consistency with how everything else dispatches.
+
+function generateConfig(name, ctx) {
+  const validForms = ['models', 'memory_policy'];
+  if (!validForms.includes(name)) {
+    console.error(`\nUsage: cambium new config <form>`);
+    console.error(`Forms: ${validForms.join(', ')}`);
+    console.error(`  models          — app/config/models.rb (RED-237 aliases)`);
+    console.error(`  memory_policy   — app/config/memory_policy.rb (RED-239 governance)`);
+    process.exit(2);
+  }
+
+  if (ctx.mode === 'engine') {
+    console.error(`\n'cambium new config' is not supported in engine mode.`);
+    console.error(`Config files live at the workspace level.`);
+    process.exit(2);
+  }
+
+  const PKG = join(ctx.workspaceRoot, 'packages/cambium');
+  const dest = join(PKG, 'app/config', `${name}.rb`);
+
+  if (name === 'models') {
+    writeFile(dest, `\
+# RED-237: workspace-configurable model aliases.
+#
+# Maps symbolic names to literal provider:model ids. Gens reference
+# these by symbol (\`model :default\`, \`embed: :embedding\`); the
+# compiler resolves to literals before emitting IR, so the runner
+# always sees concrete ids.
+#
+# Names must match /^[a-z][a-z0-9_]*$/. Values must be literal
+# provider-prefixed ids (contain ':').
+
+default   "omlx:Qwen3.5-27B-4bit"
+# fast      "omlx:gemma-4-31b-it-8bit"
+# embedding "omlx:bge-small-en"
 `);
 
-  writeFile(join(correctorsDir, `${snake}.test.ts`), `\
-import { describe, it, expect } from 'vitest'
-import { ${snake} } from './${snake}.js'
+    console.log(`\nNext steps:`);
+    console.log(`  1. Edit ${dest} to add aliases your gens can reference via :symbol.`);
+    console.log(`  2. Use in a gen: model :default`);
+    return;
+  }
 
-describe('${snake} corrector', () => {
-  it('returns unchanged data when nothing to correct', () => {
-    const data = { summary: 'test' }
-    const result = ${snake}(data, {})
-    expect(result.corrected).toBe(false)
-  })
-})
+  // memory_policy
+  writeFile(dest, `\
+# RED-239: workspace-level memory governance.
+#
+# Enforced at compile time — any gen whose memory decls violate the
+# policy fails with a CompileError naming the offending decl and policy
+# file. Loaded from app/config/memory_policy.rb (RED-245 search paths).
+
+# Cap the retention TTL any single memory decl or pool can declare.
+# Bounded by MAX_TTL_SECONDS = 10 years.
+# max_ttl "90d"
+
+# Default TTL applied when a decl / pool leaves retain.ttl unset.
+# Must be <= max_ttl (validated at policy load).
+# default_ttl "7d"
+
+# Cap on max_entries per bucket.
+# max_entries 10_000
+
+# Ban a scope outright (reject any gen using it). Common: :global.
+# ban_scope :global
+
+# Require a keyed_by value for specific scopes. Prevents bucket collisions
+# when many users share an app.
+# require_keyed_by_for session: :user_id
+
+# Optional whitelist of pool names the workspace permits. When set, any
+# gen referencing a pool outside this list fails compile.
+# allowed_pools :support_team
 `);
 
   console.log(`\nNext steps:`);
-  console.log(`  1. Implement packages/cambium-runner/src/correctors/${snake}.ts`);
-  console.log(`  2. Register in packages/cambium-runner/src/correctors/index.ts: import and add to correctors map`);
-  console.log(`  3. Declare in your agent: corrects :${snake}`);
+  console.log(`  1. Uncomment + customize the directives in ${dest}.`);
+  console.log(`  2. Re-run your gens — policy is checked at compile time; violators fail fast.`);
 }
 
 // ── Dispatch ──────────────────────────────────────────────────────────
@@ -558,9 +870,13 @@ describe('${snake} corrector', () => {
 const GENERATORS = {
   agent: generateAgent,
   tool: generateTool,
+  action: generateAction,
   schema: generateSchema,
   system: generateSystem,
   corrector: generateCorrector,
+  policy: generatePolicy,
+  memory_pool: generateMemoryPool,
+  config: generateConfig,
   engine: generateEngine,
 };
 
@@ -572,9 +888,14 @@ export function runGenerate(type, name) {
     console.error(`  cambium new engine Summarizer       # new engine folder under ./cambium/`);
     console.error(`  cambium new agent BtcAnalyst        # new gen (engine sibling, or app/gens/)`);
     console.error(`  cambium new tool price_fetcher      # new tool (engine sibling, or app/tools/)`);
+    console.error(`  cambium new action slack_notify     # new trigger action (RED-212)`);
     console.error(`  cambium new schema TradeSignal      # add a TypeBox export`);
     console.error(`  cambium new system crypto_analyst   # add a system prompt`);
-    console.error(`  cambium new corrector price_check   # add a framework corrector\n`);
+    console.error(`  cambium new corrector regex_check   # add an app corrector (RED-275)`);
+    console.error(`  cambium new policy research_caps    # add a security+budget pack (RED-214)`);
+    console.error(`  cambium new memory_pool support     # add a memory pool (RED-215)`);
+    console.error(`  cambium new config models           # add app/config/models.rb (RED-237)`);
+    console.error(`  cambium new config memory_policy    # add app/config/memory_policy.rb (RED-239)\n`);
     process.exit(2);
   }
 

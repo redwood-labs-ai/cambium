@@ -46,6 +46,8 @@ Reference it from the gen:
 corrects :regex_compiles_and_tests_pass
 ```
 
+Scaffold the boilerplate via `cambium new corrector <Name>` (RED-284) — the generated file lands in `app/correctors/` with the right filename convention and export shape.
+
 The name must match `/^[a-z][a-z0-9_]*$/` (traversal guard). The export name must match the file basename. App correctors override same-named built-ins with a one-time stderr warning per process (mirrors the RED-209 tool-plugin precedence rule).
 
 ## See also

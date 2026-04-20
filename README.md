@@ -119,7 +119,7 @@ output.json + trace.json
 │   │   │                  #   in app-mode, override built-ins by name (RED-275)
 │   │   ├── policies/      # Named policy packs (.policy.rb) for security + budget
 │   │   ├── memory_pools/  # Named memory pools (.pool.rb) for shared strategy+embed
-│   │   └── config/        # Workspace config — models.rb for RED-237 aliases
+│   │   └── config/        # Workspace config — models.rb (RED-237), memory_policy.rb (RED-239)
 │   ├── src/
 │   │   └── contracts.ts   # TypeBox schemas (source of truth)
 │   └── tests/

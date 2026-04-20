@@ -54,7 +54,8 @@ Look at the trace (`runs/<run_id>/trace.json`) and help them tune the agent — 
 ```bash
 cambium run <file.cmb.rb> --method <method> --arg <path>   # compile + execute
 cambium compile <file.cmb.rb> --method <method> [-o <ir.json>] # emit IR JSON without executing (engine-mode build step, RED-244)
-cambium new engine|agent|tool|schema|system|corrector <Name>   # scaffold (deterministic)
+cambium new engine|agent|tool|action|schema|system|corrector|policy|memory_pool <Name>   # scaffold (deterministic)
+cambium new config models|memory_policy                        # scaffold app/config/<form>.rb (RED-237 / RED-239)
 cambium new engine <Name>                                    # new engine folder under ./cambium/ (RED-246)
 cambium new tool --describe "<description>"                 # agentic tool scaffolder (RED-216)
 cambium test                                                 # run test suite
@@ -68,9 +69,11 @@ packages/cambium/
     gens/           # GenModel DSL files (.cmb.rb)
     systems/        # System prompts (.system.md)
     tools/          # App plugin tools — paired .tool.json + .tool.ts (auto-discovered)
+    actions/        # App trigger actions — paired .action.json + .action.ts (RED-212)
     correctors/     # App corrector plugins (.corrector.ts) — auto-discovered, override built-ins (RED-275)
     policies/       # Policy packs (.policy.rb) — bundled security + budget
     memory_pools/   # Named memory pools (.pool.rb) — shared strategy+embed+keyed_by (RED-215)
+    config/         # Workspace config — models.rb (RED-237), memory_policy.rb (RED-239)
   src/
     contracts.ts    # TypeBox schemas (single source of truth)
   tests/            # Vitest tests

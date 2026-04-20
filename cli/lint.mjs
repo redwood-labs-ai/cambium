@@ -157,6 +157,114 @@ function lintPackage(pkgDir) {
     }
   }
 
+  // 6b. Action definitions ↔ implementations (RED-212, added RED-284).
+  // Mirrors the tool block above — .action.json + sibling .action.ts.
+  const actionsDir = join(pkgDir, 'app/actions');
+  if (existsSync(actionsDir)) {
+    const actionFiles = readdirSync(actionsDir).filter(f => f.endsWith('.action.json'));
+    for (const f of actionFiles) {
+      const actionName = f.replace('.action.json', '');
+      pass(`action definition: ${f}`);
+
+      const implPath = join(actionsDir, `${actionName}.action.ts`);
+      if (existsSync(implPath)) pass(`  implementation: ${actionName}.action.ts`);
+      else warn(`  no implementation found for action "${actionName}" (check ${actionsDir}/${actionName}.action.ts)`);
+
+      try {
+        const def = JSON.parse(readFileSync(join(actionsDir, f), 'utf8'));
+        if (!def.name) fail(`  ${f}: missing "name"`);
+        if (!def.inputSchema) fail(`  ${f}: missing "inputSchema"`);
+        if (!def.outputSchema) fail(`  ${f}: missing "outputSchema"`);
+        if (def.permissions) {
+          const perms = def.permissions;
+          if (perms.network) warn(`  ${f}: declares network access`);
+          if (perms.filesystem) warn(`  ${f}: declares filesystem access`);
+          if (perms.exec) warn(`  ${f}: declares exec access — review carefully`);
+          if (perms.pure) pass(`  ${f}: pure (no side effects)`);
+        } else {
+          pass(`  ${f}: no permissions declared (treated as pure)`);
+        }
+      } catch (e) {
+        fail(`  ${f}: invalid JSON — ${e.message}`);
+      }
+    }
+  }
+
+  // 6c. Policy packs (RED-214, lint added RED-284).
+  // Basename regex guard, presence check. Body validation happens at
+  // compile time (PolicyPack.load).
+  const policiesDir = join(pkgDir, 'app/policies');
+  if (existsSync(policiesDir)) {
+    const SYMBOL_REGEX = /^[a-z][a-z0-9_]*$/;
+    const policyFiles = readdirSync(policiesDir).filter(f => f.endsWith('.policy.rb'));
+    for (const f of policyFiles) {
+      const packName = f.replace('.policy.rb', '');
+      if (!SYMBOL_REGEX.test(packName)) {
+        fail(`policy pack name "${packName}" (${f}) must match /^[a-z][a-z0-9_]*$/ (RED-214 path-traversal guard)`);
+      } else {
+        pass(`policy pack: ${f}`);
+      }
+    }
+  }
+
+  // 6d. Memory pools (RED-215, lint added RED-284).
+  const poolsDir = join(pkgDir, 'app/memory_pools');
+  if (existsSync(poolsDir)) {
+    const SYMBOL_REGEX = /^[a-z][a-z0-9_]*$/;
+    const poolFiles = readdirSync(poolsDir).filter(f => f.endsWith('.pool.rb'));
+    for (const f of poolFiles) {
+      const poolName = f.replace('.pool.rb', '');
+      if (!SYMBOL_REGEX.test(poolName)) {
+        fail(`memory pool name "${poolName}" (${f}) must match /^[a-z][a-z0-9_]*$/ (RED-215 path-traversal guard)`);
+      } else {
+        pass(`memory pool: ${f}`);
+      }
+    }
+  }
+
+  // 6e. App correctors (RED-275, lint added RED-284).
+  // Basename regex + export-name match (the loader at runtime requires
+  // the module to export a function matching the basename).
+  const correctorsDir = join(pkgDir, 'app/correctors');
+  if (existsSync(correctorsDir)) {
+    const SYMBOL_REGEX = /^[a-z][a-z0-9_]*$/;
+    const correctorFiles = readdirSync(correctorsDir).filter(f => f.endsWith('.corrector.ts'));
+    for (const f of correctorFiles) {
+      const name = f.replace('.corrector.ts', '');
+      if (!SYMBOL_REGEX.test(name)) {
+        fail(`corrector name "${name}" (${f}) must match /^[a-z][a-z0-9_]*$/ (RED-275)`);
+        continue;
+      }
+      pass(`corrector: ${f}`);
+
+      const body = readFileSync(join(correctorsDir, f), 'utf8');
+      // Loose match — handles `export const <name>` and `export function <name>`.
+      const exportRe = new RegExp(`export\\s+(?:const|function|let)\\s+${name}\\b`);
+      if (exportRe.test(body)) {
+        pass(`  exports "${name}" (matches basename)`);
+      } else {
+        fail(`  ${f}: must export "${name}" matching the basename (RED-275 loader requirement)`);
+      }
+    }
+  }
+
+  // 6f. Config files (RED-237 + RED-239, lint added RED-284).
+  // Whitelist of allowed names; presence check. Syntax validation is
+  // deferred to the Ruby compiler's own load path — lint just catches
+  // typos like `model.rb` or `memory-policy.rb`.
+  const configDir = join(pkgDir, 'app/config');
+  if (existsSync(configDir)) {
+    const allowedConfigs = new Set(['models.rb', 'memory_policy.rb']);
+    const configFiles = readdirSync(configDir).filter(f => f.endsWith('.rb'));
+    for (const f of configFiles) {
+      if (allowedConfigs.has(f)) {
+        pass(`config: ${f}`);
+      } else {
+        warn(`unknown config file: ${f} (expected one of: ${[...allowedConfigs].join(', ')})`);
+      }
+    }
+  }
+
   // 7. Scan all .cmb.rb files (not just exported ones) for common issues
   const gensDir = join(pkgDir, 'app/gens');
   if (existsSync(gensDir)) {

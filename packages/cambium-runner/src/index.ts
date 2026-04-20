@@ -10,3 +10,17 @@
 
 export { runGen } from './runner.js';
 export type { RunGenOptions, RunGenResult } from './runner.js';
+
+// RED-275 app-corrector plugin surface. External apps scaffold
+// `app/correctors/<name>.corrector.ts` and import these types to get
+// the correct export signature.
+export type {
+  CorrectorFn,
+  CorrectorResult,
+  CorrectorIssue,
+} from './correctors/types.js';
+
+// RED-209 tool-plugin surface. External apps scaffold
+// `app/tools/<name>.tool.ts` and import ToolContext for the ctx.fetch
+// SSRF guard + permissions plumbing.
+export type { ToolContext } from './tools/tool-context.js';
