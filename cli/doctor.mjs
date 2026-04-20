@@ -142,6 +142,14 @@ check('.env file', () => {
   return { warn: true, detail: '.env not found. Create one with CAMBIUM_OMLX_BASEURL and CAMBIUM_OMLX_API_KEY (optional).' };
 });
 
+// RED-284: Genfile.toml presence. Catches the "I forgot to `cambium init`"
+// case before a `cambium run` fails later with a more opaque error.
+check('Genfile.toml (workspace or package)', () => {
+  const genfilePath = join(process.cwd(), 'Genfile.toml');
+  if (existsSync(genfilePath)) return { ok: true, detail: genfilePath };
+  return { warn: true, detail: 'No Genfile.toml in cwd. If this is a new project, run `cambium init`.' };
+});
+
 check('CAMBIUM_OMLX_BASEURL reachable', () => {
   const base = process.env.CAMBIUM_OMLX_BASEURL ?? 'http://100.114.183.54:8080';
   const url = `${base.replace(/\/$/, '')}/health`;

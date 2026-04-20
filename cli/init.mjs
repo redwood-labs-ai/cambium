@@ -41,11 +41,22 @@ contracts = ["src/contracts.ts"]
 smoke = "tests/smoke.test.ts"
 `);
 
-  // Directory structure
+  // Directory structure. Created eagerly so `cambium lint` can walk
+  // every convention dir even before any scaffolding happens — each
+  // `cambium new <type>` would create its dir lazily, but leaving them
+  // empty in the starter layout makes the workspace's shape discoverable.
+  // Convention surfaces: gens / systems / tools (RED-209) / actions
+  // (RED-212) / correctors (RED-275) / policies (RED-214) / memory_pools
+  // (RED-215) / config (RED-237 + RED-239).
   const dirs = [
     `${pkg}/app/gens`,
     `${pkg}/app/systems`,
     `${pkg}/app/tools`,
+    `${pkg}/app/actions`,
+    `${pkg}/app/correctors`,
+    `${pkg}/app/policies`,
+    `${pkg}/app/memory_pools`,
+    `${pkg}/app/config`,
     `${pkg}/src`,
     `${pkg}/tests`,
     `${pkg}/examples/fixtures`,
