@@ -60,7 +60,7 @@ What changes between modes is **discovery and packaging**, not semantics. Three 
 | `runsRoot` | `join(cwd(), 'runs')` | Defaults to `<engineDir>/runs` when engine mode is detected; configurable per call |
 | `sessionId` | `CAMBIUM_SESSION_ID` env var | `opts.sessionId` option wins; host wrappers can set per-request |
 
-All five are now on `RunGenOptions` (RED-287). Everything else inside `runner.ts` is mode-agnostic already.
+All five are now on `RunGenOptions` (engine-mode runtime catch-up). Everything else inside `runner.ts` is mode-agnostic already.
 
 ---
 
@@ -305,7 +305,7 @@ The RED-220 ticket lists five follow-up implementation pieces. With the decision
    - Resolved: `cli/generate.mjs` exports `detectScaffoldContext(cwd)`. The walk does sentinel-first detection (stops at first `package.json` boundary), falls through to `Genfile.toml` / `packages/cambium/` for app mode, otherwise `mode: 'none'` and refuses to scaffold (only `cambium new engine` is allowed without context). All six `cambium new <type>` subcommands (`agent`, `tool`, `schema`, `system`, `corrector`, plus the new `engine`) share the same context. In engine mode, files land as siblings of the gen — no `app/<type>/` subdirectories. In app mode, behaviour is identical to before this work. `cambium new corrector` errors in engine mode (correctors are framework-internal). The 20 tests in `packages/cambium/tests/scaffolder_engine_mode.test.ts` cover both modes plus the no-context error and the path-traversal name guard.
    - Open follow-up: the runtime side of sentinel-aware discovery (suppress the Ruby `runtime.rb` walk-up when a sentinel is present in the gen's directory) is RED-245's territory. Until RED-245 lands, an engine-mode gen runs but its runtime path discovery may still walk up to `packages/cambium/app/<type>/` if it happens to exist on the host.
 
-6. **Engine-mode runtime catch-up.** *(Shipped in RED-287.)*
+6. **Engine-mode runtime catch-up.** *(Landed 2026-04-20; see git log for commits and the merged PR.)*
    - Context: RED-246 closed the scaffolder side of engine mode. Correctors, actions, memory pool / policy ingestion on the **runtime** side had drifted as each new primitive landed (RED-212 actions, RED-275 app correctors, RED-237/239 config). Direct `cambium run <engineDir>/foo.cmb.rb` failed with "Schema not found" because `runner.ts` only looked for `Genfile.toml` at cwd; engine folders have no Genfile.
    - Resolved: new `packages/cambium-runner/src/engine-root.ts` exports `resolveEngineDir(sourcePath)`, which walks up from `ir.entry.source` looking for the sentinel. `runner.ts` calls it in three places:
      - `main()` branches on engine mode and loads `<engineDir>/schemas.ts` instead of framework contracts.
@@ -313,8 +313,8 @@ The RED-220 ticket lists five follow-up implementation pieces. With the decision
      - `runGen()` invokes `loadAppCorrectors(engineDir, { engineDir })` so sibling `*.corrector.ts` files are auto-registered. The `loadAppCorrectors` signature now accepts either an app-mode Genfile dir (scans `app/correctors/`) or an engine dir (scans siblings directly).
    - `RunGenOptions` gains three optional fields per the design note: `engineDir` (overrides auto-detection), `runsRoot` (defaults to `<engineDir>/runs` in engine mode), `sessionId` (overrides `CAMBIUM_SESSION_ID`). Host wrappers that bundle a pre-compiled IR can inject any of them.
    - Ruby compile catch-up: `ModelAliases.search_candidates` and `MemoryPolicy.search_candidates` now return `[]` when the sentinel sits next to the gen — an engine folder does not inherit ancestor workspace config. `Cambium::ENGINE_SENTINEL` promoted to module scope. The RED-210 schema validator in `compile.rb` prepends `<genDir>/schemas.ts` so engine gens get real compile-time schema-name validation (typo detection, "did you mean" suggestions) instead of silently skipping.
-   - Not done (deferred to Bundle C, tracked separately): `cambium lint` engine-mode branch; VS Code LSP engine-mode scan; end-to-end integration test with a live LLM; engine-mode hint on `cambium run` vs `cambium compile` usage confusion.
-   - Tests: `engine_mode_e2e.test.ts` compiles + runs a tmpdir engine with sibling tool + corrector end-to-end through the real CLI. `engine-root.test.ts` + `app-loader.test.ts` engine-mode cases + `compile_model_aliases.test.ts` + `compile_schema_validation.test.ts` engine-mode cases cover the unit-level invariants. Full suite: 693 passed after RED-287.
+   - Not done (deferred to a follow-up "engine-mode polish" ticket): `cambium lint` engine-mode branch; VS Code LSP engine-mode scan; end-to-end integration test with a live LLM; engine-mode hint on `cambium run` vs `cambium compile` usage confusion.
+   - Tests: `engine_mode_e2e.test.ts` compiles + runs a tmpdir engine with sibling tool + corrector end-to-end through the real CLI. `engine-root.test.ts` + `app-loader.test.ts` engine-mode cases + `compile_model_aliases.test.ts` + `compile_schema_validation.test.ts` engine-mode cases cover the unit-level invariants. Full suite after catch-up: 693 passed.
 
 The generated `index.ts` template:
 
