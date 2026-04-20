@@ -108,4 +108,30 @@ export const my_corrector = (data, context) => ({
   it('throws if genfileDir is not absolute', async () => {
     await expect(loadAppCorrectors('relative/path')).rejects.toThrow(/must be absolute/);
   });
+
+  // ── RED-287: engine-mode (flat, sibling-of-gen) scan ─────────────────
+
+  it('engine mode: scans the given dir directly for *.corrector.ts siblings', async () => {
+    writeFile('my_corrector.corrector.ts', GOOD_BODY);
+    // Sibling files that must NOT be loaded as correctors.
+    writeFile('summarizer.cmb.rb', '# gen');
+    writeFile('schemas.ts', 'export const Foo = {};');
+    const res = await loadAppCorrectors(tmp, { engineDir: tmp });
+    expect(Object.keys(res.correctors)).toEqual(['my_corrector']);
+    expect(res.loadedFiles).toHaveLength(1);
+  });
+
+  it('engine mode: ignores non-.corrector.ts files in the engine dir', async () => {
+    writeFile('valid.corrector.ts', GOOD_BODY.replace('my_corrector', 'valid'));
+    writeFile('not_a_corrector.ts', 'export const x = 1;');
+    writeFile('random.txt', 'nope');
+    const res = await loadAppCorrectors(tmp, { engineDir: tmp });
+    expect(Object.keys(res.correctors)).toEqual(['valid']);
+  });
+
+  it('engine mode: returns empty when the engine dir has no correctors', async () => {
+    writeFile('summarizer.cmb.rb', '# gen');
+    const res = await loadAppCorrectors(tmp, { engineDir: tmp });
+    expect(res.correctors).toEqual({});
+  });
 });

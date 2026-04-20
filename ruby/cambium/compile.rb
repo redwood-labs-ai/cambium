@@ -81,9 +81,16 @@ defs = klass._cambium_defaults
 # BEFORE the runner sees the IR. A typo here used to surface as an obscure
 # "Schema not found in contracts.ts for id: ..." at runtime startup; now
 # it fails at compile time with a list of valid schema names.
+#
+# RED-287: engine-mode gens source schemas from `<engineDir>/schemas.ts`
+# (a sibling of the gen) rather than `<pkg>/src/contracts.ts`. The
+# engine candidate is prepended so a single walk covers both shapes.
 if (schema_name = defs[:returnSchema])
-  pkg_dir = File.dirname(File.dirname(File.expand_path(file)))  # up from app/gens/
+  gen_dir = File.dirname(File.expand_path(file))
+  pkg_dir = File.dirname(gen_dir)  # up from app/gens/
+  engine_sibling = File.join(gen_dir, 'schemas.ts')
   contracts_candidates = [
+    engine_sibling,
     File.join(pkg_dir, 'src', 'contracts.ts'),
     File.join('packages', 'cambium', 'src', 'contracts.ts'),
   ].uniq.select { |p| File.exist?(p) }

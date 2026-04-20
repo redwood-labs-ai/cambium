@@ -1,4 +1,4 @@
-import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import process from 'node:process';
@@ -49,6 +49,7 @@ import { loadAppCorrectors } from './correctors/app-loader.js';
 import { registerAppCorrectors } from './correctors/index.js';
 import { getGroundingDocument } from './context.js';
 import { resolveAppRoot } from './app-root.js';
+import { resolveEngineDir } from './engine-root.js';
 
 type IR = any;
 
@@ -450,6 +451,25 @@ export interface RunGenOptions {
   mock?: boolean;
   /** Values for `keyed_by` slots on memory pools. Each entry is `name=value`. */
   memoryKeys?: string[];
+  /** RED-287: Explicit engine-folder override. When set, the tool /
+   *  action / corrector discovery scans this dir (treating its
+   *  contents as siblings of the gen) in addition to the app-mode
+   *  paths. When omitted, engine mode is auto-detected by walking up
+   *  from `ir.entry.source` looking for `cambium.engine.json`.
+   *
+   *  Pass this explicitly when the IR was compiled elsewhere but the
+   *  host knows which engine folder the gen came from — e.g. a host
+   *  bundling a pre-compiled IR without its source tree. */
+  engineDir?: string;
+  /** RED-287: Root for run artifacts (memory sqlite buckets live at
+   *  `<runsRoot>/memory/<scope>/<key>/<name>.sqlite`). Defaults to
+   *  `<engineDir>/runs` when engine mode is detected, else
+   *  `<process.cwd()>/runs`. Host wrappers that centralize runs
+   *  across many engines override this. */
+  runsRoot?: string;
+  /** RED-287: Explicit session id for memory `:session` scope. Wins
+   *  over `CAMBIUM_SESSION_ID`. Defaults to auto-generated. */
+  sessionId?: string;
 }
 
 export interface RunGenResult {
@@ -476,7 +496,15 @@ class BudgetExceededError extends Error {
 }
 
 export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
-  const { ir, schemas: contractsMod, mock: mockFlag = false, memoryKeys = [] } = opts;
+  const {
+    ir,
+    schemas: contractsMod,
+    mock: mockFlag = false,
+    memoryKeys = [],
+    engineDir: engineDirOpt,
+    runsRoot: runsRootOpt,
+    sessionId: sessionIdOpt,
+  } = opts;
 
   // Plumb opts.mock through to the deterministic-mock branch in
   // generateText. That branch is gated on CAMBIUM_ALLOW_MOCK=1 — the CLI
@@ -517,27 +545,67 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   const validate = ajv.getSchema(schema.$id);
   if (!validate) throw new Error(`AJV schema not registered: ${schema.$id}`);
 
-  // ── Resolve app-package root (RED-286) ──────────────────────────────
-  // Layout-aware lookup: [workspace] Genfile → <root>/packages/cambium;
-  // [package] Genfile → <root>. Falls back to the legacy
-  // <cwd>/packages/cambium when no Genfile is found (e.g. ad-hoc test
-  // spawns), so pre-RED-286 call sites keep working.
+  // ── Resolve tool/action discovery roots (RED-286, RED-287) ──────────
+  // Engine mode (RED-287): the gen lives inside a folder marked by
+  // `cambium.engine.json`. Tools, actions, and correctors live as
+  // **siblings** of the gen file, not under an app/<type>/ convention.
+  // Detect and scan the engine dir directly.
+  //
+  // App mode (RED-286): layout-aware lookup of the app-package root.
+  // [workspace] Genfile → <root>/packages/cambium; [package] Genfile
+  // → <root>. Falls back to the legacy <cwd>/packages/cambium when no
+  // Genfile is found.
+  //
+  // Both roots can be present — the runner scans the engine dir when
+  // the primary is engine-sourced AND still scans the app dir as a
+  // secondary, so an engine invoked from inside a workspace still has
+  // access to workspace-declared tools (e.g. shared wire protocols
+  // tooling). Engine siblings win on name collision (loadFromDir's
+  // last-write semantics).
+  //
+  // The explicit `opts.engineDir` wins over auto-detection — host
+  // wrappers that bundle a pre-compiled IR can inject their engine
+  // folder directly (the IR's `entry.source` still points at the
+  // original compile location, which may not exist at host runtime).
+  const engineDir = engineDirOpt ?? resolveEngineDir(ir.entry?.source);
   const { appPkgRoot } = resolveAppRoot(process.cwd());
 
   // ── Load tool registry ──────────────────────────────────────────────
   const toolRegistry = new ToolRegistry();
-  // Load framework-builtin tools first, then app-supplied. loadFromDir
-  // overwrites on name collision, so app tools win (RED-221 override hook).
+  // Load framework-builtin tools first, then app-supplied, then engine
+  // siblings. loadFromDir overwrites on name collision, so:
+  //   engine-sibling > app plugin > framework builtin
+  // (RED-221 override hook; RED-287 engine extension).
   await toolRegistry.loadFromDir(join(RUNNER_DIR, 'builtin-tools'));
   await toolRegistry.loadFromDir(join(appPkgRoot, 'app/tools'));
+  if (engineDir) {
+    await toolRegistry.loadFromDir(engineDir);
+  }
 
   // ── Load action registry (RED-212) ─────────────────────────────────
-  // Same load order as tools: framework-builtin first, app second.
-  // Actions are invoked only by triggers (never by `uses :name` on a
-  // gen), so there's no compile-time allowlist to validate against.
+  // Same load order as tools: framework-builtin first, app second,
+  // engine-sibling third. Actions are invoked only by triggers (never
+  // by `uses :name` on a gen), so there's no compile-time allowlist
+  // to validate against.
   const actionRegistry = new ActionRegistry();
   await actionRegistry.loadFromDir(join(RUNNER_DIR, 'builtin-actions'));
   await actionRegistry.loadFromDir(join(appPkgRoot, 'app/actions'));
+  if (engineDir) {
+    await actionRegistry.loadFromDir(engineDir);
+  }
+
+  // ── Load app / engine correctors (RED-275, RED-287) ─────────────────
+  // App-mode correctors are loaded once in CLI main() via the Genfile
+  // path. Engine-mode correctors live as siblings of the gen and need
+  // to be loaded here in runGen — CLI main() and library hosts both
+  // flow through this path. Register into the mutable module-global
+  // registry; app plugins the CLI loaded earlier are left in place.
+  if (engineDir) {
+    const engineCorr = await loadAppCorrectors(engineDir, { engineDir });
+    if (Object.keys(engineCorr.correctors).length > 0) {
+      registerAppCorrectors(engineCorr.correctors);
+    }
+  }
 
   const toolsAllowed: string[] = ir.policies?.tools_allowed ?? [];
   // Validate that all declared tools exist in the registry
@@ -612,12 +680,21 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   const memoryDecls = isRetroMode ? [] : (ir.policies?.memory ?? []);
   if (memoryDecls.length > 0) {
     const keys = parseMemoryKeys(memoryKeys);
-    const sessionId = resolveSessionId(process.env);
+    // RED-287: explicit opts.sessionId wins over CAMBIUM_SESSION_ID.
+    // Host wrappers set this explicitly so per-tenant runs don't leak
+    // into each other via an inherited env var.
+    const sessionId = sessionIdOpt ?? resolveSessionId(process.env);
+    // RED-287: runsRoot defaults to <engineDir>/runs for engine mode,
+    // else <cwd>/runs. Host wrappers can centralize across engines by
+    // passing opts.runsRoot explicitly.
+    const runsRoot = runsRootOpt ?? (engineDir
+      ? join(engineDir, 'runs')
+      : join(process.cwd(), 'runs'));
     const memCtx = {
       input: getGroundingDocument(ir),
       sessionId,
       keys,
-      runsRoot: join(process.cwd(), 'runs'),
+      runsRoot,
     };
     memoryPlans = planMemory(memoryDecls, memCtx);
     const { block, trace: readTrace, backends } = await readMemoryForRun(memoryPlans, memCtx);
@@ -1211,12 +1288,28 @@ async function main() {
   const ir: IR = JSON.parse(irText);
 
   let contractsMod: Record<string, any>;
+  // RED-287: engine-mode schemas live as a sibling of the gen file
+  // (`<engineDir>/schemas.ts`) rather than under an app/ convention.
+  // Detect by walking up from `ir.entry.source` looking for the
+  // `cambium.engine.json` sentinel. When engine mode is detected it
+  // wins over the app-mode Genfile lookup — an IR compiled from an
+  // engine gen always sources its own schemas, even if cwd happens
+  // to contain a Genfile.
+  const engineDir = resolveEngineDir(ir.entry?.source);
   const genfile = resolveGenfileContracts(process.cwd());
-  if (genfile) {
+  if (engineDir) {
+    const schemasFile = join(engineDir, 'schemas.ts');
+    if (!existsSync(schemasFile)) {
+      throw new Error(
+        `Engine schemas file not found: ${schemasFile}. ` +
+        `Engine gens source their schemas from '<engineDir>/schemas.ts' (RED-220, RED-287).`,
+      );
+    }
+    contractsMod = await import(pathToFileURL(schemasFile).href);
+  } else if (genfile) {
     contractsMod = await loadContractsFromGenfile(genfile);
     // RED-275: app-mode correctors discovered under <genfileDir>/app/correctors/.
-    // Engine-mode callers using runGen directly skip this path and can
-    // call registerAppCorrectors themselves if they need app-level ones.
+    // Engine-mode correctors are discovered via runGen (RED-287 phase 3).
     const app = await loadAppCorrectors(genfile.genfileDir);
     if (Object.keys(app.correctors).length > 0) {
       registerAppCorrectors(app.correctors);
@@ -1232,7 +1325,11 @@ async function main() {
 
   const result = await runGen({ ir, schemas: contractsMod, mock, memoryKeys });
 
-  const runDir = join(process.cwd(), 'runs', result.runId);
+  // RED-287: engine-mode run artifacts go under <engineDir>/runs/ so
+  // the engine folder stays self-contained. App mode continues to
+  // write under <cwd>/runs/.
+  const runsBase = engineDir ? join(engineDir, 'runs') : join(process.cwd(), 'runs');
+  const runDir = join(runsBase, result.runId);
   mkdirSync(runDir, { recursive: true });
   writeFileSync(join(runDir, 'ir.json'), JSON.stringify(result.ir, null, 2));
   writeFileSync(traceOut ?? join(runDir, 'trace.json'), JSON.stringify(result.trace, null, 2));

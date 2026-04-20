@@ -5,6 +5,13 @@ require 'json'
 module Cambium
   class CompileError < StandardError; end
 
+  # Engine-mode sentinel (RED-220 / RED-246). A directory containing
+  # this file is an engine folder — discovery walks stop here and do
+  # not climb back into a host project. Used by the compiler's
+  # discovery helpers and by ModelAliases/MemoryPolicy (RED-287) to
+  # refuse accidental pickup of an ancestor workspace's config.
+  ENGINE_SENTINEL = 'cambium.engine.json'.freeze
+
   # Flatten the {slots:, sources:, packs:} accumulator (built by
   # _cambium_add_slots) into the IR-facing shape: the slot hash with
   # an optional `_packs` metadata field naming any policy packs that
@@ -312,6 +319,14 @@ module Cambium
     end
 
     def self.search_candidates(source_file)
+      # RED-287: engine-mode gens do not pull config from an ancestor
+      # workspace. A cambium.engine.json sentinel next to the gen
+      # suppresses the walk-up; the engine folder owns its own model
+      # choices (and doesn't currently ship a models.rb of its own —
+      # aliases are a workspace-level concept).
+      if source_file && File.exist?(File.join(File.dirname(File.expand_path(source_file)), Cambium::ENGINE_SENTINEL))
+        return []
+      end
       candidates = []
       if source_file
         pkg_dir = File.dirname(File.dirname(File.expand_path(source_file)))
@@ -535,6 +550,12 @@ module Cambium
     end
 
     def self.search_candidates(source_file)
+      # RED-287: same engine-suppression stance as ModelAliases — an
+      # engine folder owns its own memory discipline and doesn't pull
+      # policy from an ancestor workspace.
+      if source_file && File.exist?(File.join(File.dirname(File.expand_path(source_file)), Cambium::ENGINE_SENTINEL))
+        return []
+      end
       candidates = []
       if source_file
         pkg_dir = File.dirname(File.dirname(File.expand_path(source_file)))
@@ -1066,10 +1087,10 @@ module Cambium
         end
       end
 
-      # Sentinel filename (RED-220 / RED-246). When present in the gen's
-      # directory it marks the gen as living inside an engine folder —
-      # discovery must stop there and not walk back up into a host project.
-      ENGINE_SENTINEL = 'cambium.engine.json'.freeze
+      # Back-compat alias — the canonical constant is Cambium::ENGINE_SENTINEL.
+      # Promoted to module scope in RED-287 so ModelAliases/MemoryPolicy
+      # can reference it without reaching into GenModel's singleton.
+      ENGINE_SENTINEL = Cambium::ENGINE_SENTINEL
 
       # RED-245: shared discovery walk used by every search-dir method.
       # Three layers, in priority order:
