@@ -279,8 +279,12 @@ ir = {
   },
   'reads_trace_of' => defs[:reads_trace_of],
   'returnSchemaId' => defs[:returnSchema],
+  # RED-276: use the `grounded_in :name` source as the context key when
+  # the gen declares grounding, else fall back to 'document' for
+  # back-compat with analyst-style gens. Keeps the grounding validator's
+  # `context[source]` lookup self-consistent with what the gen declared.
   'context' => {
-    'document' => arg
+    (defs[:grounding]&.fetch('source', nil) || 'document') => arg
   },
   'enrichments' => (defs[:enrichments] || []),
   'signals' => (defs[:signals] || []),

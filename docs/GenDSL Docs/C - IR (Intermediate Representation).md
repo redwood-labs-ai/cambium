@@ -36,7 +36,7 @@ Define the auditable, replayable plan that the DSL compiles to.
 | `policies.memory_pools{}` | pool files | only pools actually referenced by this gen are inlined |
 | `policies.memory_write_via` | `write_memory_via :Agent` | class name; runner resolves via snake_case lookup |
 | `enrichments`, `signals`, `triggers` | `enrich`, `extract`, `on` | sub-agent context + signal → deterministic action |
-| `context.document` | runtime `--arg` | the input text passed to the gen method |
+| `context[<source>]` | runtime `--arg` | the input text passed to the gen method, keyed by the grounding source name (e.g. `"linear_issue"` when the gen declares `grounded_in :linear_issue`); falls back to the `"document"` key when no `grounded_in` is declared. Read via `getGroundingDocument(ir)` in TS code — don't hardcode `ir.context.document` (RED-276). |
 
 ## See also
 - [[C - Runner (TS runtime)]]

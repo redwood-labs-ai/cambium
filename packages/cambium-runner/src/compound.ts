@@ -1,4 +1,5 @@
 import type { GenerateTextFn, ExtractJsonFn, TokenUsage } from './step-handlers.js';
+import { getGroundingDocument } from './context.js';
 
 // ── Review ────────────────────────────────────────────────────────────
 
@@ -26,7 +27,7 @@ export async function runReview(
   generateText: GenerateTextFn,
   extractJson: ExtractJsonFn,
 ): Promise<ReviewResult> {
-  const doc = ir.context?.document;
+  const doc = getGroundingDocument(ir);
 
   const system = [
     'You are a data quality reviewer.',

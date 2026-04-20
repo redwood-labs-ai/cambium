@@ -47,6 +47,7 @@ import {
 import { resolveGenfileContracts, loadContractsFromGenfile } from './genfile.js';
 import { loadAppCorrectors } from './correctors/app-loader.js';
 import { registerAppCorrectors } from './correctors/index.js';
+import { getGroundingDocument } from './context.js';
 
 type IR = any;
 
@@ -605,7 +606,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     const keys = parseMemoryKeys(memoryKeys);
     const sessionId = resolveSessionId(process.env);
     const memCtx = {
-      input: ir.context?.document ?? '',
+      input: getGroundingDocument(ir),
       sessionId,
       keys,
       runsRoot: join(process.cwd(), 'runs'),
@@ -913,7 +914,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
 
     // 4. Correctors (deterministic post-validation transforms)
     if (correctorNames.length > 0) {
-      const correctResult = handleCorrect(parsed, correctorNames, { document: ir.context?.document });
+      const correctResult = handleCorrect(parsed, correctorNames, { document: getGroundingDocument(ir) });
       trace.steps.push(correctResult);
 
       if (correctResult.meta?.corrected) {
@@ -970,7 +971,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     // 5. Grounding: citation enforcement (auto-registered when grounded_in is declared)
     const grounding = ir.policies?.grounding;
     if (grounding?.require_citations) {
-      const citResult = handleCorrect(parsed, ['citations'], { document: ir.context?.document });
+      const citResult = handleCorrect(parsed, ['citations'], { document: getGroundingDocument(ir) });
       const citationResult = citResult.meta?.citationResult;
 
       trace.steps.push({
@@ -1048,7 +1049,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     if (finalOk && !hasMemoryAgent) {
       try {
         const writeTrace = await commitMemoryWrites(
-          memoryPlans, memoryBackends, ir.context?.document ?? '', finalParsed,
+          memoryPlans, memoryBackends, getGroundingDocument(ir), finalParsed,
         );
         for (const t of writeTrace) trace.steps.push(t);
       } catch (e: any) {
@@ -1078,7 +1079,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
           }],
         });
       } else {
-        const ctx = buildRetroContext(ir.context?.document ?? '', finalParsed, trace);
+        const ctx = buildRetroContext(getGroundingDocument(ir), finalParsed, trace);
         const result = invokeRetroAgent({ agentFile, ctx, mockMode: Boolean(mockFlag) });
         if (!result.ok) {
           trace.steps.push({

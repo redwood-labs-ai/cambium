@@ -28,6 +28,8 @@ class Analyst < GenModel
 end
 ```
 
+The symbol passed to `grounded_in` is the canonical name of the source. The compiler uses it as the key under `ir.context` — so a gen with `grounded_in :linear_issue` emits `"context": { "linear_issue": "..." }` rather than the default `"document"` key (RED-276). All runtime code paths (prompt assembly, citation verification, review, memory read) resolve the source via `ir.policies.grounding.source`, falling back to `context.document` when no grounding is declared. A gen without `grounded_in` keeps the default `document` shape for back-compat.
+
 ## What happens at runtime
 1. System prompt includes GROUNDING RULES telling the model to produce verbatim quotes
 2. Model generates output with citations
@@ -40,11 +42,16 @@ end
 ```json
 "policies": {
   "grounding": {
-    "source": "document",
+    "source": "linear_issue",
     "require_citations": true
   }
+},
+"context": {
+  "linear_issue": "..."
 }
 ```
+
+Note the `context` key matches the grounding `source` — the two stay aligned by the compiler. Gens without `grounded_in` emit `"context": { "document": "..." }`.
 
 ## Failure modes
 - Fabricated quote: model invents text not in the document → error, triggers repair

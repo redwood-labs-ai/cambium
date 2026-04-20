@@ -8,6 +8,7 @@ import { parseInlineToolCalls, stripInlineToolCalls } from './inline-tool-calls.
 import type { SecurityPolicy } from './tools/permissions.js';
 import type { Budget } from './budget.js';
 import { buildToolContext } from './tools/tool-context.js';
+import { getGroundingDocument } from './context.js';
 
 export type StepResult = {
   type: string;
@@ -41,7 +42,7 @@ export async function handleGenerate(
   generateText: GenerateTextFn,
   extractJson: ExtractJsonFn,
 ): Promise<{ raw: string; parsed: any; result: StepResult }> {
-  const doc = ir.context?.document;
+  const doc = getGroundingDocument(ir);
   const constraints = ir.policies?.constraints ?? {};
   const schemaKeys = Object.keys(schema.properties ?? {});
 
@@ -473,7 +474,7 @@ export async function handleAgenticGenerate(
   maxToolCalls: number,
   env: ToolCallEnv = {},
 ): Promise<{ raw: string; parsed: any; result: StepResult; traceSteps: StepResult[] }> {
-  const doc = ir.context?.document;
+  const doc = getGroundingDocument(ir);
   const constraints = ir.policies?.constraints ?? {};
   const grounding = ir.policies?.grounding;
   const schemaKeys = Object.keys(schema.properties ?? {});
