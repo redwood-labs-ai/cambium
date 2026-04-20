@@ -1,6 +1,6 @@
 ---
 name: cambium-docs
-description: Docs-drift reviewer for any Cambium change that touches the DSL surface, IR shape, trace step types, or knowledge-graph docs. **Use this agent proactively** whenever a change modifies `ruby/cambium/runtime.rb` (new DSL methods), `ruby/cambium/compile.rb` (new IR fields), `packages/cambium-runner/src/step-handlers.ts` / `packages/cambium-runner/src/runner.ts` / `packages/cambium-runner/src/triggers.ts` (new trace step types), `CLAUDE.md` (new concepts/invariants), `README.md`, or adds/renames files under `docs/GenDSL Docs/`. Catches the drifts that bite in practice: a new DSL method with no doc, a new IR field missing from `C - IR`, a new trace type missing from `C - Trace`, stale cross-references after a doc rename, README project-structure tree going out of sync with disk.
+description: Docs-drift reviewer for any Cambium change that touches the DSL surface, IR shape, trace step types, knowledge-graph docs, or meta-tooling surfaces (CLI scaffolders + lint + VS Code extension — they need parity with the DSL). **Use this agent proactively** whenever a change modifies `ruby/cambium/runtime.rb` (new DSL methods), `ruby/cambium/compile.rb` (new IR fields), `packages/cambium-runner/src/step-handlers.ts` / `packages/cambium-runner/src/runner.ts` / `packages/cambium-runner/src/triggers.ts` (new trace step types), `CLAUDE.md` (new concepts/invariants), `README.md`, adds/renames files under `docs/GenDSL Docs/`, OR modifies `cli/generate.mjs` / `cli/lint.mjs` / `cli/init.mjs` / `vscode/cambium-syntax/**` (editor-assist parity with the DSL). Catches the drifts that bite in practice: a new DSL method with no doc, a new IR field missing from `C - IR`, a new trace type missing from `C - Trace`, stale cross-references after a doc rename, README project-structure tree going out of sync with disk, a new DSL primitive that doesn't show up in the scaffolder / LSP hover docs / grammar.
 tools: Read, Grep, Glob, Bash
 model: sonnet
 ---
@@ -42,6 +42,25 @@ Cambium ships a tight knowledge graph: a primitive doc per DSL method, `C - *.md
 10. **A renamed or removed doc MUST be matched by a Docs Map update in the same PR.** If the git diff shows a file under `docs/GenDSL Docs/` added, renamed, or removed, the Docs Map in the same diff must reflect it. Separate PR is NOT acceptable — the index drifts in the gap.
 
 11. **A new primitive doc MUST have at least one cross-reference in.** A `P - *.md` that no other doc links to (via `[[P - name]]`) is orphaned. At minimum it should be linked from the Docs Map, and ideally from a related doc. Check via: grep for `[[<doc_name>]]` across the docs tree; count should be > 0.
+
+### Meta-tooling parity (CLI + VS Code)
+
+The CLI (`cli/`) and VS Code extension (`vscode/cambium-syntax/`) are documentation-adjacent surfaces: they surface the DSL to authors in the editor and at the command line. When a PR adds a new DSL primitive or a new `app/<type>/` convention, these surfaces need to learn about it or they go silently stale. RED-284 and RED-285 were the corrective audits after this kind of drift accumulated.
+
+12. **A new DSL primitive in `runtime.rb` MUST appear in the VS Code extension's `PRIMITIVE_DOCS` hover map AND the grammar.** `vscode/cambium-syntax/src/server.js` has a `PRIMITIVE_DOCS = { ... }` object — every user-facing primitive (anything discoverable on a GenModel) belongs there with a `{ detail, doc }` entry. `vscode/cambium-syntax/syntaxes/cambium.tmLanguage.json` has `dsl-primitives` patterns listing primitive names by regex — new primitives belong in the relevant group (core / policy / memory / etc.). A primitive missing from either is invisible at the editor level.
+
+13. **A new keyword argument (`foo:` in the DSL) MUST appear in the grammar's kwarg regex.** The `variable.parameter.cambium` pattern in `cambium.tmLanguage.json` lists every recognized kwarg. A new kwarg that ships without a grammar update won't highlight — small visual regression, easy to miss. Check by listing keyword args used in the PR's DSL additions against the regex.
+
+14. **A new `app/<type>/` convention directory MUST be recognized by every tooling surface:**
+    - `cli/generate.mjs` GENERATORS map — for `cambium new <type>`.
+    - `cli/lint.mjs` lintPackage — for `cambium lint` validation.
+    - `cli/init.mjs` dirs list — for `cambium init` eager directory creation.
+    - `vscode/cambium-syntax/src/server.js` scanWorkspace — for editor hover / completion on the new directory's contents.
+    - `CLAUDE.md` and `README.md` project-structure trees — for the tree-to-disk invariant (#8).
+
+    A new `app/<type>/` directory without updates to each is the RED-284/285 class of drift.
+
+15. **A new trace step type MUST appear in `C - Trace (observability).md` AND (if it's emitted by a repair-driven path in `runner.ts`) must go through `pushRepairStep`.** Repair sites without `pushRepairStep` leak token spend past the budget gate — see the CLAUDE.md invariant under "Pipeline structure." Flag any new `trace.steps.push(repair.result)` that bypasses the helper.
 
 ## Calibration — things you do NOT flag
 
@@ -99,10 +118,21 @@ When invoked:
 
 Where to look when checking invariants:
 
+### Documentation
 - `docs/GenDSL Docs/Generation Engineering DSL — Docs Map (Knowledge Graph).md` — the index. Every primitive doc should be linked here.
 - `docs/GenDSL Docs/C - IR (Intermediate Representation).md` — top-level IR fields table; IR additions must land here.
 - `docs/GenDSL Docs/C - Trace (observability).md` — step types table; new step types must land here.
+- `CLAUDE.md` — "Key concepts" list; primitive summaries live there. Also "Non-obvious invariants" clustered by area.
+- `README.md` — "Key features" + project-structure tree; user-facing surface.
+
+### DSL source (inventory sources for code ↔ docs alignment)
 - `ruby/cambium/runtime.rb` — DSL methods on `GenModel` class-level (e.g. `model`, `memory`, `write_memory_via`).
 - `ruby/cambium/compile.rb` — IR emission shape (the `ir = { ... }` block toward the bottom).
-- `CLAUDE.md` — "Key concepts" list; primitive summaries live there.
-- `README.md` — "Key features" + project-structure tree; user-facing surface.
+
+### Meta-tooling (CLI + VS Code — parity surfaces)
+- `cli/generate.mjs` — `GENERATORS` map + `detectScaffoldContext`. A new `cambium new <type>` entry lives here. Each generator writes to a `app/<type>/` convention directory.
+- `cli/lint.mjs` — `lintPackage` walks `app/tools/`, `app/actions/`, `app/policies/`, `app/memory_pools/`, `app/correctors/`, `app/config/` + `.cmb.rb` gens. New convention dir → new lint block.
+- `cli/init.mjs` — `dirs` list for eager convention-dir creation. Keep in sync with `generate.mjs` GENERATORS.
+- `vscode/cambium-syntax/src/server.js` — `PRIMITIVE_DOCS` (hover), `scanWorkspace` (workspace state), `onCompletion` (completions). New DSL primitive → all three.
+- `vscode/cambium-syntax/syntaxes/cambium.tmLanguage.json` — grammar. `dsl-primitives` patterns list primitive names; `variable.parameter.cambium` regex lists kwargs.
+- `vscode/cambium-syntax/snippets/cambium.json` — snippet prefixes. New primitive → usually a new snippet too.
