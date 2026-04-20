@@ -259,4 +259,52 @@ end
     }
     expect(stderr).toMatch(/must map to a String literal/)
   })
+
+  // ── RED-287: engine-mode suppression ────────────────────────────────
+  //
+  // A gen inside an engine folder (cambium.engine.json sibling) must
+  // NOT pick up an ancestor workspace's models.rb. Engines own their
+  // own model choices — and currently don't support workspace-level
+  // aliases at all, so referencing :default from an engine is a compile
+  // error, not a silent pickup from the surrounding cambium repo.
+
+  it('engine mode: model :alias fails — aliases are not loaded inside an engine folder', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cambium-red287-engine-alias-'))
+    writeFileSync(join(dir, 'cambium.engine.json'), '{}')
+    const gen = join(dir, 'inner.cmb.rb')
+    writeFileSync(gen, `
+class EngineAliasGen < GenModel
+  model :default
+  system "inline"
+  returns AnalysisReport
+  def analyze(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`.trim())
+    const stderr = compileExpectError(gen, 'analyze', FIXTURE_ARG)
+    expect(stderr).toMatch(/unknown model alias :default/)
+  })
+
+  it('engine mode: literal model strings compile unchanged', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cambium-red287-engine-literal-'))
+    writeFileSync(join(dir, 'cambium.engine.json'), '{}')
+    const gen = join(dir, 'inner.cmb.rb')
+    writeFileSync(gen, `
+class EngineLiteralGen < GenModel
+  model "omlx:some-model"
+  system "inline"
+  returns AnalysisReport
+  def analyze(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`.trim())
+    const ir = compile(gen, 'analyze', FIXTURE_ARG)
+    expect(ir.model.id).toBe('omlx:some-model')
+  })
 })
