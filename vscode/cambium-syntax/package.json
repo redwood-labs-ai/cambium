@@ -2,7 +2,7 @@
   "name": "cambium-syntax",
   "displayName": "Cambium DSL",
   "description": "Syntax highlighting, hover docs, go-to-definition, and completions for Cambium (.cmb.rb)",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "publisher": "cambium",
   "engines": {
     "vscode": "^1.75.0"
