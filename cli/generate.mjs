@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { writeFileSync, appendFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import process from 'node:process';
 import { detectWorkspaceShape } from './workspace-shape.mjs';
@@ -468,16 +468,43 @@ function generateSchema(name, ctx) {
   const pascal = pascalCase(name);
 
   if (ctx.mode === 'engine') {
-    console.log(`\nGenerating schema: ${pascal}\n`);
-    console.log(`  Add the following to ${ctx.engineDir}/schemas.ts:\n`);
-    console.log(`export const ${pascal} = Type.Object(
+    // RED-289: engine-mode owns `schemas.ts` as an editable sibling of
+    // the gen, so the scaffolder can append the export directly
+    // instead of just printing instructions. Idempotent — skips with a
+    // "exists" note if the export is already in the file.
+    const schemasPath = join(ctx.engineDir, 'schemas.ts');
+    const exportBlock = `
+export const ${pascal} = Type.Object(
   {
     // TODO: define fields
     summary: Type.String(),
   },
-  { additionalProperties: false, $id: '${pascal}' }
-)\n`);
-    console.log(`Then use in your gen: returns ${pascal}`);
+  { additionalProperties: false, $id: '${pascal}' },
+);
+`;
+
+    console.log(`\nGenerating schema: ${pascal}\n`);
+
+    if (!existsSync(schemasPath)) {
+      // No schemas.ts yet — scaffold a fresh file with the TypeBox
+      // import and the new export. Every subsequent `cambium new schema`
+      // will append to this file. Route through writeFile (not bare
+      // writeFileSync) so the overwrite-protection invariant holds on
+      // every code path — security review flagged a TOCTOU gap here.
+      writeFile(schemasPath, `import { Type } from '@sinclair/typebox';\n${exportBlock}`);
+    } else {
+      const existing = readFileSync(schemasPath, 'utf8');
+      const alreadyPresent = new RegExp(`^\\s*export\\s+const\\s+${pascal}\\b`, 'm').test(existing);
+      if (alreadyPresent) {
+        console.log(`  exists: ${pascal} is already exported from ${schemasPath} (skipped)`);
+      } else {
+        const needsNewline = existing.length > 0 && !existing.endsWith('\n');
+        appendFileSync(schemasPath, `${needsNewline ? '\n' : ''}${exportBlock}`);
+        console.log(`  appended: ${pascal} → ${schemasPath}`);
+      }
+    }
+
+    console.log(`\nNext step: use in your gen → returns ${pascal}`);
     return;
   }
 

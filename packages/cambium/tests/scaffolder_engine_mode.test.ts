@@ -231,6 +231,48 @@ describe('cambium new <type> — engine mode places siblings of the gen', () => 
     expect(body).toContain("from '@cambium/runner'");
     expect(body).toContain('export const price_check: CorrectorFn');
   });
+
+  // ── RED-289: cambium new schema in engine mode appends to schemas.ts ──
+
+  it('cambium new schema — creates schemas.ts with typebox import when missing', () => {
+    const result = runCli(['new', 'schema', 'FirstReport'], scratch);
+    expect(result.status).toBe(0);
+    const schemasPath = join(scratch, 'schemas.ts');
+    expect(existsSync(schemasPath)).toBe(true);
+    const body = readFileSync(schemasPath, 'utf8');
+    expect(body).toContain("import { Type } from '@sinclair/typebox'");
+    expect(body).toMatch(/export const FirstReport = Type\.Object\(/);
+    expect(body).toMatch(/\$id: 'FirstReport'/);
+  });
+
+  it('cambium new schema — appends a new export to an existing schemas.ts', () => {
+    // Seed the engine with one export; append a second.
+    writeFileSync(
+      join(scratch, 'schemas.ts'),
+      `import { Type } from '@sinclair/typebox';\n\nexport const Alpha = Type.Object({}, { $id: 'Alpha' });\n`,
+    );
+    const result = runCli(['new', 'schema', 'Beta'], scratch);
+    expect(result.status).toBe(0);
+    const body = readFileSync(join(scratch, 'schemas.ts'), 'utf8');
+    // Both exports present; typebox import not duplicated.
+    expect(body).toMatch(/export const Alpha\b/);
+    expect(body).toMatch(/export const Beta\b/);
+    expect(body.match(/@sinclair\/typebox/g)?.length ?? 0).toBe(1);
+  });
+
+  it('cambium new schema — idempotent when the export already exists', () => {
+    writeFileSync(
+      join(scratch, 'schemas.ts'),
+      `import { Type } from '@sinclair/typebox';\n\nexport const Existing = Type.Object({}, { $id: 'Existing' });\n`,
+    );
+    const before = readFileSync(join(scratch, 'schemas.ts'), 'utf8');
+    const result = runCli(['new', 'schema', 'Existing'], scratch);
+    expect(result.status).toBe(0);
+    const after = readFileSync(join(scratch, 'schemas.ts'), 'utf8');
+    expect(after).toBe(before); // no change — already present
+    const combined = (result.stderr ?? '') + (result.stdout ?? '');
+    expect(combined).toMatch(/already exported/);
+  });
 });
 
 describe('cambium new <type> — no context errors out', () => {

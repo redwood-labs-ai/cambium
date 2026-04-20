@@ -241,4 +241,135 @@ smoke = "tests/smoke.test.ts"
     expect(status).toBe(1);
     expect(output).toMatch(/policy pack name "BadCase".*must match/);
   });
+
+  // ── RED-289: engine-mode lint ────────────────────────────────────────
+  //
+  // An engine folder is self-contained: surfaces are siblings of the
+  // gen, not under app/<type>/. Lint detects the sentinel and walks
+  // siblings with the same regex + JSON checks app-mode uses.
+
+  function setupEngineFolder(dir: string) {
+    writeFileSync(
+      join(dir, 'cambium.engine.json'),
+      JSON.stringify({ name: 'test_engine', version: '0.1.0' }),
+    );
+    writeFileSync(
+      join(dir, 'schemas.ts'),
+      `export const TestReport = { type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'], $id: 'TestReport' };\n`,
+    );
+    writeFileSync(
+      join(dir, 'test_gen.cmb.rb'),
+      `class TestGen < GenModel\n  model "omlx:stub"\n  system :test_gen\n  returns TestReport\n  def analyze(x)\n    generate "x" do\n      returns TestReport\n    end\n  end\nend\n`,
+    );
+    writeFileSync(join(dir, 'test_gen.system.md'), 'You are a test agent.\n');
+  }
+
+  it('engine mode: passes on a minimal well-formed engine folder', () => {
+    setupEngineFolder(scratch);
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(0);
+    expect(output).toMatch(/Engine: /);
+    expect(output).toMatch(/cambium\.engine\.json\.name = "test_engine"/);
+    expect(output).toMatch(/schemas\.ts/);
+    expect(output).toMatch(/returns TestReport \(found in schemas\.ts\)/);
+    expect(output).toMatch(/system :test_gen → test_gen\.system\.md/);
+  });
+
+  it('engine mode: fails on returns <typo> with a schemas.ts suggestion', () => {
+    setupEngineFolder(scratch);
+    // Rewrite the gen to use a typo'd schema name.
+    writeFileSync(
+      join(scratch, 'test_gen.cmb.rb'),
+      `class TestGen < GenModel\n  model "omlx:stub"\n  system :test_gen\n  returns TestRepor\n  def analyze(x)\n    generate "x" do\n      returns TestRepor\n    end\n  end\nend\n`,
+    );
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(1);
+    expect(output).toMatch(/returns TestRepor — not exported from schemas\.ts/);
+  });
+
+  it('engine mode: fails on a system :name with no sibling system.md', () => {
+    setupEngineFolder(scratch);
+    rmSync(join(scratch, 'test_gen.system.md'));
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(1);
+    expect(output).toMatch(/system :test_gen — no sibling test_gen\.system\.md/);
+  });
+
+  it('engine mode: validates sibling *.tool.json shape + implementation pairing', () => {
+    setupEngineFolder(scratch);
+    writeFileSync(
+      join(scratch, 'calc.tool.json'),
+      JSON.stringify({
+        name: 'calc', inputSchema: { type: 'object' }, outputSchema: { type: 'object' },
+      }),
+    );
+    // Deliberately skip the .tool.ts sibling — expect a warning.
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(0); // warning, not fail
+    expect(output).toMatch(/tool: calc\.tool\.json/);
+    expect(output).toMatch(/no implementation for tool "calc"/);
+  });
+
+  it('engine mode: fails on a corrector whose export does not match its basename', () => {
+    setupEngineFolder(scratch);
+    writeFileSync(
+      join(scratch, 'check.corrector.ts'),
+      `export const wrong_name = (data) => ({ corrected: false, output: data, issues: [] });\n`,
+    );
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(1);
+    expect(output).toMatch(/check\.corrector\.ts: must export "check"/);
+  });
+
+  it('engine mode: fails on `security :pack` with no sibling policy.rb', () => {
+    setupEngineFolder(scratch);
+    writeFileSync(
+      join(scratch, 'test_gen.cmb.rb'),
+      `class TestGen < GenModel\n  model "omlx:stub"\n  system :test_gen\n  security :missing_pack\n  returns TestReport\n  def analyze(x)\n    generate "x" do\n      returns TestReport\n    end\n  end\nend\n`,
+    );
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(1);
+    expect(output).toMatch(/security :missing_pack — no sibling missing_pack\.policy\.rb/);
+  });
+
+  it('engine mode: fails on memory scope :pool_name with no sibling pool.rb', () => {
+    setupEngineFolder(scratch);
+    writeFileSync(
+      join(scratch, 'test_gen.cmb.rb'),
+      `class TestGen < GenModel\n  model "omlx:stub"\n  system :test_gen\n  memory :facts, scope: :missing_pool, top_k: 5\n  returns TestReport\n  def analyze(x)\n    generate "x" do\n      returns TestReport\n    end\n  end\nend\n`,
+    );
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(1);
+    expect(output).toMatch(/memory scope :missing_pool — no sibling missing_pool\.pool\.rb/);
+  });
+
+  it('engine mode: reserved scope names (:session, :global) do not trigger pool lookup', () => {
+    setupEngineFolder(scratch);
+    writeFileSync(
+      join(scratch, 'test_gen.cmb.rb'),
+      `class TestGen < GenModel\n  model "omlx:stub"\n  system :test_gen\n  memory :log, strategy: :log, scope: :global\n  returns TestReport\n  def analyze(x)\n    generate "x" do\n      returns TestReport\n    end\n  end\nend\n`,
+    );
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(0);
+    expect(output).not.toMatch(/no sibling global\.pool\.rb/);
+  });
+
+  it('engine mode: walks up to find the sentinel from a nested cwd', () => {
+    setupEngineFolder(scratch);
+    const deep = join(scratch, 'nested');
+    mkdirSync(deep, { recursive: true });
+    const { status, output } = runLint(deep);
+    expect(status).toBe(0);
+    expect(output).toMatch(/Engine: /);
+  });
+
+  it('engine mode: warns about engine folders containing more than one .cmb.rb', () => {
+    setupEngineFolder(scratch);
+    writeFileSync(
+      join(scratch, 'second.cmb.rb'),
+      `class Second < GenModel\n  model "omlx:stub"\n  returns TestReport\n  def analyze(x)\n    generate "x" do\n      returns TestReport\n    end\n  end\nend\n`,
+    );
+    const { output } = runLint(scratch);
+    expect(output).toMatch(/has 2 gens/);
+  });
 });

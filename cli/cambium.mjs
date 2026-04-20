@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import 'dotenv/config';
 import { spawnSync } from 'node:child_process';
-import { dirname, resolve } from 'node:path';
+import { dirname, resolve, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { existsSync, statSync } from 'node:fs';
 import { runGenerate } from './generate.mjs';
 import { runLint } from './lint.mjs';
 import { runInit } from './init.mjs';
@@ -167,6 +168,33 @@ if (sessionId !== null) {
       `Invalid --session-id "${sessionId}". Must match /^[a-zA-Z0-9_\\-]+$/ and be 1-128 chars.`,
     );
     process.exit(2);
+  }
+}
+
+// RED-289: engine-mode stale-IR hint. `cambium run` recompiles on
+// every call, so the committed `<name>.ir.json` is NOT updated. Host
+// code that imports the typed wrapper picks up whatever IR is on
+// disk — stale if nobody ran `cambium compile` after editing the gen.
+// Fire a one-liner stderr note when the sibling IR is older than the
+// gen source; silent otherwise.
+{
+  const genDir = dirname(resolve(file));
+  if (existsSync(join(genDir, 'cambium.engine.json'))) {
+    const base = basename(file, '.cmb.rb');
+    const irPath = join(genDir, `${base}.ir.json`);
+    if (existsSync(irPath)) {
+      try {
+        const irMtime = statSync(irPath).mtimeMs;
+        const srcMtime = statSync(resolve(file)).mtimeMs;
+        if (irMtime < srcMtime) {
+          console.error(
+            `Note: ${base}.ir.json is older than ${base}.cmb.rb. ` +
+            `\`cambium run\` recompiles, but the committed IR wasn't refreshed — ` +
+            `run \`cambium compile ${file}\` to update it for host imports.`,
+          );
+        }
+      } catch { /* stat failures non-fatal */ }
+    }
   }
 }
 

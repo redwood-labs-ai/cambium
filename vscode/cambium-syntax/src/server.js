@@ -55,13 +55,115 @@ function detectAppPkgRoot(rootDir) {
   return null;
 }
 
+// RED-289: walk workspaceRoot looking for engine folders. Three spots:
+//   - workspaceRoot itself (user opened the engine dir directly)
+//   - workspaceRoot/cambium/<name>/ (the RED-220 design-note convention)
+//   - workspaceRoot/packages/<name>/ (unusual but supported)
+// Engines deeper than one level down are ignored — if that becomes a
+// real use case, widen the walk. Graceful against readdirSync failures
+// on permission-denied or non-directory paths.
+function findEngineFolders(root) {
+  const found = [];
+  if (!root) return found;
+  if (fs.existsSync(path.join(root, 'cambium.engine.json'))) {
+    found.push(root);
+  }
+  for (const subdir of ['cambium', 'packages']) {
+    const parent = path.join(root, subdir);
+    if (!fs.existsSync(parent)) continue;
+    let entries;
+    try { entries = fs.readdirSync(parent); } catch { continue; }
+    for (const entry of entries) {
+      const candidate = path.join(parent, entry);
+      if (fs.existsSync(path.join(candidate, 'cambium.engine.json'))) {
+        found.push(candidate);
+      }
+    }
+  }
+  return found;
+}
+
+// RED-289: scan an engine folder — every surface lives as a sibling of
+// the gen (tool.json, action.json, corrector.ts, policy.rb, pool.rb,
+// system.md, schemas.ts). Merges into the same module-global state
+// that app-mode scans write to, so hover/goto works on engine siblings
+// without caring about mode. Name collisions: engine siblings win
+// (scanned after app-mode), matching "most-local source of truth".
+function scanEngineFolder(engineDir) {
+  let entries;
+  try { entries = fs.readdirSync(engineDir); } catch { return; }
+
+  for (const f of entries) {
+    const full = path.join(engineDir, f);
+
+    if (f.endsWith('.system.md')) {
+      const name = f.replace('.system.md', '');
+      try {
+        systemPrompts[name] = { path: full, content: fs.readFileSync(full, 'utf8').trim() };
+      } catch {}
+      continue;
+    }
+    if (f.endsWith('.tool.json')) {
+      const name = f.replace('.tool.json', '');
+      try {
+        const def = JSON.parse(fs.readFileSync(full, 'utf8'));
+        toolDefs[name] = { path: full, description: def.description ?? '' };
+      } catch {}
+      continue;
+    }
+    if (f.endsWith('.action.json')) {
+      const name = f.replace('.action.json', '');
+      try {
+        const def = JSON.parse(fs.readFileSync(full, 'utf8'));
+        actionDefs[name] = { path: full, description: def.description ?? '' };
+      } catch {}
+      continue;
+    }
+    if (f.endsWith('.corrector.ts')) {
+      const name = f.replace('.corrector.ts', '');
+      correctorFiles[name] = { path: full, origin: 'engine' };
+      continue;
+    }
+    if (f.endsWith('.policy.rb')) {
+      const name = f.replace('.policy.rb', '');
+      try {
+        policyPacks[name] = { path: full, content: fs.readFileSync(full, 'utf8').trim() };
+      } catch {}
+      continue;
+    }
+    if (f.endsWith('.pool.rb')) {
+      const name = f.replace('.pool.rb', '');
+      try {
+        memoryPools[name] = { path: full, content: fs.readFileSync(full, 'utf8').trim() };
+      } catch {}
+      continue;
+    }
+  }
+
+  // Parse schemas.ts for top-level `export const <Name>` lines —
+  // engine-mode equivalent of app-mode's src/contracts.ts parsing.
+  const schemasPath = path.join(engineDir, 'schemas.ts');
+  if (fs.existsSync(schemasPath)) {
+    try {
+      const lines = fs.readFileSync(schemasPath, 'utf8').split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const m = lines[i].match(/^export const (\w+)\s*=/);
+        if (m) schemaExports[m[1]] = { path: schemasPath, line: i };
+      }
+    } catch {}
+  }
+}
+
 function scanWorkspace() {
   if (!workspaceRoot) return;
   const shape = detectAppPkgRoot(workspaceRoot);
-  // No Cambium anchor at workspaceRoot? Skip all scans quietly —
-  // likely a non-Cambium project that happens to have a .cmb.rb open.
-  if (!shape) { appPkgRoot = ''; return; }
-  appPkgRoot = shape.appPkgRoot;
+  const engineFolders = findEngineFolders(workspaceRoot);
+
+  // Neither app mode nor engine mode visible → truly a non-Cambium
+  // project that happens to have a .cmb.rb open. Skip all scans quietly.
+  if (!shape && engineFolders.length === 0) { appPkgRoot = ''; return; }
+
+  appPkgRoot = shape?.appPkgRoot ?? '';
 
   // Reset state — scans rebuild from disk on every `onDidChangeContent`.
   systemPrompts = {};
@@ -72,6 +174,16 @@ function scanWorkspace() {
   policyPacks = {};
   memoryPools = {};
   modelAliases = {};
+
+  // App-mode scans gated on appPkgRoot being set. When workspaceRoot
+  // is ITSELF an engine folder (e.g. user opened the engine dir
+  // directly), detectAppPkgRoot returns null and all app-mode scans
+  // are skipped — engine scans below handle everything.
+  if (!appPkgRoot) {
+    // Skip to engine scans.
+    for (const engineDir of engineFolders) scanEngineFolder(engineDir);
+    return;
+  }
 
   // Scan system prompts
   const systemsDir = path.join(appPkgRoot, 'app/systems');
@@ -185,6 +297,14 @@ function scanWorkspace() {
         modelAliases[m[1]] = { path: modelsPath, line: i, value: m[2] };
       }
     }
+  }
+
+  // RED-289: after app-mode scans, layer engine-folder scans on top.
+  // Engine siblings win on name collision — they're the most-local
+  // source of truth. Covers the "host project with engines under
+  // cambium/" layout from the RED-220 design note.
+  for (const engineDir of engineFolders) {
+    scanEngineFolder(engineDir);
   }
 }
 
