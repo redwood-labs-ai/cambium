@@ -124,5 +124,88 @@
       "budget :${1:research_defaults}"
     ],
     "description": "Pull the budget export from a policy pack (RED-214)."
+  },
+  "Memory (sliding window)": {
+    "prefix": "memory",
+    "body": [
+      "memory :${1:conversation}, strategy: :sliding_window, size: ${2:20}"
+    ],
+    "description": "Sliding-window memory — last N entries (RED-215)."
+  },
+  "Memory (semantic)": {
+    "prefix": "memory_sem",
+    "body": [
+      "memory :${1:facts}, strategy: :semantic, top_k: ${2:5}, embed: \"${3:omlx:bge-small-en}\""
+    ],
+    "description": "Semantic memory with vec-search against ctx.input (RED-215). embed is required."
+  },
+  "Memory (log strategy)": {
+    "prefix": "memory_log",
+    "body": [
+      "memory :${1:activity}, strategy: :log"
+    ],
+    "description": "Append-only memory — no read-inject into prompts (RED-215)."
+  },
+  "Retention policy": {
+    "prefix": "retain",
+    "body": [
+      "retain ttl: \"${1:30d}\", max_entries: ${2:1000}"
+    ],
+    "description": "TTL + max-entries cap on a memory bucket (RED-239). Capped by workspace memory_policy.rb."
+  },
+  "Retro memory agent": {
+    "prefix": "retro",
+    "body": [
+      "class ${1:SupportMemoryAgent} < GenModel",
+      "  mode :retro",
+      "  reads_trace_of :${2:SupportAnalyst}",
+      "  returns MemoryWrites",
+      "",
+      "  def remember(ctx)",
+      "    generate \"decide what to write to memory\" do",
+      "      with context: ctx.primary_output",
+      "      returns MemoryWrites",
+      "    end",
+      "  end",
+      "end"
+    ],
+    "description": "Retro memory agent boilerplate — reads a primary gen's trace, returns explicit MemoryWrites (RED-215 phase 4)."
+  },
+  "Write memory via retro agent": {
+    "prefix": "writemem",
+    "body": [
+      "write_memory_via :${1:SupportMemoryAgent}"
+    ],
+    "description": "Route memory writes through a retro agent instead of the trivial-default writer (RED-215 phase 4)."
+  },
+  "Exec sandbox config": {
+    "prefix": "exec",
+    "body": [
+      "security \\",
+      "  exec: {",
+      "    runtime: :${1|wasm,firecracker,native|},",
+      "    language: :${2|javascript,python|},",
+      "    timeout: ${3:30},",
+      "    memory: ${4:256},",
+      "    cpu: ${5:1}",
+      "  }"
+    ],
+    "description": "Sandboxed exec config (RED-248/254/258/259). :wasm and :firecracker are sandboxed; :native is deprecated."
+  },
+  "Action in trigger": {
+    "prefix": "action",
+    "body": [
+      "on :${1:signal_name} do",
+      "  action :${2:slack_notify}, message: \"${3:...}\"",
+      "end"
+    ],
+    "description": "Trigger-dispatched action (RED-212) — parallel to `tool` but for side-effect handlers."
+  },
+  "Memory pool ref": {
+    "prefix": "mempool",
+    "body": [
+      "memory :${1:slot}, scope: :${2:pool_name}, top_k: ${3:5}"
+    ],
+    "description": "Reference a shared memory pool from app/memory_pools/ (RED-215). Pool is authoritative on strategy/embed/keyed_by."
   }
 }

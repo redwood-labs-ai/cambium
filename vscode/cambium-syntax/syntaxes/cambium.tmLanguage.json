@@ -57,8 +57,15 @@
           }
         },
         {
-          "comment": "Keyword arguments for primitives",
-          "match": "\\b(to|type|path|strategy|passes|unit|target|operation|store_as|max_attempts|stop_on_no_improvement|network|filesystem|exec|allowlist|denylist|block_private|block_metadata|roots|allowed|per_tool|per_run|max_calls):",
+          "comment": "Memory + retro-agent primitives (RED-215)",
+          "match": "^\\s*(memory|write_memory_via|reads_trace_of|retain)\\b",
+          "captures": {
+            "1": { "name": "keyword.other.memory.cambium support.function.cambium" }
+          }
+        },
+        {
+          "comment": "Keyword arguments for primitives (RED-215 memory, RED-239 retain, RED-248/254/258/259 exec, RED-238 semantic query)",
+          "match": "\\b(to|type|path|strategy|passes|unit|target|operation|store_as|max_attempts|stop_on_no_improvement|network|filesystem|exec|allowlist|allowlist_paths|denylist|block_private|block_metadata|roots|allowed|per_tool|per_run|max_calls|size|top_k|scope|keyed_by|embed|ttl|max_entries|runtime|language|cpu|memory|timeout|query|arg_field|require_keyed_by_for|max_ttl|default_ttl|ban_scope|allowed_pools|require_citations):",
           "captures": {
             "1": { "name": "variable.parameter.cambium" }
           }
@@ -78,8 +85,8 @@
           }
         },
         {
-          "comment": "tool call inside trigger block",
-          "match": "^\\s*(tool)\\s+",
+          "comment": "tool or action call inside trigger block (RED-212 for action)",
+          "match": "^\\s*(tool|action)\\s+",
           "captures": {
             "1": { "name": "keyword.other.primitive.cambium support.function.cambium" }
           }
