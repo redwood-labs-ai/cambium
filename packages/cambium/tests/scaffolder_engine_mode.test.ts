@@ -381,3 +381,105 @@ describe('cambium new <type> — RED-284 scaffolder additions', () => {
       .toMatch(/Forms: models, memory_policy/);
   });
 });
+
+// ── RED-286: flat [package] layout (external apps, e.g. curator) ──────
+//
+// An external app has a single `Genfile.toml [package]` at project root
+// and a flat `app/{gens,tools,...}/` tree — NO `packages/cambium/`
+// subdir. Scaffolders must land files at the flat paths, not at a
+// phantom `packages/cambium/app/...` tree the external project shouldn't
+// have.
+
+describe('cambium new <type> — flat [package] layout (RED-286)', () => {
+  function setupFlatPackage(dir: string) {
+    writeFileSync(
+      join(dir, 'Genfile.toml'),
+      `[package]\nname = "curator_dogfood"\nversion = "0.1.0"\n\n[types]\ncontracts = ["src/contracts.ts"]\n`,
+    );
+  }
+
+  it('detectScaffoldContext returns appPkgRoot === cwd when Genfile is [package]', () => {
+    setupFlatPackage(scratch);
+    const ctx = detectScaffoldContext(scratch);
+    expect(ctx.mode).toBe('app');
+    expect(ctx.shape).toBe('package');
+    expect(ctx.appPkgRoot).toBe(scratch);
+    expect(ctx.workspaceRoot).toBe(scratch);
+  });
+
+  it('cambium new agent lands at <cwd>/app/gens/, not a phantom packages/cambium/', () => {
+    setupFlatPackage(scratch);
+    const result = runCli(['new', 'agent', 'ExtractPattern'], scratch);
+    expect(result.status).toBe(0);
+    expect(existsSync(join(scratch, 'app', 'gens', 'extract_pattern.cmb.rb'))).toBe(true);
+    expect(existsSync(join(scratch, 'app', 'systems', 'extract_pattern.system.md'))).toBe(true);
+    // No phantom tree under packages/cambium/
+    expect(existsSync(join(scratch, 'packages'))).toBe(false);
+  });
+
+  it('cambium new tool lands at <cwd>/app/tools/ and imports ToolContext from @cambium/runner', () => {
+    setupFlatPackage(scratch);
+    const result = runCli(['new', 'tool', 'price_fetcher'], scratch);
+    expect(result.status).toBe(0);
+    const tsPath = join(scratch, 'app', 'tools', 'price_fetcher.tool.ts');
+    expect(existsSync(tsPath)).toBe(true);
+    expect(existsSync(join(scratch, 'app', 'tools', 'price_fetcher.tool.json'))).toBe(true);
+    // External app: @cambium/runner package import, NOT a deep relative
+    // into ../../../cambium-runner/ which wouldn't exist in curator.
+    expect(readFileSync(tsPath, 'utf8')).toContain("from '@cambium/runner'");
+    expect(existsSync(join(scratch, 'packages'))).toBe(false);
+  });
+
+  it('cambium new corrector lands at <cwd>/app/correctors/ and imports from @cambium/runner', () => {
+    setupFlatPackage(scratch);
+    const result = runCli(['new', 'corrector', 'regex_compiles'], scratch);
+    expect(result.status).toBe(0);
+    const tsPath = join(scratch, 'app', 'correctors', 'regex_compiles.corrector.ts');
+    expect(existsSync(tsPath)).toBe(true);
+    expect(readFileSync(tsPath, 'utf8')).toContain("from '@cambium/runner'");
+    expect(existsSync(join(scratch, 'packages'))).toBe(false);
+  });
+
+  it('cambium new action lands at <cwd>/app/actions/ and imports ToolContext from @cambium/runner', () => {
+    setupFlatPackage(scratch);
+    const result = runCli(['new', 'action', 'slack_notify'], scratch);
+    expect(result.status).toBe(0);
+    const tsPath = join(scratch, 'app', 'actions', 'slack_notify.action.ts');
+    expect(existsSync(tsPath)).toBe(true);
+    expect(existsSync(join(scratch, 'app', 'actions', 'slack_notify.action.json'))).toBe(true);
+    expect(readFileSync(tsPath, 'utf8')).toContain("from '@cambium/runner'");
+    expect(existsSync(join(scratch, 'packages'))).toBe(false);
+  });
+
+  it('cambium new policy lands at <cwd>/app/policies/', () => {
+    setupFlatPackage(scratch);
+    const result = runCli(['new', 'policy', 'research_caps'], scratch);
+    expect(result.status).toBe(0);
+    expect(existsSync(join(scratch, 'app', 'policies', 'research_caps.policy.rb'))).toBe(true);
+    expect(existsSync(join(scratch, 'packages'))).toBe(false);
+  });
+
+  it('cambium new memory_pool lands at <cwd>/app/memory_pools/', () => {
+    setupFlatPackage(scratch);
+    const result = runCli(['new', 'memory_pool', 'support_team'], scratch);
+    expect(result.status).toBe(0);
+    expect(existsSync(join(scratch, 'app', 'memory_pools', 'support_team.pool.rb'))).toBe(true);
+    expect(existsSync(join(scratch, 'packages'))).toBe(false);
+  });
+
+  it('cambium new config models lands at <cwd>/app/config/', () => {
+    setupFlatPackage(scratch);
+    const result = runCli(['new', 'config', 'models'], scratch);
+    expect(result.status).toBe(0);
+    expect(existsSync(join(scratch, 'app', 'config', 'models.rb'))).toBe(true);
+    expect(existsSync(join(scratch, 'packages'))).toBe(false);
+  });
+
+  it('cambium new system lands at <cwd>/app/systems/', () => {
+    setupFlatPackage(scratch);
+    const result = runCli(['new', 'system', 'pattern_analyst'], scratch);
+    expect(result.status).toBe(0);
+    expect(existsSync(join(scratch, 'app', 'systems', 'pattern_analyst.system.md'))).toBe(true);
+    expect(existsSync(join(scratch, 'packages'))).toBe(false);
+  });
+});

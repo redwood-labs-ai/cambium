@@ -2,6 +2,7 @@
 import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import process from 'node:process';
+import { detectWorkspaceShape } from './workspace-shape.mjs';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -47,18 +48,25 @@ function writeFile(path, content) {
   return true;
 }
 
-// ── Mode detection (RED-246) ──────────────────────────────────────────
+// ── Mode detection (RED-246, layout-aware RED-286) ────────────────────
 //
 // `cambium new <thing>` needs to know whether it's authoring inside an
 // engine folder (sibling-of-gen layout, no `app/<type>/` subdirs) or an
-// app-mode workspace (the existing `packages/cambium/app/<type>/<name>`
-// layout). The decision is filesystem-driven so a single function works
-// for every subcommand.
+// app-mode workspace (the conventional `app/<type>/<name>` layout). The
+// decision is filesystem-driven so a single function works for every
+// subcommand.
 //
-// Sentinel walk stops at the first `package.json` to avoid leaking out
-// of an embedded engine into a parent project. The app-mode walk has no
-// boundary — `Genfile.toml` or a sibling `packages/cambium/` is enough
-// regardless of how deep we are in the host project.
+// Sentinel walk (phase 1) stops at the first `package.json` to avoid
+// leaking out of an embedded engine into a parent project. The app-mode
+// walk (phase 2) uses `detectWorkspaceShape` so both monorepo
+// ([workspace] members = ["packages/*"], cambium's own layout) and flat
+// ([package] at project root, e.g. the curator dogfood) projects
+// resolve the right appPkgRoot.
+//
+// Returns:
+//   { mode: 'engine', engineDir }
+//   { mode: 'app', workspaceRoot, appPkgRoot, shape: 'workspace'|'package' }
+//   { mode: 'none' }
 
 export function detectScaffoldContext(cwd) {
   // Phase 1: walk up looking for the engine sentinel. Stop at the first
@@ -80,19 +88,16 @@ export function detectScaffoldContext(cwd) {
     dir = parent;
   }
 
-  // Phase 2: no sentinel — try app-mode markers. No boundary check; the
-  // monorepo layout is the legitimate use case here.
-  dir = cwd;
-  while (true) {
-    if (existsSync(join(dir, 'Genfile.toml'))) {
-      return { mode: 'app', workspaceRoot: dir };
-    }
-    if (existsSync(join(dir, 'packages', 'cambium'))) {
-      return { mode: 'app', workspaceRoot: dir };
-    }
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
+  // Phase 2: no sentinel — try app-mode markers via shape detection.
+  // No boundary check; walking up through the host project is fine.
+  const shape = detectWorkspaceShape(cwd);
+  if (shape) {
+    return {
+      mode: 'app',
+      workspaceRoot: shape.workspaceRoot,
+      appPkgRoot: shape.appPkgRoot,
+      shape: shape.shape,
+    };
   }
 
   return { mode: 'none' };
@@ -306,7 +311,7 @@ You are a ${snake.replace(/_/g, ' ')}. TODO: describe the role and behavior.`);
   }
 
   // App mode (or none, errored above).
-  const PKG = join(ctx.workspaceRoot, 'packages/cambium');
+  const PKG = ctx.appPkgRoot;
   writeFile(join(PKG, 'app/gens', `${snake}.cmb.rb`), `\
 class ${pascal} < GenModel
   model "omlx:gemma-4-31b-it-8bit"
@@ -419,8 +424,14 @@ export async function execute(
     return;
   }
 
-  // App mode.
-  const PKG = join(ctx.workspaceRoot, 'packages/cambium');
+  // App mode. External apps (shape === 'package') import ToolContext
+  // from the published @cambium/runner package; the in-tree cambium
+  // workspace (shape === 'workspace') uses a deep relative to the
+  // framework source since it doesn't import itself as a package.
+  const PKG = ctx.appPkgRoot;
+  const toolContextImport = ctx.shape === 'workspace'
+    ? '../../../cambium-runner/src/tools/tool-context.js'
+    : '@cambium/runner';
   writeFile(join(PKG, 'app/tools', `${snake}.tool.json`), toolJson);
   writeFile(join(PKG, 'app/tools', `${snake}.tool.ts`), `\
 /**
@@ -430,7 +441,7 @@ export async function execute(
  * permissions block and use \`ctx.fetch\` here — NOT globalThis.fetch
  * (the SSRF guard lives on ctx.fetch; direct fetch bypasses it).
  */
-import type { ToolContext } from '../../../cambium-runner/src/tools/tool-context.js';
+import type { ToolContext } from '${toolContextImport}';
 
 export async function execute(
   input: { input: string },
@@ -470,7 +481,7 @@ function generateSchema(name, ctx) {
     return;
   }
 
-  const PKG = join(ctx.workspaceRoot, 'packages/cambium');
+  const PKG = ctx.appPkgRoot;
   console.log(`\nGenerating schema: ${pascal}\n`);
   console.log(`  Add the following to ${PKG}/src/contracts.ts:\n`);
   console.log(`export const ${pascal} = Type.Object(
@@ -491,7 +502,7 @@ function generateSystem(name, ctx) {
 
   const dir = ctx.mode === 'engine'
     ? ctx.engineDir
-    : join(ctx.workspaceRoot, 'packages/cambium/app/systems');
+    : join(ctx.appPkgRoot, 'app/systems');
 
   writeFile(join(dir, `${snake}.system.md`), `\
 You are a ${snake.replace(/_/g, ' ')}. TODO: describe the role, expertise, and behavioral expectations.`);
@@ -569,16 +580,16 @@ export const ${snake}: CorrectorFn = (data, _context): CorrectorResult => {
     return;
   }
 
-  // App mode: write under <workspaceRoot>/packages/cambium/app/correctors/.
-  // NOTE: this follows the existing generateTool/generateAgent pattern
-  // which assumes the cambium-monorepo layout. External apps with a
-  // flat [package] Genfile at cwd won't have packages/cambium/ — see
-  // the CLI-parity-audit ticket's follow-up note. Fixing the flat
-  // layout is a separate concern from this P0 bug fix.
-  const PKG = join(ctx.workspaceRoot, 'packages/cambium');
+  // App mode. External apps (shape === 'package') import CorrectorFn
+  // et al. from @cambium/runner; in-tree cambium workspace
+  // (shape === 'workspace') uses the deep relative to framework source.
+  const PKG = ctx.appPkgRoot;
+  const correctorTypeImport = ctx.shape === 'workspace'
+    ? '../../../cambium-runner/src/correctors/types.js'
+    : '@cambium/runner';
   writeFile(
     join(PKG, 'app/correctors', `${snake}.corrector.ts`),
-    makeBody('../../../cambium-runner/src/correctors/types.js'),
+    makeBody(correctorTypeImport),
   );
 
   console.log(`\nNext steps:`);
@@ -646,11 +657,14 @@ export async function execute(
     return;
   }
 
-  const PKG = join(ctx.workspaceRoot, 'packages/cambium');
+  const PKG = ctx.appPkgRoot;
+  const toolContextImport = ctx.shape === 'workspace'
+    ? '../../../cambium-runner/src/tools/tool-context.js'
+    : '@cambium/runner';
   writeFile(join(PKG, 'app/actions', `${snake}.action.json`), actionJson);
   writeFile(
     join(PKG, 'app/actions', `${snake}.action.ts`),
-    makeBody('../../../cambium-runner/src/tools/tool-context.js'),
+    makeBody(toolContextImport),
   );
 
   console.log(`\nNext steps:`);
@@ -715,7 +729,7 @@ function generatePolicy(name, ctx) {
     process.exit(2);
   }
 
-  const PKG = join(ctx.workspaceRoot, 'packages/cambium');
+  const PKG = ctx.appPkgRoot;
   writeFile(join(PKG, 'app/policies', `${snake}.policy.rb`), policyBody);
 
   console.log(`\nNext steps:`);
@@ -768,7 +782,7 @@ strategy :sliding_window
     process.exit(2);
   }
 
-  const PKG = join(ctx.workspaceRoot, 'packages/cambium');
+  const PKG = ctx.appPkgRoot;
   writeFile(join(PKG, 'app/memory_pools', `${snake}.pool.rb`), poolBody);
 
   console.log(`\nNext steps:`);
@@ -803,7 +817,7 @@ function generateConfig(name, ctx) {
     process.exit(2);
   }
 
-  const PKG = join(ctx.workspaceRoot, 'packages/cambium');
+  const PKG = ctx.appPkgRoot;
   const dest = join(PKG, 'app/config', `${name}.rb`);
 
   if (name === 'models') {
