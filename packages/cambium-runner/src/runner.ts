@@ -562,6 +562,19 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     await actionRegistry.loadFromDir(engineDir);
   }
 
+  // ── Load app / engine correctors (RED-275, RED-287) ─────────────────
+  // App-mode correctors are loaded once in CLI main() via the Genfile
+  // path. Engine-mode correctors live as siblings of the gen and need
+  // to be loaded here in runGen — CLI main() and library hosts both
+  // flow through this path. Register into the mutable module-global
+  // registry; app plugins the CLI loaded earlier are left in place.
+  if (engineDir) {
+    const engineCorr = await loadAppCorrectors(engineDir, { engineDir });
+    if (Object.keys(engineCorr.correctors).length > 0) {
+      registerAppCorrectors(engineCorr.correctors);
+    }
+  }
+
   const toolsAllowed: string[] = ir.policies?.tools_allowed ?? [];
   // Validate that all declared tools exist in the registry
   for (const t of toolsAllowed) {

@@ -35,24 +35,33 @@ export interface AppCorrectorLoadResult {
 }
 
 /**
- * Scan `<genfileDir>/app/correctors/*.corrector.ts` and return the
+ * Scan `<genfileDir>/app/correctors/*.corrector.ts` (app mode) or
+ * `<engineDir>/*.corrector.ts` (engine mode, RED-287) and return the
  * discovered correctors. Returns an empty map when the directory doesn't
  * exist (app simply didn't declare any). Throws when a file's basename
  * fails the name regex, when its resolved path escapes the correctors
  * directory, or when the module doesn't export a binding matching its
  * basename.
+ *
+ * @param baseDir Absolute path. In app mode pass the Genfile directory;
+ *                the loader appends `app/correctors/`. In engine mode
+ *                pass `{ engineDir: '<dir>' }` — the loader scans that
+ *                dir directly for sibling correctors alongside the gen.
  */
 export async function loadAppCorrectors(
-  genfileDir: string,
+  baseDir: string,
+  opts?: { engineDir?: string },
 ): Promise<AppCorrectorLoadResult> {
   const result: AppCorrectorLoadResult = { correctors: {}, loadedFiles: [] };
-  if (!isAbsolute(genfileDir)) {
+  const engineDir = opts?.engineDir;
+  const correctorsDir = engineDir
+    ? engineDir
+    : join(baseDir, 'app', 'correctors');
+  if (!isAbsolute(correctorsDir)) {
     throw new Error(
-      `loadAppCorrectors: genfileDir must be absolute, got ${genfileDir}`,
+      `loadAppCorrectors: corrector dir must be absolute, got ${correctorsDir}`,
     );
   }
-
-  const correctorsDir = join(genfileDir, 'app', 'correctors');
   if (!existsSync(correctorsDir)) return result;
 
   // Resolve the correctors dir through realpath so the
