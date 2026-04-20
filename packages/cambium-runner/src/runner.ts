@@ -1,4 +1,4 @@
-import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import process from 'node:process';
@@ -49,6 +49,7 @@ import { loadAppCorrectors } from './correctors/app-loader.js';
 import { registerAppCorrectors } from './correctors/index.js';
 import { getGroundingDocument } from './context.js';
 import { resolveAppRoot } from './app-root.js';
+import { resolveEngineDir } from './engine-root.js';
 
 type IR = any;
 
@@ -1211,12 +1212,28 @@ async function main() {
   const ir: IR = JSON.parse(irText);
 
   let contractsMod: Record<string, any>;
+  // RED-287: engine-mode schemas live as a sibling of the gen file
+  // (`<engineDir>/schemas.ts`) rather than under an app/ convention.
+  // Detect by walking up from `ir.entry.source` looking for the
+  // `cambium.engine.json` sentinel. When engine mode is detected it
+  // wins over the app-mode Genfile lookup — an IR compiled from an
+  // engine gen always sources its own schemas, even if cwd happens
+  // to contain a Genfile.
+  const engineDir = resolveEngineDir(ir.entry?.source);
   const genfile = resolveGenfileContracts(process.cwd());
-  if (genfile) {
+  if (engineDir) {
+    const schemasFile = join(engineDir, 'schemas.ts');
+    if (!existsSync(schemasFile)) {
+      throw new Error(
+        `Engine schemas file not found: ${schemasFile}. ` +
+        `Engine gens source their schemas from '<engineDir>/schemas.ts' (RED-220, RED-287).`,
+      );
+    }
+    contractsMod = await import(pathToFileURL(schemasFile).href);
+  } else if (genfile) {
     contractsMod = await loadContractsFromGenfile(genfile);
     // RED-275: app-mode correctors discovered under <genfileDir>/app/correctors/.
-    // Engine-mode callers using runGen directly skip this path and can
-    // call registerAppCorrectors themselves if they need app-level ones.
+    // Engine-mode correctors are discovered via runGen (RED-287 phase 3).
     const app = await loadAppCorrectors(genfile.genfileDir);
     if (Object.keys(app.correctors).length > 0) {
       registerAppCorrectors(app.correctors);
