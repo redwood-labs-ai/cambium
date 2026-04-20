@@ -18,7 +18,14 @@ This note does not introduce a new primitive. It is a packaging and discovery co
 
 ### App mode
 
-You build the whole product in Cambium. The monorepo *is* the app. Layout is the current `packages/cambium/app/{gens,systems,tools,policies,memory_pools,actions}` convention; the runner finds everything by walking known paths under `process.cwd()`.
+You build the whole product in Cambium. The monorepo *is* the app. Layout is the `app/{gens,systems,tools,actions,correctors,policies,memory_pools,config}` convention; the runner finds everything by walking known paths anchored at an app-package root.
+
+App mode has two supported shapes (RED-286):
+
+- **Workspace** — a `[workspace]` Genfile at project root with `members = ["packages/*"]`; the app lives under `packages/cambium/app/...`. This is the cambium monorepo's own layout.
+- **Package (flat)** — a `[package]` Genfile at project root; the app lives under `app/...` directly at the root. No `packages/cambium/` intermediate. This is the layout external apps use.
+
+The CLI scaffolders, `cambium lint`, the VS Code extension, and the runtime all detect the shape from `Genfile.toml` and resolve the app-package root accordingly. `cambium new` writes to the right place in both cases.
 
 This is what every gen in the repo today is.
 

@@ -15,6 +15,7 @@ const documents = new TextDocuments(TextDocument);
 // ── Workspace scanning ────────────────────────────────────────────────
 
 let workspaceRoot = '';
+let appPkgRoot = '';     // resolved from workspaceRoot via detectAppPkgRoot (RED-286)
 let systemPrompts = {};  // name → { path, content }
 let toolDefs = {};       // name → { path, description }
 let actionDefs = {};     // name → { path, description }              -- RED-212
@@ -25,8 +26,42 @@ let policyPacks = {};    // name → { path, content }                  -- RED-2
 let memoryPools = {};    // name → { path, content }                  -- RED-215
 let modelAliases = {};   // alias → { path, line, value }             -- RED-237
 
+// RED-286: inline Genfile shape detection. CommonJS LSP can't
+// easily import the .mjs helper in cli/workspace-shape.mjs; ~25 lines
+// of duplication buys simpler packaging. Keep the two in sync if you
+// change one — the contract is small (the return shape is all the
+// callers depend on).
+//
+// Classification is regex-based rather than full TOML parsing because
+// the LSP has no TOML dep today and only needs the section names.
+// Section headers are line-anchored so a `# [workspace] in the docs`
+// comment doesn't false-match.
+function detectAppPkgRoot(rootDir) {
+  if (!rootDir) return null;
+  const genfile = path.join(rootDir, 'Genfile.toml');
+  if (fs.existsSync(genfile)) {
+    const content = fs.readFileSync(genfile, 'utf8');
+    if (/^\s*\[workspace\]/m.test(content)) {
+      return { shape: 'workspace', appPkgRoot: path.join(rootDir, 'packages/cambium') };
+    }
+    if (/^\s*\[package\]/m.test(content)) {
+      return { shape: 'package', appPkgRoot: rootDir };
+    }
+  }
+  // Legacy fallback — no Genfile but a packages/cambium/ subdir.
+  if (fs.existsSync(path.join(rootDir, 'packages', 'cambium'))) {
+    return { shape: 'workspace', appPkgRoot: path.join(rootDir, 'packages/cambium') };
+  }
+  return null;
+}
+
 function scanWorkspace() {
   if (!workspaceRoot) return;
+  const shape = detectAppPkgRoot(workspaceRoot);
+  // No Cambium anchor at workspaceRoot? Skip all scans quietly —
+  // likely a non-Cambium project that happens to have a .cmb.rb open.
+  if (!shape) { appPkgRoot = ''; return; }
+  appPkgRoot = shape.appPkgRoot;
 
   // Reset state — scans rebuild from disk on every `onDidChangeContent`.
   systemPrompts = {};
@@ -39,7 +74,7 @@ function scanWorkspace() {
   modelAliases = {};
 
   // Scan system prompts
-  const systemsDir = path.join(workspaceRoot, 'packages/cambium/app/systems');
+  const systemsDir = path.join(appPkgRoot, 'app/systems');
   if (fs.existsSync(systemsDir)) {
     for (const f of fs.readdirSync(systemsDir)) {
       if (!f.endsWith('.system.md')) continue;
@@ -51,7 +86,7 @@ function scanWorkspace() {
   }
 
   // Scan policy packs (RED-214)
-  const policiesDir = path.join(workspaceRoot, 'packages/cambium/app/policies');
+  const policiesDir = path.join(appPkgRoot, 'app/policies');
   if (fs.existsSync(policiesDir)) {
     for (const f of fs.readdirSync(policiesDir)) {
       if (!f.endsWith('.policy.rb')) continue;
@@ -63,7 +98,7 @@ function scanWorkspace() {
   }
 
   // Scan memory pools (RED-215)
-  const poolsDir = path.join(workspaceRoot, 'packages/cambium/app/memory_pools');
+  const poolsDir = path.join(appPkgRoot, 'app/memory_pools');
   if (fs.existsSync(poolsDir)) {
     for (const f of fs.readdirSync(poolsDir)) {
       if (!f.endsWith('.pool.rb')) continue;
@@ -75,7 +110,7 @@ function scanWorkspace() {
   }
 
   // Scan tool definitions
-  const toolsDir = path.join(workspaceRoot, 'packages/cambium/app/tools');
+  const toolsDir = path.join(appPkgRoot, 'app/tools');
   if (fs.existsSync(toolsDir)) {
     for (const f of fs.readdirSync(toolsDir)) {
       if (!f.endsWith('.tool.json')) continue;
@@ -89,7 +124,7 @@ function scanWorkspace() {
   }
 
   // Scan action definitions (RED-212)
-  const actionsDir = path.join(workspaceRoot, 'packages/cambium/app/actions');
+  const actionsDir = path.join(appPkgRoot, 'app/actions');
   if (fs.existsSync(actionsDir)) {
     for (const f of fs.readdirSync(actionsDir)) {
       if (!f.endsWith('.action.json')) continue;
@@ -115,7 +150,7 @@ function scanWorkspace() {
 
   // Scan app correctors (RED-275). App wins on name collision, matching
   // the runtime's registerAppCorrectors override behavior.
-  const appCorrectorsDir = path.join(workspaceRoot, 'packages/cambium/app/correctors');
+  const appCorrectorsDir = path.join(appPkgRoot, 'app/correctors');
   if (fs.existsSync(appCorrectorsDir)) {
     for (const f of fs.readdirSync(appCorrectorsDir)) {
       if (!f.endsWith('.corrector.ts')) continue;
@@ -125,7 +160,7 @@ function scanWorkspace() {
   }
 
   // Scan schema exports from contracts.ts
-  const contractsPath = path.join(workspaceRoot, 'packages/cambium/src/contracts.ts');
+  const contractsPath = path.join(appPkgRoot, 'src/contracts.ts');
   if (fs.existsSync(contractsPath)) {
     const lines = fs.readFileSync(contractsPath, 'utf8').split('\n');
     for (let i = 0; i < lines.length; i++) {
@@ -138,7 +173,7 @@ function scanWorkspace() {
 
   // Scan model aliases (RED-237) from app/config/models.rb.
   // Each alias is a top-level call: `default "omlx:Qwen3.5-27B-4bit"`.
-  const modelsPath = path.join(workspaceRoot, 'packages/cambium/app/config/models.rb');
+  const modelsPath = path.join(appPkgRoot, 'app/config/models.rb');
   if (fs.existsSync(modelsPath)) {
     const lines = fs.readFileSync(modelsPath, 'utf8').split('\n');
     for (let i = 0; i < lines.length; i++) {
@@ -559,7 +594,7 @@ connection.onCompletion((params) => {
   // (RED-215 phase 4).
   if (/^\s*write_memory_via\s+:/.test(line)) {
     const retroAgents = [];
-    const gensDir = path.join(workspaceRoot, 'packages/cambium/app/gens');
+    const gensDir = path.join(appPkgRoot, 'app/gens');
     if (fs.existsSync(gensDir)) {
       for (const f of fs.readdirSync(gensDir)) {
         if (!f.endsWith('.cmb.rb')) continue;
@@ -607,7 +642,7 @@ connection.onCompletion((params) => {
   if (/enrich\s+:/.test(line)) {
     // Scan for agent classes in the workspace
     const agentCompletions = [];
-    const gensDir = path.join(workspaceRoot, 'packages/cambium/app/gens');
+    const gensDir = path.join(appPkgRoot, 'app/gens');
     if (fs.existsSync(gensDir)) {
       for (const f of fs.readdirSync(gensDir)) {
         if (!f.endsWith('.cmb.rb')) continue;

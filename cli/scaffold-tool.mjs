@@ -14,19 +14,19 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
+import { detectWorkspaceShape } from './workspace-shape.mjs';
 
 // Framework files resolved relative to the CLI's own location, not cwd
 // (RED-274 — mirrors cambium.mjs and compile.mjs). The scaffolder gen,
-// Ruby compile script, and TS runner are all shipped with the framework;
-// `PKG` below stays cwd-relative because it controls where the scaffolder
-// writes the generated tool files, which is project-local.
+// Ruby compile script, and TS runner are all shipped with the framework.
+// The output destination (where the scaffolder writes the generated tool
+// files) is resolved at call time via detectWorkspaceShape (RED-286) so
+// both monorepo workspace and flat [package] layouts land correctly.
 const CLI_DIR = dirname(fileURLToPath(import.meta.url));
 const FRAMEWORK_ROOT = resolve(CLI_DIR, '..');
 const RUBY_COMPILE_SCRIPT = resolve(FRAMEWORK_ROOT, 'ruby', 'cambium', 'compile.rb');
 const RUNNER_SCRIPT = resolve(FRAMEWORK_ROOT, 'packages', 'cambium-runner', 'src', 'runner.ts');
 const GEN_PATH = resolve(FRAMEWORK_ROOT, 'packages', 'cambium', 'app', 'gens', 'tool_scaffold.cmb.rb');
-
-const PKG = 'packages/cambium';
 
 function bail(msg, code = 1) {
   console.error(msg);
@@ -44,6 +44,18 @@ export async function runAgenticToolScaffold(description) {
   if (!existsSync(GEN_PATH)) {
     bail(`Tool scaffold gen not found at ${GEN_PATH}. Is this a Cambium workspace with the scaffolder installed?`);
   }
+
+  // Resolve the app-package root from cwd (RED-286). For the cambium
+  // monorepo this is <root>/packages/cambium; for a flat external app
+  // it is <root> itself.
+  const shape = detectWorkspaceShape(process.cwd());
+  if (!shape) {
+    bail(
+      'No Cambium workspace detected at cwd or ancestors.\n' +
+      'Run from inside a project with Genfile.toml (workspace or package) or a packages/cambium/ subdir.',
+    );
+  }
+  const PKG = shape.appPkgRoot;
 
   console.log(`\nScaffolding tool from description:`);
   console.log(`  "${description}"\n`);

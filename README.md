@@ -57,7 +57,9 @@ cambium new schema MyReport
 # Add system prompt
 cambium new system my_analyst
 
-# Run it
+# Run it. Path convention depends on the Genfile shape:
+#   [workspace] monorepo → packages/cambium/app/gens/...
+#   [package]   flat app → app/gens/...
 CAMBIUM_OMLX_API_KEY=<key> cambium run \
   packages/cambium/app/gens/my_analyst.cmb.rb \
   --method analyze \
