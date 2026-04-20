@@ -182,4 +182,63 @@ describe('cambium lint — RED-284 coverage for new surfaces', () => {
     // still warns about missing exports.gens, but that's expected.
     expect(status).toBe(0);
   });
+
+  // ── RED-286: flat [package] layout (external apps) ──
+  //
+  // A curator-style project has a single top-level Genfile.toml with
+  // [package] at the root and flat app/{gens,tools,...}/ directories —
+  // NO [workspace] members, no packages/cambium/ subdir. runLint must
+  // lint the cwd as a single package instead of bailing with "no
+  // members."
+
+  function setupFlatPackage(dir: string) {
+    writeFileSync(
+      join(dir, 'Genfile.toml'),
+      `[package]
+name = "curator_dogfood"
+version = "0.1.0"
+
+[types]
+contracts = ["src/contracts.ts"]
+
+[tests]
+smoke = "tests/smoke.test.ts"
+`,
+    );
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src/contracts.ts'), '// empty\n');
+    mkdirSync(join(dir, 'tests'), { recursive: true });
+    writeFileSync(join(dir, 'tests/smoke.test.ts'), '// placeholder\n');
+  }
+
+  it('flat [package] layout: lints cwd directly, no "no members" bail', () => {
+    setupFlatPackage(scratch);
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(0);
+    expect(output).not.toMatch(/no \[workspace\] members/);
+    expect(output).toMatch(/package\.name = "curator_dogfood"/);
+  });
+
+  it('flat [package] layout: lints app/correctors/ at the flat path', () => {
+    setupFlatPackage(scratch);
+    mkdirSync(join(scratch, 'app/correctors'), { recursive: true });
+    writeFileSync(
+      join(scratch, 'app/correctors/regex_check.corrector.ts'),
+      `export const regex_check = (data, _ctx) => ({ corrected: false, output: data, issues: [] });\n`,
+    );
+
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(0);
+    expect(output).toMatch(/corrector: regex_check\.corrector\.ts/);
+  });
+
+  it('flat [package] layout: surfaces the same validation errors as workspace layout', () => {
+    setupFlatPackage(scratch);
+    mkdirSync(join(scratch, 'app/policies'), { recursive: true });
+    writeFileSync(join(scratch, 'app/policies/BadCase.policy.rb'), '# empty\n');
+
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(1);
+    expect(output).toMatch(/policy pack name "BadCase".*must match/);
+  });
 });

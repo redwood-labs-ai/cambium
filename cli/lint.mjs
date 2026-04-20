@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, basename } from 'node:path';
+import { detectWorkspaceShape } from './workspace-shape.mjs';
 
 const PASS = '\x1b[32m✓\x1b[0m';
 const FAIL = '\x1b[31m✗\x1b[0m';
@@ -324,34 +325,54 @@ function lintPackage(pkgDir) {
 export function runLint() {
   console.log('\x1b[1mCambium Lint\x1b[0m');
 
-  // Find workspace root
-  const wsGenfile = 'Genfile.toml';
-  if (!existsSync(wsGenfile)) {
-    console.error('No Genfile.toml found in current directory.');
+  // Find the workspace anchor from cwd. Dispatches on shape:
+  //   [workspace] → walk members, lint each
+  //   [package]   → lint the single package at cwd (flat layout; RED-286)
+  const shape = detectWorkspaceShape(process.cwd());
+  if (!shape) {
+    console.error('No Genfile.toml found at cwd or any ancestor.');
     process.exit(2);
   }
 
-  const ws = parseToml(readFileSync(wsGenfile, 'utf8'));
-  const members = ws.workspace?.members;
-  if (!members) {
-    console.error('Genfile.toml has no [workspace] members.');
-    process.exit(2);
-  }
+  // When detection walks up (e.g. cwd is deep inside a monorepo), lint
+  // always operates on the anchor it finds — not cwd — so a
+  // `cambium lint` from inside packages/cambium/src/ still lints the
+  // package's Genfile.
+  const rootGenfile = join(shape.workspaceRoot, 'Genfile.toml');
 
-  // Resolve member globs (simple: just replace * with directory listing)
-  const patterns = Array.isArray(members) ? members : [members];
-  for (const pattern of patterns) {
-    if (pattern.includes('*')) {
-      const dir = pattern.replace('/*', '');
-      if (!existsSync(dir)) continue;
-      for (const entry of readdirSync(dir)) {
-        const pkgDir = join(dir, entry);
-        if (existsSync(join(pkgDir, 'Genfile.toml'))) {
-          lintPackage(pkgDir);
+  if (shape.shape === 'package') {
+    // Flat [package] layout: the anchor IS the one package.
+    lintPackage(shape.workspaceRoot);
+  } else {
+    // [workspace] layout: walk members. The legacy packages/cambium/-only
+    // fallback (no Genfile at root) lints that single package too.
+    if (!existsSync(rootGenfile)) {
+      // Legacy fallback: detectWorkspaceShape returned 'workspace' via the
+      // packages/cambium/ subdir path, without a Genfile at the root.
+      lintPackage(shape.appPkgRoot);
+    } else {
+      const ws = parseToml(readFileSync(rootGenfile, 'utf8'));
+      const members = ws.workspace?.members;
+      if (!members) {
+        console.error(`${rootGenfile} has [workspace] without members.`);
+        process.exit(2);
+      }
+      const patterns = Array.isArray(members) ? members : [members];
+      for (const pattern of patterns) {
+        const abs = join(shape.workspaceRoot, pattern);
+        if (pattern.includes('*')) {
+          const dir = abs.replace('/*', '');
+          if (!existsSync(dir)) continue;
+          for (const entry of readdirSync(dir)) {
+            const pkgDir = join(dir, entry);
+            if (existsSync(join(pkgDir, 'Genfile.toml'))) {
+              lintPackage(pkgDir);
+            }
+          }
+        } else {
+          lintPackage(abs);
         }
       }
-    } else {
-      lintPackage(pattern);
     }
   }
 
