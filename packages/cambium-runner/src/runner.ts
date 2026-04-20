@@ -451,6 +451,25 @@ export interface RunGenOptions {
   mock?: boolean;
   /** Values for `keyed_by` slots on memory pools. Each entry is `name=value`. */
   memoryKeys?: string[];
+  /** RED-287: Explicit engine-folder override. When set, the tool /
+   *  action / corrector discovery scans this dir (treating its
+   *  contents as siblings of the gen) in addition to the app-mode
+   *  paths. When omitted, engine mode is auto-detected by walking up
+   *  from `ir.entry.source` looking for `cambium.engine.json`.
+   *
+   *  Pass this explicitly when the IR was compiled elsewhere but the
+   *  host knows which engine folder the gen came from — e.g. a host
+   *  bundling a pre-compiled IR without its source tree. */
+  engineDir?: string;
+  /** RED-287: Root for run artifacts (memory sqlite buckets live at
+   *  `<runsRoot>/memory/<scope>/<key>/<name>.sqlite`). Defaults to
+   *  `<engineDir>/runs` when engine mode is detected, else
+   *  `<process.cwd()>/runs`. Host wrappers that centralize runs
+   *  across many engines override this. */
+  runsRoot?: string;
+  /** RED-287: Explicit session id for memory `:session` scope. Wins
+   *  over `CAMBIUM_SESSION_ID`. Defaults to auto-generated. */
+  sessionId?: string;
 }
 
 export interface RunGenResult {
@@ -477,7 +496,15 @@ class BudgetExceededError extends Error {
 }
 
 export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
-  const { ir, schemas: contractsMod, mock: mockFlag = false, memoryKeys = [] } = opts;
+  const {
+    ir,
+    schemas: contractsMod,
+    mock: mockFlag = false,
+    memoryKeys = [],
+    engineDir: engineDirOpt,
+    runsRoot: runsRootOpt,
+    sessionId: sessionIdOpt,
+  } = opts;
 
   // Plumb opts.mock through to the deterministic-mock branch in
   // generateText. That branch is gated on CAMBIUM_ALLOW_MOCK=1 — the CLI
@@ -535,7 +562,12 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   // access to workspace-declared tools (e.g. shared wire protocols
   // tooling). Engine siblings win on name collision (loadFromDir's
   // last-write semantics).
-  const engineDir = resolveEngineDir(ir.entry?.source);
+  //
+  // The explicit `opts.engineDir` wins over auto-detection — host
+  // wrappers that bundle a pre-compiled IR can inject their engine
+  // folder directly (the IR's `entry.source` still points at the
+  // original compile location, which may not exist at host runtime).
+  const engineDir = engineDirOpt ?? resolveEngineDir(ir.entry?.source);
   const { appPkgRoot } = resolveAppRoot(process.cwd());
 
   // ── Load tool registry ──────────────────────────────────────────────
@@ -648,12 +680,21 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   const memoryDecls = isRetroMode ? [] : (ir.policies?.memory ?? []);
   if (memoryDecls.length > 0) {
     const keys = parseMemoryKeys(memoryKeys);
-    const sessionId = resolveSessionId(process.env);
+    // RED-287: explicit opts.sessionId wins over CAMBIUM_SESSION_ID.
+    // Host wrappers set this explicitly so per-tenant runs don't leak
+    // into each other via an inherited env var.
+    const sessionId = sessionIdOpt ?? resolveSessionId(process.env);
+    // RED-287: runsRoot defaults to <engineDir>/runs for engine mode,
+    // else <cwd>/runs. Host wrappers can centralize across engines by
+    // passing opts.runsRoot explicitly.
+    const runsRoot = runsRootOpt ?? (engineDir
+      ? join(engineDir, 'runs')
+      : join(process.cwd(), 'runs'));
     const memCtx = {
       input: getGroundingDocument(ir),
       sessionId,
       keys,
-      runsRoot: join(process.cwd(), 'runs'),
+      runsRoot,
     };
     memoryPlans = planMemory(memoryDecls, memCtx);
     const { block, trace: readTrace, backends } = await readMemoryForRun(memoryPlans, memCtx);
@@ -1284,7 +1325,11 @@ async function main() {
 
   const result = await runGen({ ir, schemas: contractsMod, mock, memoryKeys });
 
-  const runDir = join(process.cwd(), 'runs', result.runId);
+  // RED-287: engine-mode run artifacts go under <engineDir>/runs/ so
+  // the engine folder stays self-contained. App mode continues to
+  // write under <cwd>/runs/.
+  const runsBase = engineDir ? join(engineDir, 'runs') : join(process.cwd(), 'runs');
+  const runDir = join(runsBase, result.runId);
   mkdirSync(runDir, { recursive: true });
   writeFileSync(join(runDir, 'ir.json'), JSON.stringify(result.ir, null, 2));
   writeFileSync(traceOut ?? join(runDir, 'trace.json'), JSON.stringify(result.trace, null, 2));
