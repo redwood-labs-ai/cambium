@@ -125,7 +125,7 @@ Framework ships three built-ins:
 
 - `:stdout` — human-readable `[<event>] <key>=<value>...` text. For local dev and ops-station tailing.
 - `:http_json` — generic POST to any URL with a JSON body. Configure endpoint via profile. Catches every "my platform accepts JSON" case.
-- `:datadog` — purpose-built. POSTs to DD's log intake (`https://http-intake.logs.datadoghq.com/api/v2/logs`), sets `ddsource: cambium`, `ddtags: gen:<snake>,method:<snake>,ok:<bool>`, flattens the trace payload for DD's indexed-field model. Credential via `CAMBIUM_DATADOG_API_KEY` (or `api_key_env:` profile override).
+- `:datadog` — purpose-built. POSTs to DD's log intake (`https://http-intake.logs.datadoghq.com/api/v2/logs`), sets `ddsource: cambium`, `ddtags: gen:<snake>,method:<snake>,ok:<bool>`, flattens the trace payload for DD's indexed-field model, and maps the framework event taxonomy to DD's `status` field (see [[P - log]] § Datadog status mapping) so severity facets and monitor queries work out of the box. Credential via `CAMBIUM_DATADOG_API_KEY` (or `api_key_env:` profile override).
 
 Plugin pattern mirrors RED-209 (tools) and RED-275 (correctors). App ships `app/logs/<name>.log.ts` exporting a `LogSink` function:
 
