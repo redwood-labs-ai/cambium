@@ -131,7 +131,7 @@ Plugin pattern mirrors RED-209 (tools) and RED-275 (correctors). App ships `app/
 
 ```ts
 // app/logs/honeycomb.log.ts
-import type { LogSink } from '@cambium/runner';
+import type { LogSink } from '@redwood-labs/cambium-runner';
 
 export const honeycomb: LogSink = async (event, ctx) => {
   // ... POST to Honeycomb, handle auth, etc.

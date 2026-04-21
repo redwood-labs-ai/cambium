@@ -34,7 +34,7 @@ import { runDoctor } from './doctor.mjs';
 // mirrors it. (RED-274)
 //
 // RED-306: the TS runner is no longer invoked as a subprocess. The CLI
-// imports `runGenFromIr` from `@cambium/runner` and invokes it
+// imports `runGenFromIr` from `@redwood-labs/cambium-runner` and invokes it
 // in-process (Option B).
 const CLI_DIR = dirname(fileURLToPath(import.meta.url));
 const RUBY_COMPILE_SCRIPT = resolve(CLI_DIR, '..', 'ruby', 'cambium', 'compile.rb');
@@ -247,7 +247,7 @@ if (compile.status !== 0) {
   process.exit(compile.status ?? 1);
 }
 
-// RED-306: run the IR in-process via `@cambium/runner`. Replaces the
+// RED-306: run the IR in-process via `@redwood-labs/cambium-runner`. Replaces the
 // prior `node --import tsx packages/cambium-runner/src/runner.ts`
 // subprocess. Benefits: no `tsx` runtime dep for end users, no
 // subprocess-boundary env-race for CAMBIUM_ALLOW_MOCK, faster startup.
@@ -269,7 +269,7 @@ if (mock) process.env.CAMBIUM_ALLOW_MOCK = '1';
 if (sessionId !== null) process.env.CAMBIUM_SESSION_ID = sessionId;
 
 try {
-  const { runGenFromIr } = await import('@cambium/runner');
+  const { runGenFromIr } = await import('@redwood-labs/cambium-runner');
   const result = await runGenFromIr({
     ir,
     cwd: process.cwd(),

@@ -222,7 +222,7 @@ export const ${schemaName} = Type.Object(
 // re-generate this file (or hand-edit the type signatures) when the
 // schema shape changes.
 
-import { runGen } from '@cambium/runner';
+import { runGen } from '@redwood-labs/cambium-runner';
 import * as schemas from './schemas.js';
 import irData from './${snake}.ir.json' with { type: 'json' };
 import type { Static } from '@sinclair/typebox';
@@ -403,7 +403,7 @@ function generateTool(name, ctx) {
  * permissions block and use \`ctx.fetch\` here — NOT globalThis.fetch
  * (the SSRF guard lives on ctx.fetch; direct fetch bypasses it).
  */
-import type { ToolContext } from '@cambium/runner';
+import type { ToolContext } from '@redwood-labs/cambium-runner';
 
 export async function execute(
   input: { input: string },
@@ -425,13 +425,13 @@ export async function execute(
   }
 
   // App mode. External apps (shape === 'package') import ToolContext
-  // from the published @cambium/runner package; the in-tree cambium
+  // from the published @redwood-labs/cambium-runner package; the in-tree cambium
   // workspace (shape === 'workspace') uses a deep relative to the
   // framework source since it doesn't import itself as a package.
   const PKG = ctx.appPkgRoot;
   const toolContextImport = ctx.shape === 'workspace'
     ? '../../../cambium-runner/src/tools/tool-context.js'
-    : '@cambium/runner';
+    : '@redwood-labs/cambium-runner';
   writeFile(join(PKG, 'app/tools', `${snake}.tool.json`), toolJson);
   writeFile(join(PKG, 'app/tools', `${snake}.tool.ts`), `\
 /**
@@ -559,11 +559,11 @@ function generateCorrector(name, ctx) {
   }
 
   // Import path differs by mode to match existing scaffolder conventions:
-  //   - engine mode imports from the @cambium/runner npm package.
+  //   - engine mode imports from the @redwood-labs/cambium-runner npm package.
   //   - in-tree app mode uses a deep relative path to the framework
   //     correctors/types.ts (same stance generateTool takes for
   //     ToolContext). External apps with their own Genfile + flat
-  //     layout will want @cambium/runner; that layout isn't supported
+  //     layout will want @redwood-labs/cambium-runner; that layout isn't supported
   //     by the app-mode scaffolder today — see the CLI-parity-audit
   //     ticket's layout-flexibility follow-up.
   const makeBody = (typeImport) => `\
@@ -600,7 +600,7 @@ export const ${snake}: CorrectorFn = (data, _context): CorrectorResult => {
     // Engine mode: sibling of the engine's gens. Same auto-discovery
     // semantics once the runner's discovery walk is engine-aware; today
     // app-mode is the primary target.
-    writeFile(join(ctx.engineDir, `${snake}.corrector.ts`), makeBody('@cambium/runner'));
+    writeFile(join(ctx.engineDir, `${snake}.corrector.ts`), makeBody('@redwood-labs/cambium-runner'));
     console.log(`\nNext steps:`);
     console.log(`  1. Implement ${ctx.engineDir}/${snake}.corrector.ts`);
     console.log(`  2. Declare in your gen: corrects :${snake}`);
@@ -609,12 +609,12 @@ export const ${snake}: CorrectorFn = (data, _context): CorrectorResult => {
   }
 
   // App mode. External apps (shape === 'package') import CorrectorFn
-  // et al. from @cambium/runner; in-tree cambium workspace
+  // et al. from @redwood-labs/cambium-runner; in-tree cambium workspace
   // (shape === 'workspace') uses the deep relative to framework source.
   const PKG = ctx.appPkgRoot;
   const correctorTypeImport = ctx.shape === 'workspace'
     ? '../../../cambium-runner/src/correctors/types.js'
-    : '@cambium/runner';
+    : '@redwood-labs/cambium-runner';
   writeFile(
     join(PKG, 'app/correctors', `${snake}.corrector.ts`),
     makeBody(correctorTypeImport),
@@ -678,7 +678,7 @@ export async function execute(
 
   if (ctx.mode === 'engine') {
     writeFile(join(ctx.engineDir, `${snake}.action.json`), actionJson);
-    writeFile(join(ctx.engineDir, `${snake}.action.ts`), makeBody('@cambium/runner'));
+    writeFile(join(ctx.engineDir, `${snake}.action.ts`), makeBody('@redwood-labs/cambium-runner'));
     console.log(`\nNext steps:`);
     console.log(`  1. Edit ${ctx.engineDir}/${snake}.action.json — schemas + permissions`);
     console.log(`  2. Implement ${ctx.engineDir}/${snake}.action.ts`);
@@ -689,7 +689,7 @@ export async function execute(
   const PKG = ctx.appPkgRoot;
   const toolContextImport = ctx.shape === 'workspace'
     ? '../../../cambium-runner/src/tools/tool-context.js'
-    : '@cambium/runner';
+    : '@redwood-labs/cambium-runner';
   writeFile(join(PKG, 'app/actions', `${snake}.action.json`), actionJson);
   writeFile(
     join(PKG, 'app/actions', `${snake}.action.ts`),

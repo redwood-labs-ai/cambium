@@ -79,7 +79,7 @@ export async function runAgenticToolScaffold(description) {
       bail('Scaffolder compile failed.', compile.status ?? 1);
     }
 
-    // RED-306: run in-process via @cambium/runner (replaces the prior
+    // RED-306: run in-process via @redwood-labs/cambium-runner (replaces the prior
     // `node --import tsx .../runner.ts` subprocess).
     let ir;
     try {
@@ -89,7 +89,7 @@ export async function runAgenticToolScaffold(description) {
     }
     let runResult;
     try {
-      const { runGenFromIr } = await import('@cambium/runner');
+      const { runGenFromIr } = await import('@redwood-labs/cambium-runner');
       runResult = await runGenFromIr({
         ir,
         cwd: process.cwd(),

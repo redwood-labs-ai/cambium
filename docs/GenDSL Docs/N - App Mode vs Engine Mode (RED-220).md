@@ -70,7 +70,7 @@ All seven are now on `RunGenOptions` (engine-mode runtime catch-up). Everything 
 
 ```
 my-node-app/
-├── package.json                     # adds @cambium/runner as a dep
+├── package.json                     # adds @redwood-labs/cambium-runner as a dep
 ├── src/
 │   └── index.ts                     # import { summarize } from '../cambium/summarizer'
 └── cambium/
@@ -95,7 +95,7 @@ Every surface Cambium supports — tools, actions, correctors, systems, policies
 
 Three principles:
 
-1. **The folder is the unit of portability.** Everything one gen needs lives in one folder. No upward references except to `@cambium/runner` and the host's `package.json`.
+1. **The folder is the unit of portability.** Everything one gen needs lives in one folder. No upward references except to `@redwood-labs/cambium-runner` and the host's `package.json`.
 2. **Generated files are committed.** `summarizer.ir.json` and `index.ts` are produced by `cambium compile` but checked into the host repo. The host should not need Ruby to *run*, only to *modify*. (See "Ruby is a dev-time dependency" below.)
 3. **NO `app/<type>/` subdirectories inside an engine folder.** This is the trap that bit a real attempt — see the next section. Tools, policies, pools, and systems are siblings of the gen, addressed by `<name>.tool.ts`, `<name>.policy.rb`, etc. If a single engine folder grows enough adjacent files to feel cluttered, it has likely outgrown engine mode and should become an app-mode workspace.
 
@@ -152,7 +152,7 @@ runGen(ir, { input, schemas, runsRoot, env, ... });
 **Decision:** Single library entry point. All app-mode hardcoded paths become optional fields.
 
 ```ts
-import { runGen, type GenResult } from '@cambium/runner';
+import { runGen, type GenResult } from '@redwood-labs/cambium-runner';
 
 interface RunGenOptions {
   input: unknown;                              // the gen's input
@@ -177,7 +177,7 @@ async function runGen(ir: IR, opts: RunGenOptions): Promise<GenResult>;
 
 **Pinned semantics:**
 
-- **Builtins always loaded.** Framework-builtin tools (`packages/cambium-runner/src/builtin-tools/`) and actions (`packages/cambium-runner/src/builtin-actions/`) are always loaded, in `@cambium/runner`'s own package. `toolsDir` / `actionsDir` add user-supplied dirs *on top*; they do not replace builtins. App-tool override semantics from RED-209 / RED-221 are preserved (later loads win on name collision).
+- **Builtins always loaded.** Framework-builtin tools (`packages/cambium-runner/src/builtin-tools/`) and actions (`packages/cambium-runner/src/builtin-actions/`) are always loaded, in `@redwood-labs/cambium-runner`'s own package. `toolsDir` / `actionsDir` add user-supplied dirs *on top*; they do not replace builtins. App-tool override semantics from RED-209 / RED-221 are preserved (later loads win on name collision).
 - **`runsRoot` is process-relative by default.** Passing nothing gets `join(cwd(), 'runs')` — same as today. The memory subsystem already takes `runsRoot` from `MemoryCtx` (`packages/cambium-runner/src/memory/path.ts:7`); this work just lifts the hardcode at `runner.ts:532` into the option.
 - **`sessionId` precedence:** `opts.sessionId` > `process.env.CAMBIUM_SESSION_ID` > auto-generated. Same precedence as today; just adds the explicit-option layer at the top.
 - **No CLI shape exposed.** The CLI keeps its own argv parsing. `runGen` does not accept `argv` or anything that smells like a CLI. The CLI is a thin caller of `runGen`, not the other way around.
@@ -273,8 +273,8 @@ The folder ships with `summarizer.cmb.rb` *and* `summarizer.ir.json`. The host r
 
 **Implications:**
 
-- `@cambium/runner` has no Ruby dependency. Pure Node/TS package.
-- `cambium compile` is a Ruby-requiring dev tool. It's part of the `cambium` gem (or a Node wrapper that shells out to Ruby), not part of `@cambium/runner`.
+- `@redwood-labs/cambium-runner` has no Ruby dependency. Pure Node/TS package.
+- `cambium compile` is a Ruby-requiring dev tool. It's part of the `cambium` gem (or a Node wrapper that shells out to Ruby), not part of `@redwood-labs/cambium-runner`.
 - A host without Ruby installed can still import and run the engine. Editing the gen on a Ruby-equipped machine is a CI step or a contributor responsibility.
 - A future "Docker-based `cambium compile`" path is a reasonable escape hatch for shops that want zero Ruby on their dev machines, but it is *not* a v0 concern. File separately if a concrete need surfaces.
 
@@ -286,7 +286,7 @@ The honest framing for engine-mode docs: "you need Ruby to author and recompile 
 
 The RED-220 ticket lists five follow-up implementation pieces. With the decisions above pinned, each becomes a tractable ticket:
 
-1. **Publish `@cambium/runner` as an npm package.** *(Package boundary shipped in RED-242. Programmatic `runGen` API + npm publish pending RED-243.)*
+1. **Publish `@redwood-labs/cambium-runner` as an npm package.** *(Package boundary shipped in RED-242. Programmatic `runGen` API + npm publish pending RED-243.)*
    - Pre-decided: API surface (RunGenOptions / GenResult above).
    - Resolved by RED-242: package boundary is `packages/cambium-runner/`. Everything under `packages/cambium-runner/src/` is part of the public package — `runner.ts`, `step-handlers.ts`, `correctors/`, `memory/`, `tools/` infrastructure, `triggers.ts`, `signals.ts`, `compound.ts`, `enrich.ts`, `schema-describe.ts`, `actions/`, `builtin-tools/`, `builtin-actions/`, `providers/`, `budget.ts`, `inline-tool-calls.ts`, `golden.ts`. Test files (`*.test.ts`) ship in the repo for now but will be excluded from the published artifact when RED-243 wires the schema-injection API and we cut a real `0.1.0`.
 
@@ -300,7 +300,7 @@ The RED-220 ticket lists five follow-up implementation pieces. With the decision
 
 4. **Schema co-location wiring.** *(Shipped in RED-243, extended RED-274.)*
    - Pre-decided: caller-injected schemas (above). Implementation is one edit: `runner.ts:430` becomes a parameter read instead of a file import. The app-mode CLI gets a one-line shim that imports `contracts.ts` and passes it in, preserving today's behaviour.
-   - Resolved (RED-243): `runGen(opts)` is exported from `@cambium/runner` (`packages/cambium-runner/src/index.ts`), takes `opts.schemas` (caller-injected), and returns a structured `RunGenResult` (`{ ok, output, trace, runId, schemaId, ir, errorMessage? }`). The runner no longer imports any contracts file by path. Engine-mode callers (RED-246) pass a sibling `schemas.ts`.
+   - Resolved (RED-243): `runGen(opts)` is exported from `@redwood-labs/cambium-runner` (`packages/cambium-runner/src/index.ts`), takes `opts.schemas` (caller-injected), and returns a structured `RunGenResult` (`{ ok, output, trace, runId, schemaId, ir, errorMessage? }`). The runner no longer imports any contracts file by path. Engine-mode callers (RED-246) pass a sibling `schemas.ts`.
    - Extended (RED-274): the CLI's `main()` now resolves schemas from the app's `Genfile.toml` `[types].contracts` list when present — `packages/cambium-runner/src/genfile.ts` reads the file at cwd, validates each path (rejects absolute paths, `..` escapes, null bytes), imports each via `pathToFileURL`, and merges named exports into the schemas registry. When no `Genfile.toml` exists at cwd (or it has no `[types].contracts`, e.g. a `[workspace]` Genfile), the CLI falls back to importing `packages/cambium/src/contracts.ts` — preserving back-compat for the monorepo's own example app. Surfaced while building `redwood-scanner/curator/` (the first external dogfood); fixes the prior "paste your schema into the framework repo" workaround.
 
 5. **`cambium new engine <Name>` scaffolder + sentinel-aware mode detection.** *(Shipped in RED-246.)*
@@ -331,7 +331,7 @@ The RED-220 ticket lists five follow-up implementation pieces. With the decision
 The generated `index.ts` template:
 
 ```ts
-import { runGen } from '@cambium/runner';
+import { runGen } from '@redwood-labs/cambium-runner';
 import * as schemas from './schemas';
 import ir from './summarizer.ir.json' with { type: 'json' };
 import type { Static } from '@sinclair/typebox';
@@ -368,7 +368,7 @@ The function name (`summarize`) and method-signature input type are derived from
 - [x] Engine-folder sentinel + scaffolder mode-detection is specified.
 - [x] Ruby-as-dev-dep position is stated.
 - [x] Each impl piece has a Linear ticket filed against it.
-- [x] First proof-of-concept exists: a fresh Node project that is *not* the Cambium monorepo, with one engine-mode gen folder and a typed `import` calling into `@cambium/runner` end-to-end. The POC explicitly re-runs the first-attempt scenario to confirm the `app/app` trap no longer reproduces. **Lives at `/Users/stevekeider/dev/cambium-poc/`** — depends on `@cambium/runner` via `file:../cambium/packages/cambium-runner` (closest sim of `npm install @cambium/runner` until we publish for real). End-to-end output captured below.
+- [x] First proof-of-concept exists: a fresh Node project that is *not* the Cambium monorepo, with one engine-mode gen folder and a typed `import` calling into `@redwood-labs/cambium-runner` end-to-end. The POC explicitly re-runs the first-attempt scenario to confirm the `app/app` trap no longer reproduces. **Lives at `/Users/stevekeider/dev/cambium-poc/`** — depends on `@redwood-labs/cambium-runner` via `file:../cambium/packages/cambium-runner` (closest sim of `npm install @redwood-labs/cambium-runner` until we publish for real). End-to-end output captured below.
 
 This note is the design artefact the ticket called for in its first acceptance bullet.
 
@@ -380,7 +380,7 @@ The POC produced a typed, validated result on the first end-to-end attempt — *
 
 2. **System-prompt resolver lacked engine-mode awareness.** `ruby/cambium/compile.rb`'s `system :name` resolver only walked `<pkg>/app/systems/` and the cwd-relative workspace fallback. Engine-mode gens with `system :name` referencing a sibling `<name>.system.md` would fail. Fix: extend the RED-245 discovery pattern (gen-local first, then walk-up, sentinel-aware suppression) to system prompts. The schema-existence validator (RED-210) has the same gap but is already best-effort skipping, so it doesn't block — it just means engine-mode users get no compile-time schema-name validation. Worth a future pass.
 
-3. **`runner.ts` always fired its CLI `main()` on import.** The unconditional `main().catch(...)` at module bottom fired the moment a host did `import { runGen } from '@cambium/runner'`, leading to a `Missing --ir` error before the host's code ran. Fix: gate `main()` behind an `invokedAsScript` check (`fileURLToPath(import.meta.url) === process.argv[1]`). Standard Node script-vs-library guard; we just hadn't applied it because everything in the monorepo was script-only until the engine-mode POC.
+3. **`runner.ts` always fired its CLI `main()` on import.** The unconditional `main().catch(...)` at module bottom fired the moment a host did `import { runGen } from '@redwood-labs/cambium-runner'`, leading to a `Missing --ir` error before the host's code ran. Fix: gate `main()` behind an `invokedAsScript` check (`fileURLToPath(import.meta.url) === process.argv[1]`). Standard Node script-vs-library guard; we just hadn't applied it because everything in the monorepo was script-only until the engine-mode POC.
 
 4. **`opts.mock` didn't actually plumb through.** The mock branch in `generateText` is gated on `CAMBIUM_ALLOW_MOCK=1`. The CLI sets that env var when `--mock` is passed; library callers passing `mock: true` would still hit the live LLM path and 401 against the oMLX server. Fix: set the env var inside `runGen` when `opts.mock` is true, restore it in a `finally` so concurrent callers and the surrounding process aren't affected. Threading `mockFlag` down to `generateText` as an explicit parameter is cleaner long-term but requires more touch-points; the env-var bridge is sufficient for v0 with the documented "serialize concurrent calls with conflicting mock settings" caveat.
 
@@ -421,7 +421,7 @@ The RED-220 ticket lists these as non-goals; they remain non-goals here:
 
 - **Sidecar / Docker / non-Node hosts.** Engine mode is the Node/TS embedding case. A polyglot or all-Cambium-in-a-container deployment is a different problem.
 - **Cross-language client SDKs.** Same deferral.
-- **IR versioning / forward-compat spec.** `@cambium/runner` is semver-pinned by callers; that's enough until there is a reason to do more.
+- **IR versioning / forward-compat spec.** `@redwood-labs/cambium-runner` is semver-pinned by callers; that's enough until there is a reason to do more.
 - **Multi-tenancy, sidecar state management.** Not relevant to embedded-in-Node.
 
 ---
@@ -430,6 +430,6 @@ The RED-220 ticket lists these as non-goals; they remain non-goals here:
 
 - [[D - Packages & Workspaces (Scale-Invariant)]] — the app-mode workspace convention this note layers engine mode on top of.
 - [[C - IR (Intermediate Representation)]] — the IR is the boundary that lets engine mode work without coupling Ruby and TS at runtime.
-- [[C - Runner (TS runtime)]] — what `@cambium/runner` packages.
+- [[C - Runner (TS runtime)]] — what `@redwood-labs/cambium-runner` packages.
 - [[P - Memory]] — `runsRoot` plumbing precedent.
 - [[P - Policy Packs (RED-214)]] — search-path precedent for the relax in (4).

@@ -32,7 +32,7 @@ That's a complete, runnable LLM program. The Ruby compiler turns it into JSON IR
 npm install -g cambium
 
 # OR: library only (engine-mode hosts that compose IR and invoke runGen directly)
-npm install @cambium/runner
+npm install @redwood-labs/cambium-runner
 ```
 
 ### Prerequisites
@@ -94,7 +94,7 @@ cat runs/<run_id>/trace.json | jq .
     ▼  compile.rb (Ruby)
 JSON IR (intermediate representation)
     │
-    ▼  @cambium/runner (TypeScript)
+    ▼  @redwood-labs/cambium-runner (TypeScript)
 ┌─────────────────────────────────┐
 │  Generate → Validate → Repair   │
 │       ↓                         │
@@ -117,10 +117,10 @@ Full documentation is in [`docs/GenDSL Docs/`](docs/GenDSL%20Docs/) — a knowle
 
 ## Engine mode
 
-Host projects that want to compose Cambium IR and invoke the runtime directly (rather than via the CLI) use `@cambium/runner` as a library:
+Host projects that want to compose Cambium IR and invoke the runtime directly (rather than via the CLI) use `@redwood-labs/cambium-runner` as a library:
 
 ```ts
-import { runGen } from '@cambium/runner';
+import { runGen } from '@redwood-labs/cambium-runner';
 import * as schemas from './schemas.js';
 
 const result = await runGen({ ir, schemas, mock: false });

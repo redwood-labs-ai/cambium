@@ -40,7 +40,7 @@ In [[N - App Mode vs Engine Mode (RED-220)|app-mode]] (workspace has a `Genfile.
 
 ```ts
 // app/correctors/regex_compiles_and_tests_pass.corrector.ts
-import type { CorrectorFn } from '@cambium/runner';
+import type { CorrectorFn } from '@redwood-labs/cambium-runner';
 
 export const regex_compiles_and_tests_pass: CorrectorFn = (data, _ctx) => {
   // data is the LLM's parsed output; verify, return issues if it fails.
@@ -60,10 +60,10 @@ The name must match `/^[a-z][a-z0-9_]*$/` (traversal guard). The export name mus
 
 ## Engine-mode hosts: `RunGenOptions.correctors` (RED-299)
 
-Library consumers that import `runGen` from `@cambium/runner` and drive multiple gens in one process pass correctors per-call via `RunGenOptions`:
+Library consumers that import `runGen` from `@redwood-labs/cambium-runner` and drive multiple gens in one process pass correctors per-call via `RunGenOptions`:
 
 ```ts
-import { runGen, builtinCorrectors } from '@cambium/runner';
+import { runGen, builtinCorrectors } from '@redwood-labs/cambium-runner';
 import { my_app_corrector } from './correctors/my_app.corrector';
 
 await runGen({
