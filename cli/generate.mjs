@@ -821,6 +821,72 @@ strategy :sliding_window
   console.log(`  MemoryPool.load to prevent path traversal via symbol.`);
 }
 
+// ── Log profile scaffolder (RED-282 / RED-302) ───────────────────────
+//
+// `cambium new log_profile <name>` → app/log_profiles/<name>.log_profile.rb
+//
+// Profile file declares destinations + include fields + granularity.
+// Gens reference the profile by symbol (`log :<name>`) and inherit the
+// whole bundle. Follows the RED-214 policy-pack / RED-215 memory-pool
+// one-file-per-object structural invariant.
+function generateLogProfile(name, ctx) {
+  validateName(name, 'log profile name');
+  const snake = snakeCase(name);
+
+  if (!/^[a-z][a-z0-9_]*$/.test(snake)) {
+    console.error(`Log profile name "${snake}" must match /^[a-z][a-z0-9_]*$/ (RED-302).`);
+    process.exit(2);
+  }
+
+  const profileBody = `\
+# RED-282 log profile: destinations + field configuration for gens
+# that opt in via \`log :${snake}\`.
+#
+# Each destination is a trace-fan-out target. Framework built-ins:
+#   :stdout     — human-readable text on stderr (local dev)
+#   :http_json  — generic JSON POST to any endpoint
+#   :datadog    — purpose-built Datadog intake with flattening + tags
+# App plugins live at app/logs/<name>.log.ts (RED-209-style).
+
+# Typical production shape: ship structured events to DD, with a local
+# mirror for dev runs.
+destination :datadog,
+  endpoint: ENV["DD_LOG_INTAKE_URL"] || "https://http-intake.logs.datadoghq.com/api/v2/logs",
+  api_key_env: "CAMBIUM_DATADOG_API_KEY"
+# destination :stdout
+
+# Framework-always fields (run_id, gen, method, event, ok, duration_ms,
+# usage, schema_id, trace_ref) are always emitted. Opt into richer
+# payloads here:
+#   :signals         — extracted signal values
+#   :output_summary  — truncated output snapshot
+#   :tool_calls      — per-tool dispatch counts
+#   :repair_attempts — how many repairs fired
+#   :errors          — validation errors on ok:false runs
+include :signals, :repair_attempts
+
+# :run (default) — one event per run. :step — one event per trace step
+# (opt-in firehose).
+granularity :run
+`;
+
+  if (ctx.mode === 'engine') {
+    console.error(`\n'cambium new log_profile' is not supported in engine mode.`);
+    console.error(`Log profiles live at the workspace level — engines can declare \`log :datadog\` inline instead.`);
+    process.exit(2);
+  }
+
+  const PKG = ctx.appPkgRoot;
+  writeFile(join(PKG, 'app/log_profiles', `${snake}.log_profile.rb`), profileBody);
+
+  console.log(`\nNext steps:`);
+  console.log(`  1. Review destinations + include fields in ${PKG}/app/log_profiles/${snake}.log_profile.rb`);
+  console.log(`  2. Reference from a gen: log :${snake}`);
+  console.log(`  3. Set the credential env var at runtime (CAMBIUM_DATADOG_API_KEY or equivalent).`);
+  console.log(`\n  Name must match /^[a-z][a-z0-9_]*$/ — enforced at both scaffold time and`);
+  console.log(`  LogProfile.load to prevent path traversal via symbol.`);
+}
+
 // ── Config scaffolder (RED-237 + RED-239, added RED-284) ──────────────
 //
 // `cambium new config models`          → app/config/models.rb (RED-237)
@@ -919,6 +985,7 @@ const GENERATORS = {
   corrector: generateCorrector,
   policy: generatePolicy,
   memory_pool: generateMemoryPool,
+  log_profile: generateLogProfile,
   config: generateConfig,
   engine: generateEngine,
 };
@@ -937,6 +1004,7 @@ export function runGenerate(type, name) {
     console.error(`  cambium new corrector regex_check   # add an app corrector (RED-275)`);
     console.error(`  cambium new policy research_caps    # add a security+budget pack (RED-214)`);
     console.error(`  cambium new memory_pool support     # add a memory pool (RED-215)`);
+    console.error(`  cambium new log_profile app_default # add a log profile (RED-302)`);
     console.error(`  cambium new config models           # add app/config/models.rb (RED-237)`);
     console.error(`  cambium new config memory_policy    # add app/config/memory_policy.rb (RED-239)\n`);
     process.exit(2);

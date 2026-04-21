@@ -47,7 +47,8 @@ smoke = "tests/smoke.test.ts"
   // empty in the starter layout makes the workspace's shape discoverable.
   // Convention surfaces: gens / systems / tools (RED-209) / actions
   // (RED-212) / correctors (RED-275) / policies (RED-214) / memory_pools
-  // (RED-215) / config (RED-237 + RED-239).
+  // (RED-215) / config (RED-237 + RED-239) / log_profiles (RED-302) /
+  // logs (RED-302 app plugins).
   const dirs = [
     `${pkg}/app/gens`,
     `${pkg}/app/systems`,
@@ -56,6 +57,8 @@ smoke = "tests/smoke.test.ts"
     `${pkg}/app/correctors`,
     `${pkg}/app/policies`,
     `${pkg}/app/memory_pools`,
+    `${pkg}/app/log_profiles`,
+    `${pkg}/app/logs`,
     `${pkg}/app/config`,
     `${pkg}/src`,
     `${pkg}/tests`,

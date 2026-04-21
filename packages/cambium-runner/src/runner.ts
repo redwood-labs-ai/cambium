@@ -48,6 +48,8 @@ import { resolveGenfileContracts, loadContractsFromGenfile } from './genfile.js'
 import { loadAppCorrectors } from './correctors/app-loader.js';
 import { builtinCorrectors, _getLegacyAppCorrectors } from './correctors/index.js';
 import type { CorrectorFn } from './correctors/types.js';
+import { builtinLogSinks, emitLogEvent, loadAppLogSinks, buildRunLogEvent, classifyRunOutcome } from './log/index.js';
+import type { LogSink, LogDestination } from './log/index.js';
 import { getGroundingDocument } from './context.js';
 import { resolveAppRoot } from './app-root.js';
 import { resolveEngineDir } from './engine-root.js';
@@ -487,6 +489,12 @@ export interface RunGenOptions {
    *  runner additionally scans the engine folder for sibling
    *  `*.corrector.ts` and merges those on top. */
   correctors?: Record<string, CorrectorFn>;
+  /** RED-302: Per-`runGen` log-sink map (parallel to `correctors`).
+   *  Merged over framework built-ins (`stdout`, `http_json`, `datadog`).
+   *  App plugin sinks under `app/logs/*.log.ts` are auto-discovered
+   *  and merged on top. Host wrappers set this to inject a custom
+   *  backend (e.g. Honeycomb, Sentry) without a file-based plugin. */
+  logSinks?: Record<string, LogSink>;
 }
 
 export interface RunGenResult {
@@ -522,6 +530,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     runsRoot: runsRootOpt,
     sessionId: sessionIdOpt,
     correctors: optsCorrectors,
+    logSinks: optsLogSinks,
   } = opts;
 
   // Plumb opts.mock through to the deterministic-mock branch in
@@ -653,6 +662,45 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
       correctors[name] = fn;
     }
   }
+
+  // ── Build per-`runGen` log-sink map (RED-282 / RED-302) ────────────
+  // Same precedence shape as correctors (RED-299), low → high:
+  //   1. Framework built-ins (stdout, http_json, datadog)
+  //   2. App plugins (app/logs/*.log.ts) — can shadow built-ins; warn
+  //   3. Engine-sibling plugins (<engineDir>/*.log.ts) — authoritative
+  //      for the engine folder
+  //   4. opts.logSinks — explicit host intent, wins over everything
+  // Isolation holds per-call.
+  const logSinks: Record<string, LogSink> = { ...builtinLogSinks };
+  const appPlugins = await loadAppLogSinks(appPkgRoot);
+  for (const [name, fn] of Object.entries(appPlugins.sinks)) {
+    if (name in builtinLogSinks) {
+      console.error(`[cambium] app log sink "${name}" overrides the framework built-in`);
+    }
+    logSinks[name] = fn;
+  }
+  if (engineDir) {
+    const enginePlugins = await loadAppLogSinks(engineDir, { engineDir });
+    for (const [name, fn] of Object.entries(enginePlugins.sinks)) {
+      logSinks[name] = fn;
+    }
+  }
+  for (const [name, fn] of Object.entries(optsLogSinks ?? {})) {
+    logSinks[name] = fn;
+  }
+
+  // Log destinations come pre-resolved from the IR (profiles inlined
+  // at compile time).
+  const logDestinations: LogDestination[] = (ir.policies?.log ?? []).map(
+    (raw: any): LogDestination => ({
+      destination: String(raw.destination),
+      include: Array.isArray(raw.include) ? raw.include.map(String) : [],
+      granularity: raw.granularity === 'step' ? 'step' : 'run',
+      endpoint: typeof raw.endpoint === 'string' ? raw.endpoint : undefined,
+      api_key_env: typeof raw.api_key_env === 'string' ? raw.api_key_env : undefined,
+      _profile: typeof raw._profile === 'string' ? raw._profile : undefined,
+    }),
+  );
 
   const toolsAllowed: string[] = ir.policies?.tools_allowed ?? [];
   // Validate that all declared tools exist in the registry
@@ -1394,6 +1442,36 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   trace.final = { ok: finalOk, schema_id: schema.$id, usage: totalUsage, budget: budget.summary() };
   trace.finished_at = new Date().toISOString();
 
+  // ── Log emission (RED-282 / RED-302): run-complete fan-out ─────────
+  // Fire the run-level event to every configured destination. Async,
+  // awaited here so the CLI / host sees a consistent trace before
+  // returning. Sink errors don't propagate — they become LogFailed
+  // steps in the trace, the run still returns its result.
+  if (logDestinations.length > 0) {
+    const outcome = classifyRunOutcome(finalOk, trace, false);
+    const runEvent = buildRunLogEvent({
+      genClass: ir.entry?.class ?? 'Unknown',
+      method: ir.entry?.method ?? 'unknown',
+      event: outcome.event,
+      runId,
+      ok: finalOk,
+      schemaId: schema.$id,
+      usage: {
+        prompt_tokens: totalUsage.prompt_tokens,
+        completion_tokens: totalUsage.completion_tokens,
+        total_tokens: totalUsage.total_tokens,
+      },
+      traceRef: `runs/${runId}/trace.json`,
+      reason: outcome.reason,
+      trace,
+    });
+    await emitLogEvent(runEvent, {
+      destinations: logDestinations,
+      sinks: logSinks,
+      pushStep: (step: any) => trace.steps.push(step),
+    });
+  }
+
   return {
     ok: finalOk,
     output: finalParsed ?? null,
@@ -1406,6 +1484,26 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
 
   } catch (e) {
     if (e instanceof BudgetExceededError) {
+      // Emit a failed event with reason=budget_exceeded before returning,
+      // so DD dashboards see "gen.method.failed {reason: budget_exceeded}".
+      if (logDestinations.length > 0) {
+        const runEvent = buildRunLogEvent({
+          genClass: ir.entry?.class ?? 'Unknown',
+          method: ir.entry?.method ?? 'unknown',
+          event: 'failed',
+          runId,
+          ok: false,
+          schemaId: schema.$id,
+          traceRef: `runs/${runId}/trace.json`,
+          reason: 'budget_exceeded',
+          trace,
+        });
+        await emitLogEvent(runEvent, {
+          destinations: logDestinations,
+          sinks: logSinks,
+          pushStep: (step: any) => trace.steps.push(step),
+        });
+      }
       return {
         ok: false,
         output: null,

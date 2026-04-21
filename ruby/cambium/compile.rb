@@ -282,7 +282,9 @@ ir = {
     'budget'   => Cambium.flatten_slot_state(defs[:budget]),
     'memory'           => resolved_memory,
     'memory_pools'     => resolved_pools,
-    'memory_write_via' => defs[:write_memory_via]
+    'memory_write_via' => defs[:write_memory_via],
+    'log'              => (defs[:log] || []),
+    'log_profiles'     => (defs[:log_profiles] || [])
   },
   'reads_trace_of' => defs[:reads_trace_of],
   'returnSchemaId' => defs[:returnSchema],
