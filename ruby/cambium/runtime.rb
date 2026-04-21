@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'json'
+require_relative './cron'    # RED-305: cron expression support
 
 module Cambium
   class CompileError < StandardError; end
@@ -675,7 +676,7 @@ module Cambium
   class MemoryPolicyBuilder
     attr_reader :rules
 
-    VALID_SCOPES = %w[session global].freeze
+    VALID_SCOPES = %w[session global schedule].freeze
 
     def initialize
       @rules = {}
@@ -1219,6 +1220,99 @@ module Cambium
       # the arg is treated as a profile reference. Otherwise it's an
       # inline destination name; the runner validates it against
       # registered sinks (framework built-ins + app plugins) at dispatch.
+      # RED-273 / RED-305: declare a cron schedule for this gen. Cambium
+      # owns the declaration + runtime semantics (memory scope, fire_id,
+      # observability) but NOT the lifecycle — the operator's scheduler
+      # (crontab, k8s CronJob, etc.) fires `cambium run ... --fired-by
+      # schedule:<id>` at the declared cadence.
+      #
+      # Named vocabulary:
+      #   cron :daily, at: "9:00"
+      #   cron :weekly, at: "8:00"           # Sunday 8am
+      #   cron :weekdays, at: "9:00"         # Mon-Fri 9am
+      #   cron :hourly
+      #   cron :every_minute                 # for testing
+      #
+      # Raw crontab for anything the vocabulary doesn't cover:
+      #   cron "30 14 * * 1,3,5"
+      #
+      # Options:
+      #   method: — which method to invoke (defaults to the gen's
+      #             single public method; required when multiple exist)
+      #   tz:     — time zone for the expression (default "UTC")
+      #   id:     — explicit slug override; must match /^[a-z][a-z0-9_]*$/
+      #
+      # Multi-schedule gens declare multiple `cron` calls; duplicates
+      # (same id) raise at class-load time.
+      def cron(expr_or_name, at: nil, tz: nil, method: nil, id: nil, **extra)
+        unless extra.empty?
+          raise ArgumentError,
+                "cron: unknown option(s) #{extra.keys.join(', ')}. " \
+                "Recognized: at, tz, method, id."
+        end
+
+        if expr_or_name.is_a?(Symbol)
+          named = expr_or_name.to_s
+          expression = Cambium::Cron.expand_named(named, at: at)
+        elsif expr_or_name.is_a?(String)
+          named = nil
+          if at
+            raise ArgumentError,
+                  "cron: `at:` kwarg not valid with a raw crontab expression " \
+                  "(use `at:` only with the named vocabulary :daily/:weekly/:weekdays)."
+          end
+          expression = Cambium::Cron.validate_expression(expr_or_name)
+        else
+          raise ArgumentError,
+                "cron: first arg must be a Symbol (named vocab) or String (crontab), " \
+                "got #{expr_or_name.class}"
+        end
+
+        # Slug: explicit id > named vocab > hash of crontab expression.
+        if id
+          id_str = id.to_s
+          unless id_str =~ /\A[a-z][a-z0-9_]*\z/
+            raise ArgumentError,
+                  "cron id: must match /^[a-z][a-z0-9_]*$/ (got :#{id_str})."
+          end
+          slug = id_str
+        elsif named
+          slug = named
+        else
+          slug = Cambium::Cron.slug_from_expression(expression)
+        end
+
+        # Method is resolved at compile.rb time (after class body fully
+        # evaluates, so `instance_methods(false)` returns all user-def
+        # methods). Store method as a Symbol or nil.
+        method_sym = method.nil? ? nil : method.to_s
+
+        # Store an entry with everything except the final id + method;
+        # compile.rb finishes the resolution. We track `slug` here so
+        # duplicate detection inside the same class body works even
+        # before method is resolved.
+        _cambium_defaults[:schedules] ||= []
+        entry = {
+          'slug' => slug,
+          'expression' => expression,
+          'tz' => (tz || 'UTC').to_s,
+          'method' => method_sym,
+        }
+        entry['named'] = named if named
+        entry['at'] = at if at
+
+        # Duplicate (slug, method) pair check — raised here rather than
+        # at compile.rb so the error points at the failing line.
+        if _cambium_defaults[:schedules].any? { |s| s['slug'] == slug && s['method'] == method_sym }
+          raise ArgumentError,
+                "cron: duplicate schedule declaration (slug='#{slug}'" +
+                (method_sym ? ", method=:#{method_sym}" : '') + "). " \
+                "Use `id:` to disambiguate, or combine into one declaration."
+        end
+
+        _cambium_defaults[:schedules] << entry
+      end
+
       def log(*args, include: nil, granularity: nil, endpoint: nil, api_key_env: nil, **extra)
         unless extra.empty?
           raise ArgumentError,

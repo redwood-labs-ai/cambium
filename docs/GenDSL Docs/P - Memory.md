@@ -137,10 +137,11 @@ Explicit memory agents are the common path.
 
 ## Scope (decided)
 
-Three scope kinds, covering all the cases `:user` / `:gen` would have covered without the ceremony:
+Four scope kinds, covering all the cases `:user` / `:gen` would have covered without the ceremony:
 
 - `:session` — a single conversation / run-chain.
 - `:global`  — workspace-wide.
+- `:schedule` — per-schedule-id bucket (RED-305). Requires a paired `cron` declaration on the gen (compile-time) and `--fired-by schedule:<id>` at runtime. All fires of the same schedule share one bucket. See [[P - cron (schedule)]].
 - **Named pools** (e.g. `:support_team`, `:security_agent`) — a shared memory bucket addressable by name. Any number of gens can opt in by referencing the pool's symbol.
 
 `:user` is handled by `:session` + `keyed_by: :user_id`. `:gen` is handled by a named pool the gen opts into alone. Simpler grammar, same coverage.

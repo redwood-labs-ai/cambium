@@ -36,7 +36,7 @@ import {
   closeBackends,
   type MemoryPlan,
 } from './memory/runner-integration.js';
-import { parseMemoryKeys, resolveSessionId } from './memory/keys.js';
+import { parseMemoryKeys, resolveSessionId, validateScheduleId } from './memory/keys.js';
 import type { SqliteMemoryBackend } from './memory/backend.js';
 import {
   findRetroAgentFile,
@@ -62,6 +62,7 @@ type Args = {
   outputOut?: string;
   mock?: boolean;
   memoryKeys: string[];
+  firedBy?: string;
 };
 
 function parseArgs(argv: string[]): Args {
@@ -70,6 +71,7 @@ function parseArgs(argv: string[]): Args {
   let outputOut: string | undefined;
   let mock = false;
   const memoryKeys: string[] = [];
+  let firedBy: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--ir') irPath = argv[++i];
@@ -77,6 +79,7 @@ function parseArgs(argv: string[]): Args {
     else if (a === '--out') outputOut = argv[++i];
     else if (a === '--mock') { mock = true; process.env.CAMBIUM_ALLOW_MOCK = '1'; }
     else if (a === '--memory-key') memoryKeys.push(argv[++i]);
+    else if (a === '--fired-by') firedBy = argv[++i];
     else if (a === '--help' || a === '-h') {
       console.error(`
 Cambium Runner — step-graph executor
@@ -103,7 +106,12 @@ Examples:
     else throw new Error(`Unknown flag: ${a}\nRun 'node --import tsx src/runner.ts --help' for usage.`);
   }
   if (!irPath) throw new Error('Missing --ir\nRun "node --import tsx src/runner.ts --help" for usage.');
-  return { irPath, traceOut, outputOut, mock, memoryKeys };
+  // RED-305: env-var fallback for --fired-by. Crontab entries often
+  // can't cleanly pass CLI flags; env vars are the portable alternative.
+  if (!firedBy && process.env.CAMBIUM_FIRED_BY) {
+    firedBy = process.env.CAMBIUM_FIRED_BY;
+  }
+  return { irPath, traceOut, outputOut, mock, memoryKeys, firedBy };
 }
 
 function nowId() {
@@ -495,6 +503,22 @@ export interface RunGenOptions {
    *  and merged on top. Host wrappers set this to inject a custom
    *  backend (e.g. Honeycomb, Sentry) without a file-based plugin. */
   logSinks?: Record<string, LogSink>;
+  /** RED-305: Declares this invocation is a scheduled fire of the
+   *  named schedule declaration. Shape: `schedule:<id>[@<iso_ts>]`
+   *  — e.g. `schedule:morning_digest.analyze.daily@2026-04-22T09:00:00Z`.
+   *  When absent, the run is interactive.
+   *
+   *  The schedule id MUST match an entry in `ir.policies.schedules[]`;
+   *  unknown ids fail fast at runner startup. The timestamp is
+   *  optional — omit to stamp with `Date.now()` at runner start.
+   *
+   *  Semantic unlocks when set:
+   *    - `memory :x, scope: :schedule` resolves to a per-schedule-id
+   *      bucket (`runs/memory/schedule/<id>/<name>.sqlite`)
+   *    - `trace.fired_by` carries the value
+   *    - `ctx.fire_id` on action handlers gets `<id>:<ts>`
+   *    - `log` events gain a `fired_by:schedule` ddtag */
+  firedBy?: string;
 }
 
 export interface RunGenResult {
@@ -531,6 +555,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     sessionId: sessionIdOpt,
     correctors: optsCorrectors,
     logSinks: optsLogSinks,
+    firedBy: optsFiredBy,
   } = opts;
 
   // Plumb opts.mock through to the deterministic-mock branch in
@@ -548,6 +573,56 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
 
   const runId = `run_${nowId()}_${Math.random().toString(16).slice(2, 8)}`;
 
+  // ── Parse --fired-by / CAMBIUM_FIRED_BY (RED-305) ───────────────────
+  // Shape: `schedule:<id>[@<iso_ts>]`. Absent → interactive run.
+  // Unknown id against ir.policies.schedules[] → hard error.
+  //
+  // We validate the id eagerly so typos in cron manifests fail at the
+  // CLI, not silently as unexpected memory scope behavior later.
+  // The id ALSO runs through validateScheduleId (memory/keys.ts) so
+  // path-traversal-via-cron-manifest is structurally impossible —
+  // same belt-and-suspenders as --memory-key / CAMBIUM_SESSION_ID.
+  let firedBy: { scheduleId: string; timestamp: string; fireId: string } | null = null;
+  if (optsFiredBy) {
+    // Strict regex: the id must be `snake.case.chunks` (no .. segments),
+    // and the timestamp must not contain whitespace or control chars.
+    // ISO 8601 timestamps are ≤ 30 chars; cap at 64 to leave headroom
+    // for timezone offsets while rejecting pathological values that
+    // would blow up DD tag limits.
+    const m = String(optsFiredBy).match(
+      /^schedule:([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)(?:@([^\s]{1,64}))?$/,
+    );
+    if (!m) {
+      throw new Error(
+        `Invalid --fired-by value: ${JSON.stringify(optsFiredBy)}. ` +
+        `Expected shape: schedule:<id>[@<iso_timestamp>].`,
+      );
+    }
+    const scheduleId = m[1];
+    validateScheduleId(scheduleId, '--fired-by');
+    const timestamp = m[2] ?? new Date().toISOString();
+    const declared: any[] = ir.policies?.schedules ?? [];
+    if (declared.length === 0) {
+      throw new Error(
+        `--fired-by was set but ${ir.entry?.class ?? 'this gen'} declares no cron schedules. ` +
+        `Either remove --fired-by or declare a \`cron :...\` on the gen.`,
+      );
+    }
+    const known = declared.find((s) => s.id === scheduleId);
+    if (!known) {
+      const ids = declared.map((s) => s.id).join(', ');
+      throw new Error(
+        `--fired-by schedule id "${scheduleId}" is not declared on ${ir.entry?.class ?? 'this gen'}. ` +
+        `Known schedule ids: ${ids}.`,
+      );
+    }
+    firedBy = {
+      scheduleId,
+      timestamp,
+      fireId: `${scheduleId}:${timestamp}`,
+    };
+  }
+
   const trace: any = {
     run_id: runId,
     version: ir.version,
@@ -556,6 +631,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     steps: [],
     started_at: new Date().toISOString(),
   };
+  if (firedBy) trace.fired_by = optsFiredBy;
 
   // ── Load contracts (caller-injected, RED-243) ───────────────────────
   const schema = contractsMod[ir.returnSchemaId];
@@ -790,6 +866,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
       sessionId,
       keys,
       runsRoot,
+      scheduleId: firedBy?.scheduleId,
     };
     memoryPlans = planMemory(memoryDecls, memCtx);
     const { block, trace: readTrace, backends } = await readMemoryForRun(memoryPlans, memCtx);
@@ -1463,6 +1540,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
       },
       traceRef: `runs/${runId}/trace.json`,
       reason: outcome.reason,
+      firedBy: firedBy ? 'schedule' : undefined,
       trace,
     });
     await emitLogEvent(runEvent, {
@@ -1496,6 +1574,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
           schemaId: schema.$id,
           traceRef: `runs/${runId}/trace.json`,
           reason: 'budget_exceeded',
+          firedBy: firedBy ? 'schedule' : undefined,
           trace,
         });
         await emitLogEvent(runEvent, {
@@ -1541,7 +1620,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
 // back-compat for the cambium repo's own example app, whose workspace
 // Genfile at the repo root has no [types].contracts.
 async function main() {
-  const { irPath, traceOut, outputOut, mock, memoryKeys } = parseArgs(process.argv.slice(2));
+  const { irPath, traceOut, outputOut, mock, memoryKeys, firedBy } = parseArgs(process.argv.slice(2));
   const irText = irPath === '-' ? readFileSync(0, 'utf8') : readFileSync(irPath, 'utf8');
   const ir: IR = JSON.parse(irText);
 
@@ -1590,6 +1669,7 @@ async function main() {
     mock,
     memoryKeys,
     correctors: appCorrectors,
+    firedBy,
   });
 
   // RED-287: engine-mode run artifacts go under <engineDir>/runs/ so

@@ -1,7 +1,7 @@
 ## Note: Scheduled Gens — `cron` Primitive
 
 **Doc ID:** gen-dsl/note/scheduled-gens
-**Status:** Draft (RED-273)
+**Status:** Shipped — RED-305
 **Last edited:** 2026-04-21
 
 ---
@@ -184,7 +184,7 @@ DD filter `@fired_by:schedule AND @ok:false` → "every scheduled-run failure ac
 
 ### 6. Compile-to-artifact
 
-New flag: `cambium compile --schedule-target=<target>`. Walks the workspace, for each `cron` declaration emits a deploy-ready manifest invoking `cambium run ... --fired-by schedule:<id>`.
+Shipped as `cambium schedule compile <workspace> --target <target>` (subcommand form, not a flag on `cambium compile`). Walks the workspace, for each `cron` declaration emits a deploy-ready manifest invoking `cambium run ... --fired-by schedule:<id>`.
 
 **v1 targets:**
 
@@ -334,7 +334,7 @@ export function compile(ir, config) {
 
 ### CLI
 
-- `cambium compile --schedule-target=<target> [--image=<img>] <workspace>` — emit manifests.
+- `cambium schedule compile <workspace> --target <target> [--out-dir <dir>] [--image <img>]` — emit manifests.
 - `cambium schedule preview <gen.cmb.rb>` — print next N fires.
 - `cambium schedule list` — workspace-wide schedule listing.
 

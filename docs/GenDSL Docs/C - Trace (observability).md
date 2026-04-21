@@ -17,6 +17,12 @@ A trace MUST include:
 - Repair attempts
 - Timing + token counts
 
+## Top-level fields
+
+| Field | When present | Description |
+| --- | --- | --- |
+| `fired_by` | Scheduled runs only (RED-305) | The `--fired-by schedule:<id>[@<ts>]` value as passed. Absent on interactive runs. Downstream tooling filters on its presence to distinguish scheduled from ad-hoc runs. |
+
 ## Step types
 
 | Type | When | Key meta |

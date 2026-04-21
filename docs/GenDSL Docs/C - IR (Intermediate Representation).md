@@ -30,6 +30,7 @@ Define the auditable, replayable plan that the DSL compiles to.
 | `policies.correctors` | `corrects :math, :dates` | `Array<{name: string, max_attempts: number}>` — deterministic post-validation transforms. Each entry carries its own `max_attempts` (1..3, default 1, RED-298). Pre-RED-298 IRs with bare-string arrays are normalized to `max_attempts: 1` at run time. |
 | `policies.log` | `log :datadog, include: [:signals]` | `Array<{destination, include, granularity, endpoint?, api_key_env?, _profile?}>` — trace-fan-out destinations (RED-282 / RED-302). Profile references are resolved at compile time and inlined; `_profile` preserves the source name for trace observability. |
 | `policies.log_profiles` | (derived) | `Array<string>` — profile names referenced by any `log :name` call. Metadata-only; runner doesn't branch on it. |
+| `policies.schedules` | `cron :daily, at: "9:00"` | `Array<{id, expression, method, tz, named?, at?}>` — scheduled-fire declarations (RED-273 / RED-305). Method defaults are resolved at compile time. IDs are stable `<snake_gen>.<method>.<slug>` shape and match `--fired-by schedule:<id>` at runtime. |
 | `policies.constraints` | `constrain :budget, …` | legacy/ergonomic container for budget, tone, etc. |
 | `policies.grounding` | `grounded_in :document` | citation enforcement config |
 | `policies.security` | `security network: {...}` or `security :pack` | per-slot mixing; `_packs` metadata for trace (RED-214) |

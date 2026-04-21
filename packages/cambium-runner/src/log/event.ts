@@ -58,6 +58,11 @@ export interface LogEvent {
   trace_ref?: string;
   /** Reason field on `failed` events. */
   reason?: FailReason;
+  /** RED-305: `"schedule"` when this event was emitted for a run fired
+   *  by a cron schedule (i.e. `--fired-by schedule:<id>` was set on the
+   *  run). Absent for interactive runs. DD backend surfaces this as a
+   *  `fired_by:schedule` ddtag; human readers see the flat field. */
+  fired_by?: 'schedule';
   /** Additional profile-configured fields. */
   [key: string]: unknown;
 }

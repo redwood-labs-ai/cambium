@@ -24,6 +24,19 @@ export function resolveBucketPath(decl: MemoryDecl, ctx: MemoryRunContext): stri
     keySeg = ctx.sessionId;
   } else if (decl.scope === 'global' && !decl.keyed_by) {
     keySeg = '_';
+  } else if (decl.scope === 'schedule') {
+    // RED-305: schedule-scoped bucket keyed by the schedule id. Runtime
+    // must be a scheduled fire — the runner enforces this with a clear
+    // error before reaching path resolution, but guard here too so a
+    // direct runGen caller that forgot to set firedBy gets a clean
+    // failure mode rather than a cryptic missing-key.
+    if (!ctx.scheduleId) {
+      throw new Error(
+        `memory '${decl.name}' scope: :schedule requires a scheduled fire. ` +
+        `Pass --fired-by schedule:<id> (or set CAMBIUM_FIRED_BY) on the invocation.`,
+      );
+    }
+    keySeg = ctx.scheduleId;
   } else {
     const keyName = decl.keyed_by;
     if (!keyName) {

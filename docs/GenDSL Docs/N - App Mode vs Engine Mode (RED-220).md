@@ -60,8 +60,9 @@ What changes between modes is **discovery and packaging**, not semantics. Three 
 | App log-sink discovery (RED-302) | Loads `<appPkgRoot>/app/logs/*.log.ts` at runner start | Also scans `<engineDir>/*.log.ts` inside `runGen`; `opts.logSinks` injects explicit sinks |
 | `runsRoot` | `join(cwd(), 'runs')` | Defaults to `<engineDir>/runs` when engine mode is detected; configurable per call |
 | `sessionId` | `CAMBIUM_SESSION_ID` env var | `opts.sessionId` option wins; host wrappers can set per-request |
+| Scheduled-fire identity (RED-305) | CLI parses `--fired-by` / `CAMBIUM_FIRED_BY` into a structured fire id | `opts.firedBy` injects a pre-parsed value for engine-mode hosts driving scheduled runs programmatically |
 
-All six are now on `RunGenOptions` (engine-mode runtime catch-up). Everything else inside `runner.ts` is mode-agnostic already.
+All seven are now on `RunGenOptions` (engine-mode runtime catch-up). Everything else inside `runner.ts` is mode-agnostic already.
 
 ---
 

@@ -135,6 +135,13 @@ if (cmd === 'compile') {
   process.exit(0);
 }
 
+// ── cambium schedule (RED-305) ──────────────────────────────────────
+if (cmd === 'schedule') {
+  const { runSchedule } = await import('./schedule.mjs');
+  await runSchedule(args);
+  process.exit(0);
+}
+
 // ── cambium run ───────────────────────────────────────────────────────
 if (cmd !== 'run') usage(`Unknown command: ${cmd}`);
 
@@ -151,6 +158,7 @@ let outputOut = null;
 let mock = false;
 let sessionId = null;
 const memoryKeys = [];
+let firedBy = null;
 for (let i = 1; i < args.length; i++) {
   const a = args[i];
   if (a === '--method') method = args[++i];
@@ -160,6 +168,7 @@ for (let i = 1; i < args.length; i++) {
   else if (a === '--mock') mock = true;
   else if (a === '--memory-key') memoryKeys.push(args[++i]);
   else if (a === '--session-id') sessionId = args[++i];
+  else if (a === '--fired-by') firedBy = args[++i];
   else if (a === '--help' || a === '-h') usage();
   else usage(`Unknown flag: ${a}\nRun 'cambium run --help' for usage.`);
 }
@@ -228,6 +237,7 @@ if (traceOut) runnerArgs.push('--trace', traceOut);
 if (outputOut) runnerArgs.push('--out', outputOut);
 if (mock) runnerArgs.push('--mock');
 for (const k of memoryKeys) runnerArgs.push('--memory-key', k);
+if (firedBy) runnerArgs.push('--fired-by', firedBy);
 const run = spawnSync('node', runnerArgs, {
   input: irJson,
   encoding: 'utf8',
