@@ -604,6 +604,7 @@ export const ${snake}: CorrectorFn = (data, _context): CorrectorResult => {
     console.log(`\nNext steps:`);
     console.log(`  1. Implement ${ctx.engineDir}/${snake}.corrector.ts`);
     console.log(`  2. Declare in your gen: corrects :${snake}`);
+    console.log(`     (add max_attempts: 2 or 3 if this corrector verifies but can't auto-fix — RED-298)`);
     return;
   }
 
@@ -622,6 +623,7 @@ export const ${snake}: CorrectorFn = (data, _context): CorrectorResult => {
   console.log(`\nNext steps:`);
   console.log(`  1. Implement ${PKG}/app/correctors/${snake}.corrector.ts`);
   console.log(`  2. Declare in your agent: corrects :${snake}`);
+  console.log(`     (add max_attempts: 2 or 3 if this corrector verifies but can't auto-fix — RED-298)`);
   console.log(`\n  The file is auto-discovered — no registration step needed.`);
   console.log(`  Overrides any framework built-in with the same name (with a one-time stderr warning).`);
 }

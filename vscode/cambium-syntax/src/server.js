@@ -337,7 +337,7 @@ const PRIMITIVE_DOCS = {
   },
   corrects: {
     detail: 'Attaches deterministic correctors.',
-    doc: 'Run after validation, before triggers.\nBuilt-in: `:math`, `:dates`, `:currency`, `:citations`.\n\n```ruby\ncorrects :math, :dates\n```',
+    doc: 'Run after validation, before triggers.\nBuilt-in: `:math`, `:dates`, `:currency`, `:citations`.\n\nRED-298: optional `max_attempts:` (1..3, default 1) loops repair-and-rerun for correctors that can verify but not auto-fix (e.g. regex synthesis).\n\n```ruby\ncorrects :math, :dates\ncorrects :regex_x, max_attempts: 3\n```',
   },
   constrain: {
     detail: 'Declares a runtime constraint.',
