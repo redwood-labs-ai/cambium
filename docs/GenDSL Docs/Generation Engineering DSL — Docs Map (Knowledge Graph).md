@@ -48,6 +48,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[N - Agentic Transactions]]
 - [[N - GAIA Benchmark Evaluation]]
 - [[N - App Mode vs Engine Mode (RED-220)]] — engine-mode embedding design; runner-as-library, co-located gens, sentinel-aware authoring
+- [[N - Corrector Multi-Attempt (RED-296)]] — re-run corrector after Repair, per-gen `max_attempts` knob, `CorrectAcceptedWithErrors` terminal trace state
 
 ---
 
