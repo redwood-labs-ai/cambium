@@ -7,6 +7,7 @@ import { execSync } from 'node:child_process';
 import { existsSync, writeFileSync, unlinkSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { discoverEnvFiles } from './env-discovery.mjs';
 
 // Framework Ruby scripts resolved relative to the CLI's own location
 // (RED-274). `node_modules/`, `runs/`, `.env` stay cwd-relative — those
@@ -136,10 +137,16 @@ check('runs/ writable', () => {
   }
 });
 
-check('.env file', () => {
-  const envPath = join(process.cwd(), '.env');
-  if (existsSync(envPath)) return { ok: true, detail: '.env found' };
-  return { warn: true, detail: '.env not found. Create one with CAMBIUM_OMLX_BASEURL and CAMBIUM_OMLX_API_KEY (optional).' };
+// RED-295: report the full layered .env resolution, not just cwd. A
+// user running from an external app with no local .env still benefits
+// from the framework's .env — the doctor should say so explicitly.
+check('.env file(s) loaded', () => {
+  const files = discoverEnvFiles(process.cwd());
+  if (files.length === 0) {
+    return { warn: true, detail: 'No .env found in cwd, any ancestor, or next to the cambium install. Create one with CAMBIUM_OMLX_BASEURL and CAMBIUM_OMLX_API_KEY (optional).' };
+  }
+  const detail = files.map((f) => `${f.kind}: ${f.path}`).join('; ');
+  return { ok: true, detail };
 });
 
 // RED-284: Genfile.toml presence. Catches the "I forgot to `cambium init`"

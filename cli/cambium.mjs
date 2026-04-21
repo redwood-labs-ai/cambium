@@ -1,5 +1,12 @@
 #!/usr/bin/env node
-import 'dotenv/config';
+// RED-295: load .env files before any CLI subcommand dispatch. Safe at
+// this placement because none of the below imports read process.env at
+// module-top-level — every access is inside a function body that runs
+// only after command dispatch. If that ever changes, promote this to a
+// side-effect import module so the load happens before any transitive
+// module evaluation.
+import { loadEnvFiles } from './env-discovery.mjs';
+loadEnvFiles();
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
