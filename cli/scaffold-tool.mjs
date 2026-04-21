@@ -25,7 +25,6 @@ import { detectWorkspaceShape } from './workspace-shape.mjs';
 const CLI_DIR = dirname(fileURLToPath(import.meta.url));
 const FRAMEWORK_ROOT = resolve(CLI_DIR, '..');
 const RUBY_COMPILE_SCRIPT = resolve(FRAMEWORK_ROOT, 'ruby', 'cambium', 'compile.rb');
-const RUNNER_SCRIPT = resolve(FRAMEWORK_ROOT, 'packages', 'cambium-runner', 'src', 'runner.ts');
 const GEN_PATH = resolve(FRAMEWORK_ROOT, 'packages', 'cambium', 'app', 'gens', 'tool_scaffold.cmb.rb');
 
 function bail(msg, code = 1) {
@@ -80,20 +79,28 @@ export async function runAgenticToolScaffold(description) {
       bail('Scaffolder compile failed.', compile.status ?? 1);
     }
 
-    // Run
-    const run = spawnSync(
-      'node',
-      ['--import', 'tsx', RUNNER_SCRIPT, '--ir', '-', '--out', outFile],
-      {
-        input: compile.stdout,
-        encoding: 'utf8',
-        maxBuffer: 50 * 1024 * 1024,
-        env: process.env,
-        stdio: ['pipe', 'pipe', 'inherit'],
-      },
-    );
-    if (run.status !== 0) {
-      bail('Scaffolder run failed.', run.status ?? 1);
+    // RED-306: run in-process via @cambium/runner (replaces the prior
+    // `node --import tsx .../runner.ts` subprocess).
+    let ir;
+    try {
+      ir = JSON.parse(compile.stdout);
+    } catch (err) {
+      bail(`Failed to parse IR JSON from ruby compile: ${err?.message || err}`);
+    }
+    let runResult;
+    try {
+      const { runGenFromIr } = await import('@cambium/runner');
+      runResult = await runGenFromIr({
+        ir,
+        cwd: process.cwd(),
+        outputOut: outFile,
+      });
+    } catch (err) {
+      console.error(err?.stack || String(err));
+      bail('Scaffolder run failed.');
+    }
+    if (!runResult.ok) {
+      bail(`Scaffolder run failed${runResult.errorMessage ? `: ${runResult.errorMessage}` : ''}`);
     }
 
     if (!existsSync(outFile)) {

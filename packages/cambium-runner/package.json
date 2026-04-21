@@ -2,16 +2,38 @@
   "name": "@cambium/runner",
   "version": "0.1.0-pre",
   "description": "TS runtime for Cambium — executes compiled IR produced by the Cambium Ruby DSL.",
+  "license": "MIT",
   "type": "module",
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
   },
-  "private": true,
   "files": [
-    "src"
+    "dist"
   ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.mjs",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.40",
+    "ajv": "^8.17.1",
+    "undici": "^8.1.0"
+  },
   "optionalDependencies": {
-    "quickjs-emscripten": "^0.32.0"
+    "better-sqlite3": "^12.9.0",
+    "quickjs-emscripten": "^0.32.0",
+    "sqlite-vec": "^0.1.6"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.3"
   }
 }

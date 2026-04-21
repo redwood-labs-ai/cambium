@@ -1,31 +1,32 @@
 {
   "name": "cambium",
-  "private": true,
+  "version": "0.1.0-pre",
+  "description": "Rails for generation engineering — CLI for building reliable LLM programs with Cambium's Ruby DSL.",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "cambium": "./cli/cambium.mjs"
   },
+  "files": [
+    "cli",
+    "ruby"
+  ],
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "run": "node ./cli/cambium.mjs",
     "compile": "ruby ./ruby/cambium/compile.rb",
-    "runner": "node --import tsx ./packages/cambium-runner/src/runner.ts",
-    "test": "vitest run"
+    "test": "npm run build && vitest run",
+    "build": "npm run build --workspace @cambium/runner"
   },
   "dependencies": {
-    "@sinclair/typebox": "^0.34.40",
-    "ajv": "^8.17.1",
+    "@cambium/runner": "0.1.0-pre",
     "dotenv": "^17.4.1",
     "smol-toml": "^1.6.1",
-    "undici": "^8.1.0"
-  },
-  "optionalDependencies": {
-    "better-sqlite3": "^12.9.0",
-    "quickjs-emscripten": "^0.32.0",
-    "sqlite-vec": "^0.1.6"
+    "tsx": "^4.19.2"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
-    "tsx": "^4.19.2",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
   }

@@ -11,6 +11,13 @@
 export { runGen } from './runner.js';
 export type { RunGenOptions, RunGenResult } from './runner.js';
 
+// RED-306: CLI-equivalent in-process entry point. Wraps schema
+// discovery + runGen + artifact writes. The `cambium` CLI imports this
+// directly (Option B: in-process, no subprocess). Engine-mode hosts
+// continue to call runGen directly with their own schemas.
+export { runGenFromIr } from './runner.js';
+export type { RunGenFromIrOptions, RunGenFromIrResult } from './runner.js';
+
 // RED-275 app-corrector plugin surface. External apps scaffold
 // `app/correctors/<name>.corrector.ts` and import these types to get
 // the correct export signature.
