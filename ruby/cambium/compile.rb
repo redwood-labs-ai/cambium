@@ -186,7 +186,7 @@ end
 # packs, adapted to the per-decl shape of memory.
 resolved_memory = []
 resolved_pools  = {}
-builtin_scopes  = %w[session global]
+builtin_scopes  = %w[session global schedule]
 
 (defs[:memory] || []).each do |m|
   scope = m['scope']
@@ -259,6 +259,66 @@ end
 memory_policy = Cambium::MemoryPolicy.load
 memory_policy.apply!(resolved_memory, resolved_pools)
 
+# RED-273 / RED-305: resolve schedule IDs + method defaults + validate
+# `scope: :schedule` memory pairing.
+raw_schedules = (defs[:schedules] || [])
+# Resolve method defaults: a cron entry without an explicit `method:`
+# falls back to the gen's single user-defined public method. If the
+# gen declares multiple methods and `method:` was omitted, raise.
+user_methods = (klass.public_instance_methods(false) - Object.instance_methods).map(&:to_s).sort
+raw_schedules.each do |s|
+  next if s['method']
+  if user_methods.length == 1
+    s['method'] = user_methods.first
+  elsif user_methods.empty?
+    raise Cambium::CompileError,
+          "cron declaration on #{klass.name} has no resolvable method — the class " \
+          "defines no public methods. Declare your entry method before the class ends."
+  else
+    raise Cambium::CompileError,
+          "cron declaration on #{klass.name} requires explicit `method:` because " \
+          "the class defines multiple public methods: " \
+          "#{user_methods.map { |m| ":#{m}" }.join(', ')}."
+  end
+end
+
+# Compute final schedule IDs and emit the resolved array. ID shape:
+# <snake_gen>.<method>.<slug>. Duplicate IDs (which can happen when
+# different slugs collide after method resolution) raise.
+gen_snake = klass.name.to_s.gsub(/::/, '_').gsub(/([A-Z]+)([A-Z][a-z])/, '\1_\2').gsub(/([a-z\d])([A-Z])/, '\1_\2').downcase
+resolved_schedules = raw_schedules.map do |s|
+  full_id = "#{gen_snake}.#{s['method']}.#{s['slug']}"
+  entry = {
+    'id' => full_id,
+    'expression' => s['expression'],
+    'method' => s['method'],
+    'tz' => s['tz'],
+  }
+  entry['named'] = s['named'] if s['named']
+  entry['at']    = s['at']    if s['at']
+  entry
+end
+seen_ids = {}
+resolved_schedules.each do |s|
+  if seen_ids[s['id']]
+    raise Cambium::CompileError,
+          "duplicate schedule id '#{s['id']}' on #{klass.name}. " \
+          "Use `cron ..., id: :unique_name` to disambiguate."
+  end
+  seen_ids[s['id']] = true
+end
+
+# Validate memory `scope: :schedule` requires at least one cron decl.
+resolved_memory.each do |m|
+  next unless m['scope'] == 'schedule'
+  if resolved_schedules.empty?
+    raise Cambium::CompileError,
+          "memory '#{m['name']}' declares `scope: :schedule` but #{klass.name} has no " \
+          "`cron` declarations. A schedule-scoped memory bucket needs a schedule " \
+          "identity — add `cron :daily` (or similar) to the gen, or change the scope."
+  end
+end
+
 ir = {
   'version' => '0.2',
   'entry' => {
@@ -284,7 +344,8 @@ ir = {
     'memory_pools'     => resolved_pools,
     'memory_write_via' => defs[:write_memory_via],
     'log'              => (defs[:log] || []),
-    'log_profiles'     => (defs[:log_profiles] || [])
+    'log_profiles'     => (defs[:log_profiles] || []),
+    'schedules'        => resolved_schedules
   },
   'reads_trace_of' => defs[:reads_trace_of],
   'returnSchemaId' => defs[:returnSchema],

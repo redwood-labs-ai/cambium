@@ -159,7 +159,9 @@ output.json + trace.json
 │   ├── env-discovery.mjs  # Walk-up .env discovery + framework fallback (RED-295)
 │   ├── init.mjs           # `cambium init` workspace bootstrap
 │   ├── lint.mjs           # `cambium lint` package validation
-│   └── scaffold-tool.mjs  # `cambium new tool --describe ...` agentic scaffolder (RED-216)
+│   ├── scaffold-tool.mjs  # `cambium new tool --describe ...` agentic scaffolder (RED-216)
+│   ├── schedule.mjs       # `cambium schedule preview|list|compile` (RED-305)
+│   └── schedule-targets/  # Compile targets: k8s-cronjob, crontab, systemd, github-actions, render-cron
 ├── runs/                  # Execution artifacts (ir.json, trace.json, output.json)
 │                          # plus memory/<scope>/<key>/<name>.sqlite buckets
 ├── vscode/cambium-syntax/ # VS Code extension (syntax + LSP)

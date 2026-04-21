@@ -53,6 +53,10 @@ export type MemoryRunContext = {
   keys: Record<string, string>;
   /** Writable root for run artifacts; memory lives under `${runsRoot}/memory/…`. */
   runsRoot: string;
+  /** RED-305: schedule id when this run is a scheduled fire (--fired-by).
+   *  Present only for scheduled invocations; memory decls with scope:
+   *  :schedule use this as the bucket key. */
+  scheduleId?: string;
 };
 
 /** One entry as stored in the SQLite `entries` table. */

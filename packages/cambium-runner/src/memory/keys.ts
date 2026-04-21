@@ -17,6 +17,31 @@ const KEY_VALUE_RE = /^([a-zA-Z_][a-zA-Z0-9_]*)=(.+)$/;
 const SAFE_VALUE_RE = /^[a-zA-Z0-9_\-]+$/;
 const MAX_VALUE_LEN = 128;
 
+// RED-305: schedule IDs are composite `<snake_gen>.<method>.<slug>`
+// with `.` as the explicit separator. The Ruby compiler generates
+// them from components that each match `[a-z][a-z0-9_]*`, but we
+// independently validate here because path.join does not reject
+// `..` segments — it silently normalizes them. This is the same
+// belt-and-suspenders stance `validateSafeSegment` takes for
+// --memory-key and CAMBIUM_SESSION_ID.
+const SCHEDULE_ID_RE = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/;
+const MAX_SCHEDULE_ID_LEN = 256;
+
+export function validateScheduleId(id: string, source: string): void {
+  if (id.length > MAX_SCHEDULE_ID_LEN) {
+    throw new Error(
+      `${source} schedule id exceeds ${MAX_SCHEDULE_ID_LEN} characters (got ${id.length}).`,
+    );
+  }
+  if (!SCHEDULE_ID_RE.test(id)) {
+    throw new Error(
+      `${source} schedule id must match /^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)*$/ ` +
+        `(got '${id}'). Schedule ids are composite gen.method.slug identifiers; ` +
+        `each component must be a lowercase snake_case word.`,
+    );
+  }
+}
+
 /** Shared validator for any user-supplied string that ends up as a directory
  *  segment. Enforces both the character set (blocking path traversal,
  *  whitespace, NULs) and a max length so pathological inputs can't blow up

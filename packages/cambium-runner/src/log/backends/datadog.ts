@@ -70,6 +70,9 @@ function buildTags(event: any): string {
     `ok:${String(event.ok)}`,
   ];
   if (event.reason) tags.push(`reason:${event.reason}`);
+  // RED-305: scheduled-run filter. `fired_by:schedule` lets DD monitors
+  // distinguish cron-fired failures from interactive ones.
+  if (event.fired_by) tags.push(`fired_by:${event.fired_by}`);
   return tags.join(',');
 }
 

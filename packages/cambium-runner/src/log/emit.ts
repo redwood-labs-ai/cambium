@@ -44,6 +44,7 @@ export function buildRunLogEvent(args: {
   traceRef?: string;
   reason?: 'budget_exceeded' | 'validation_failed' | 'schema_broke_after_corrector' | 'error';
   trace?: any;
+  firedBy?: 'schedule';
 }): LogEvent {
   const gen = snakeCase(args.genClass);
   const event: LogEvent = {
@@ -59,6 +60,7 @@ export function buildRunLogEvent(args: {
   if (args.usage) event.usage = args.usage;
   if (args.traceRef) event.trace_ref = args.traceRef;
   if (args.reason) event.reason = args.reason;
+  if (args.firedBy) event.fired_by = args.firedBy;
 
   // Opt-in profile fields derived from the trace.
   if (args.trace?.steps) {
@@ -237,6 +239,7 @@ function filterPayload(event: LogEvent, include: string[]): LogEvent {
   const frameworkAlways = new Set<string>([
     'event_name', 'gen', 'method', 'event', 'run_id',
     'ok', 'duration_ms', 'schema_id', 'usage', 'trace_ref', 'reason',
+    'fired_by',
   ]);
   const allow = new Set<string>([...frameworkAlways, ...include]);
   const out: LogEvent = {} as LogEvent;

@@ -571,6 +571,28 @@ function lintEngine(engineDir) {
       }
     }
 
+    // RED-305: cron primitive — check that named-vocab symbols match
+    // the framework set. Raw crontab expressions are not validated here
+    // (the Ruby compiler catches malformed ones). We also check the
+    // compile-time pairing: memory scope :schedule requires at least
+    // one cron on the same gen. Purely lint-level — the Ruby compiler
+    // is authoritative.
+    const CRON_NAMED_VOCAB = new Set(['daily', 'hourly', 'weekly', 'weekdays', 'every_minute']);
+    const cronNamedDecls = [...content.matchAll(/^\s*cron\s+:(\w+)/gm)];
+    for (const m of cronNamedDecls) {
+      const vocab = m[1];
+      if (!CRON_NAMED_VOCAB.has(vocab)) {
+        warn(`${f}: cron :${vocab} — not in the framework named vocabulary (${[...CRON_NAMED_VOCAB].map(v => ':' + v).join(', ')}). Use a raw crontab string instead.`);
+      }
+    }
+    const hasCron = cronNamedDecls.length > 0 || /^\s*cron\s+"/m.test(content);
+    const scheduleScoped = /memory\s+:[a-z][a-z0-9_]*[^\n]*scope:\s*:schedule\b/m.test(content);
+    if (scheduleScoped && !hasCron) {
+      fail(`${f}: memory scope: :schedule declared but no cron found — RED-305 requires at least one cron declaration on the gen.`);
+    } else if (scheduleScoped && hasCron) {
+      pass(`${f}: memory scope :schedule paired with cron (RED-305)`);
+    }
+
     // security :pack → sibling <pack>.policy.rb.
     const secMatch = content.match(/^\s*security\s+:(\w+)\s*$/m);
     if (secMatch) {
