@@ -154,6 +154,7 @@ output.json + trace.json
 │   ├── compile.mjs        # `cambium compile` subcommand (RED-244)
 │   ├── generate.mjs       # `cambium new <type>` scaffolder + engine-mode detection (RED-246)
 │   ├── doctor.mjs         # `cambium doctor` env check
+│   ├── env-discovery.mjs  # Walk-up .env discovery + framework fallback (RED-295)
 │   ├── init.mjs           # `cambium init` workspace bootstrap
 │   ├── lint.mjs           # `cambium lint` package validation
 │   └── scaffold-tool.mjs  # `cambium new tool --describe ...` agentic scaffolder (RED-216)
