@@ -261,7 +261,7 @@ function scanWorkspace() {
   }
 
   // Scan app correctors (RED-275). App wins on name collision, matching
-  // the runtime's registerAppCorrectors override behavior.
+  // the runtime's corrector precedence order (RED-299: `RunGenOptions.correctors` merge).
   const appCorrectorsDir = path.join(appPkgRoot, 'app/correctors');
   if (fs.existsSync(appCorrectorsDir)) {
     for (const f of fs.readdirSync(appCorrectorsDir)) {

@@ -49,7 +49,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[N - GAIA Benchmark Evaluation]]
 - [[N - App Mode vs Engine Mode (RED-220)]] — engine-mode embedding design; runner-as-library, co-located gens, sentinel-aware authoring
 - [[N - Corrector Multi-Attempt (RED-296)]] — re-run corrector after Repair, per-gen `max_attempts` knob, `CorrectAcceptedWithErrors` terminal trace state
-- [[N - Engine-Mode Corrector Registry Isolation (RED-281)]] — deferred refactor: move module-global corrector registry to per-`runGen` options, aligning with the tool/action/schema pattern
+- [[N - Engine-Mode Corrector Registry Isolation (RED-281)]] — shipped (RED-299): corrector registry is now per-`runGen` via `RunGenOptions.correctors`; `registerAppCorrectors` is a deprecated back-compat shim
 
 ---
 
