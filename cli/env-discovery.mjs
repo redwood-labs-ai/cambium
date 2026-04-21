@@ -78,11 +78,18 @@ export function discoverEnvFiles(cwd = process.cwd()) {
 export function loadEnvFiles(cwd = process.cwd()) {
   const files = discoverEnvFiles(cwd);
   for (const entry of files) {
+    // override: false is currently dotenv's default, but we pass it
+    // explicitly because the entire precedence scheme (shell > project
+    // > framework) hinges on it. A future dotenv release that flips
+    // the default would silently invert precedence — framework keys
+    // would stomp project keys, project keys would stomp shell env.
+    // Explicit beats "relying on an undocumented default."
+    //
     // quiet: suppress dotenv's per-file "◇ injected env (N) from …"
     // log line. Users don't need that chatter on every CLI invocation;
     // `cambium doctor` is the opinionated place to surface which
     // files were loaded.
-    dotenvConfig({ path: entry.path, quiet: true });
+    dotenvConfig({ path: entry.path, quiet: true, override: false });
   }
   return files;
 }
