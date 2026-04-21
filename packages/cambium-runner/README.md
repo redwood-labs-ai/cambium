@@ -1,4 +1,4 @@
-# @cambium/runner
+# @redwood-labs/cambium-runner
 
 TypeScript runtime for [Cambium](https://source.deerlarch.net/sbkeider/cambium) — executes compiled IR produced by the Cambium Ruby DSL.
 
@@ -7,7 +7,7 @@ This is the **library** form. For the `cambium` CLI (authoring `.cmb.rb` files, 
 ## Install
 
 ```bash
-npm install @cambium/runner
+npm install @redwood-labs/cambium-runner
 ```
 
 ## Use (engine mode)
@@ -15,7 +15,7 @@ npm install @cambium/runner
 Host projects import `runGen` and supply their own schemas:
 
 ```ts
-import { runGen } from '@cambium/runner';
+import { runGen } from '@redwood-labs/cambium-runner';
 import * as schemas from './schemas.js';
 
 // `ir` is the JSON IR emitted by the Ruby compiler (or constructed programmatically).
@@ -50,7 +50,7 @@ import type {
   CorrectorFn, CorrectorResult, CorrectorIssue,
   ToolContext,
   LogEvent, LogSink, LogDestination, RunEventName, FailReason,
-} from '@cambium/runner';
+} from '@redwood-labs/cambium-runner';
 ```
 
 ## Compiling IR
@@ -59,7 +59,7 @@ The IR is produced by the Cambium Ruby compiler (`ruby/cambium/compile.rb`), whi
 
 ## Internal exports
 
-`@cambium/runner` also exports `runGenFromIr` / `RunGenFromIrOptions` / `RunGenFromIrResult`. These are the in-process CLI-orchestration helpers used by the `cambium` binary — they wrap schema discovery (engine-mode sibling `schemas.ts` or app-mode `Genfile.toml [types].contracts`) plus artifact writes around `runGen`. **Engine-mode library consumers should call `runGen` directly**; `runGenFromIr` assumes a filesystem layout the host already controls explicitly.
+`@redwood-labs/cambium-runner` also exports `runGenFromIr` / `RunGenFromIrOptions` / `RunGenFromIrResult`. These are the in-process CLI-orchestration helpers used by the `cambium` binary — they wrap schema discovery (engine-mode sibling `schemas.ts` or app-mode `Genfile.toml [types].contracts`) plus artifact writes around `runGen`. **Engine-mode library consumers should call `runGen` directly**; `runGenFromIr` assumes a filesystem layout the host already controls explicitly.
 
 ## Optional dependencies
 

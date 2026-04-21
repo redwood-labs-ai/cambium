@@ -154,9 +154,9 @@ describe('cambium new engine — integration', () => {
     expect(existsSync(join(engineDir, 'schemas.ts'))).toBe(true);
     expect(existsSync(join(engineDir, 'index.ts'))).toBe(true);
 
-    // Wrapper imports from @cambium/runner — the public package boundary.
+    // Wrapper imports from @redwood-labs/cambium-runner — the public package boundary.
     const indexTs = readFileSync(join(engineDir, 'index.ts'), 'utf8');
-    expect(indexTs).toContain("from '@cambium/runner'");
+    expect(indexTs).toContain("from '@redwood-labs/cambium-runner'");
     expect(indexTs).toContain("from './schemas.js'");
     expect(indexTs).toContain('export async function analyze');
 
@@ -207,7 +207,7 @@ describe('cambium new <type> — engine mode places siblings of the gen', () => 
     // Engine-mode tools import ToolContext from the published package, not
     // a relative path into packages/cambium-runner/.
     const toolTs = readFileSync(join(scratch, 'price_fetcher.tool.ts'), 'utf8');
-    expect(toolTs).toContain("from '@cambium/runner'");
+    expect(toolTs).toContain("from '@redwood-labs/cambium-runner'");
   });
 
   it('cambium new agent — drops .cmb.rb and .system.md as siblings, no app/ dirs', () => {
@@ -228,7 +228,7 @@ describe('cambium new <type> — engine mode places siblings of the gen', () => 
     // Engine-mode corrector imports from the published package, not a
     // relative framework path.
     const body = readFileSync(join(scratch, 'price_check.corrector.ts'), 'utf8');
-    expect(body).toContain("from '@cambium/runner'");
+    expect(body).toContain("from '@redwood-labs/cambium-runner'");
     expect(body).toContain('export const price_check: CorrectorFn');
   });
 
@@ -368,7 +368,7 @@ describe('cambium new <type> — RED-284 scaffolder additions', () => {
     expect(existsSync(join(scratch, 'debug_emit.action.ts'))).toBe(true);
     // Engine-mode template uses the package import.
     const body = readFileSync(join(scratch, 'debug_emit.action.ts'), 'utf8');
-    expect(body).toContain("from '@cambium/runner'");
+    expect(body).toContain("from '@redwood-labs/cambium-runner'");
   });
 
   it('cambium new policy writes <snake>.policy.rb under packages/cambium/app/policies/', () => {
@@ -459,37 +459,37 @@ describe('cambium new <type> — flat [package] layout (RED-286)', () => {
     expect(existsSync(join(scratch, 'packages'))).toBe(false);
   });
 
-  it('cambium new tool lands at <cwd>/app/tools/ and imports ToolContext from @cambium/runner', () => {
+  it('cambium new tool lands at <cwd>/app/tools/ and imports ToolContext from @redwood-labs/cambium-runner', () => {
     setupFlatPackage(scratch);
     const result = runCli(['new', 'tool', 'price_fetcher'], scratch);
     expect(result.status).toBe(0);
     const tsPath = join(scratch, 'app', 'tools', 'price_fetcher.tool.ts');
     expect(existsSync(tsPath)).toBe(true);
     expect(existsSync(join(scratch, 'app', 'tools', 'price_fetcher.tool.json'))).toBe(true);
-    // External app: @cambium/runner package import, NOT a deep relative
+    // External app: @redwood-labs/cambium-runner package import, NOT a deep relative
     // into ../../../cambium-runner/ which wouldn't exist in curator.
-    expect(readFileSync(tsPath, 'utf8')).toContain("from '@cambium/runner'");
+    expect(readFileSync(tsPath, 'utf8')).toContain("from '@redwood-labs/cambium-runner'");
     expect(existsSync(join(scratch, 'packages'))).toBe(false);
   });
 
-  it('cambium new corrector lands at <cwd>/app/correctors/ and imports from @cambium/runner', () => {
+  it('cambium new corrector lands at <cwd>/app/correctors/ and imports from @redwood-labs/cambium-runner', () => {
     setupFlatPackage(scratch);
     const result = runCli(['new', 'corrector', 'regex_compiles'], scratch);
     expect(result.status).toBe(0);
     const tsPath = join(scratch, 'app', 'correctors', 'regex_compiles.corrector.ts');
     expect(existsSync(tsPath)).toBe(true);
-    expect(readFileSync(tsPath, 'utf8')).toContain("from '@cambium/runner'");
+    expect(readFileSync(tsPath, 'utf8')).toContain("from '@redwood-labs/cambium-runner'");
     expect(existsSync(join(scratch, 'packages'))).toBe(false);
   });
 
-  it('cambium new action lands at <cwd>/app/actions/ and imports ToolContext from @cambium/runner', () => {
+  it('cambium new action lands at <cwd>/app/actions/ and imports ToolContext from @redwood-labs/cambium-runner', () => {
     setupFlatPackage(scratch);
     const result = runCli(['new', 'action', 'slack_notify'], scratch);
     expect(result.status).toBe(0);
     const tsPath = join(scratch, 'app', 'actions', 'slack_notify.action.ts');
     expect(existsSync(tsPath)).toBe(true);
     expect(existsSync(join(scratch, 'app', 'actions', 'slack_notify.action.json'))).toBe(true);
-    expect(readFileSync(tsPath, 'utf8')).toContain("from '@cambium/runner'");
+    expect(readFileSync(tsPath, 'utf8')).toContain("from '@redwood-labs/cambium-runner'");
     expect(existsSync(join(scratch, 'packages'))).toBe(false);
   });
 

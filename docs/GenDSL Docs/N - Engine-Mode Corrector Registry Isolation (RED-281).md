@@ -10,7 +10,7 @@
 
 RED-275 landed the app-level corrector plugin system on top of a mutable module-global registry (`packages/cambium-runner/src/correctors/index.ts`). For the CLI — a one-shot process — that works cleanly: `loadAppCorrectors` in `main()` populates the registry, `runGen` reads it, process exits. No isolation concern.
 
-For a long-lived engine-mode host — a library consumer that imports `runGen` from `@cambium/runner` and drives multiple `runGen` calls in one process — the module-global registry is wrong. Correctors from call N leak into call N+1. A host loading two apps with a same-named corrector gets the second load's version silently replacing the first, with no per-call scoping.
+For a long-lived engine-mode host — a library consumer that imports `runGen` from `@redwood-labs/cambium-runner` and drives multiple `runGen` calls in one process — the module-global registry is wrong. Correctors from call N leak into call N+1. A host loading two apps with a same-named corrector gets the second load's version silently replacing the first, with no per-call scoping.
 
 This note settles *where* the registry should live and *when* to promote the fix to an impl ticket. Explicitly not shipping code today — the CLI path is correct and no engine-mode host yet exists to trip the gap.
 
@@ -64,7 +64,7 @@ New `RunGenOptions.correctors?: Record<string, CorrectorFn>` field. Optional; wh
 Caller shape:
 
 ```ts
-import { runGen, builtinCorrectors } from '@cambium/runner';
+import { runGen, builtinCorrectors } from '@redwood-labs/cambium-runner';
 import { my_app_corrector } from './correctors/my_app.corrector';
 
 await runGen({
@@ -89,7 +89,7 @@ Changing `RunGenOptions` is a breaking change for callers that rely on the curre
 
 - The CLI — in-tree caller, updates atomically with the runner.
 - The `registerAppCorrectors` public export — used in tests (`_resetAppCorrectorsForTests` companion). Keep the function but deprecate it: it becomes a no-op wrapper that pushes into a process-global "legacy" map, which the runner merges at lowest precedence when `opts.correctors` is absent. Emits a one-time stderr deprecation.
-- External engine-mode hosts — do not exist yet (per the "Swan actively building on API stability" memory; external callers rely on `@cambium/runner`'s published surface). Ship the new shape; document the migration in the same PR.
+- External engine-mode hosts — do not exist yet (per the "Swan actively building on API stability" memory; external callers rely on `@redwood-labs/cambium-runner`'s published surface). Ship the new shape; document the migration in the same PR.
 
 The `correctors: Record<string, CorrectorFn>` export stays for backward reference but is re-exported from `builtinCorrectors`'s container. Hosts that reached into the module-global directly get a deprecation warning.
 

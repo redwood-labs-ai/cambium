@@ -1,6 +1,6 @@
 // ── Log primitive: module barrel (RED-282 / RED-302) ─────────────────
 //
-// Public surface for `@cambium/runner` hosts that want to build their
+// Public surface for `@redwood-labs/cambium-runner` hosts that want to build their
 // own log-sink maps (mirrors the RED-299 correctors shape).
 
 import { stdout } from './backends/stdout.js';

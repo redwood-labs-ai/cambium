@@ -1,4 +1,4 @@
-// Public entry point for @cambium/runner.
+// Public entry point for @redwood-labs/cambium-runner.
 //
 // RED-242 established the package boundary. RED-243 exposes `runGen` —
 // the programmatic library entry point — with caller-injected schemas

@@ -76,7 +76,7 @@ Drop a file at `app/logs/<name>.log.ts` exporting a function named `<name>` that
 
 ```ts
 // app/logs/honeycomb.log.ts
-import type { LogSink } from '@cambium/runner';
+import type { LogSink } from '@redwood-labs/cambium-runner';
 
 export const honeycomb: LogSink = async (event, dest) => {
   // POST to Honeycomb's batch-events endpoint, etc.

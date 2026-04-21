@@ -88,7 +88,7 @@ packages/cambium/
   tests/            # Vitest tests
   examples/
     fixtures/       # Test documents
-packages/cambium-runner/   # @cambium/runner — TS runtime (RED-242)
+packages/cambium-runner/   # @redwood-labs/cambium-runner — TS runtime (RED-242)
   src/
     runner.ts         # TS runtime (executes IR)
     step-handlers.ts  # Generate, validate, repair, correct handlers

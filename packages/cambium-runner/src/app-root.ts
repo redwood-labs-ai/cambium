@@ -19,7 +19,7 @@
 // have their own project).
 //
 // Parse strategy: regex on section headers. A full TOML parser
-// (smol-toml) is already a workspace dep via @cambium/runner's
+// (smol-toml) is already a workspace dep via @redwood-labs/cambium-runner's
 // Genfile resolver, but using it here would pull a heavier surface
 // into a hot-path lookup; the classifier only needs to see
 // `[workspace]` vs `[package]`. Consistent with the LSP's approach.

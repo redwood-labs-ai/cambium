@@ -127,7 +127,7 @@ output.json + trace.json
 │   ├── src/
 │   │   └── contracts.ts   # TypeBox schemas (source of truth)
 │   └── tests/
-├── packages/cambium-runner/ # @cambium/runner — TS runtime (RED-242)
+├── packages/cambium-runner/ # @redwood-labs/cambium-runner — TS runtime (RED-242)
 │   ├── src/
 │   │   ├── runner.ts          # Core runtime (step pipeline + memory lifecycle)
 │   │   ├── step-handlers.ts   # Generate, validate, repair, correct, tool dispatch

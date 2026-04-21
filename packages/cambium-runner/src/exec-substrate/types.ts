@@ -2,7 +2,7 @@
  * Tool exec sandboxing — adapter interface (RED-247 / RED-213).
  *
  * Two substrates share one DSL surface and one adapter interface:
- *  - `wasm` — in-process Wasmtime + QuickJS-WASM, ships with @cambium/runner
+ *  - `wasm` — in-process Wasmtime + QuickJS-WASM, ships with @redwood-labs/cambium-runner
  *  - `firecracker` — microVM isolation, requires Linux + KVM, opt-in
  *  - `native` — back-compat fig-leaf; execSync; deprecated
  *

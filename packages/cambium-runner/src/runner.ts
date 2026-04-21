@@ -436,7 +436,7 @@ function extractJsonObject(text: string): any {
 // The CLI's main() (further down) reads argv, parses the IR, imports the
 // app-mode contracts.ts, calls runGen, then handles the file I/O + exit
 // code + stdout/stderr printing. Engine-mode callers import runGen from
-// '@cambium/runner' and pass their own schemas object.
+// '@redwood-labs/cambium-runner' and pass their own schemas object.
 
 export interface RunGenOptions {
   /** Pre-parsed IR (the JSON the Ruby compiler emitted). */
@@ -1621,7 +1621,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
 //
 // Wraps the discovery + runGen + artifact-write flow so the `cambium`
 // CLI can invoke the runner in-process via `import { runGenFromIr }
-// from '@cambium/runner'` instead of spawning a `node --import tsx`
+// from '@redwood-labs/cambium-runner'` instead of spawning a `node --import tsx`
 // subprocess. Engine-mode hosts still call `runGen` directly with
 // their own schemas — this helper exists specifically to encode the
 // CLI's "discover schemas from engine or genfile, write artifacts,
@@ -1768,7 +1768,7 @@ function setNestedValue(obj: any, path: string, value: any): void {
 
 // Only run the CLI entry when this file is invoked as a script. When
 // imported as a library (engine-mode hosts: `import { runGen } from
-// '@cambium/runner'`), `main()` must NOT fire — it would parse the
+// '@redwood-labs/cambium-runner'`), `main()` must NOT fire — it would parse the
 // host's argv looking for --ir, find nothing, and exit. The check
 // compares the resolved module path against process.argv[1].
 // Surfaced by the RED-220 POC.
