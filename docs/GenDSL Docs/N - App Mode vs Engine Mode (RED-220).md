@@ -57,10 +57,11 @@ What changes between modes is **discovery and packaging**, not semantics. Three 
 | Schema lookup | `import('packages/cambium/src/contracts.ts')` then `mod[ir.returnSchemaId]` | Schemas are passed in by the caller, or loaded from `<engineDir>/schemas.ts` |
 | Tool/action discovery | `loadFromDir('packages/cambium/app/{tools,actions}')` | Also scans `<engineDir>/*.tool.json` + `<engineDir>/*.action.json` |
 | App-corrector discovery | CLI-main loads `<genfileDir>/app/correctors/` | Also scans `<engineDir>/*.corrector.ts` inside `runGen` |
+| App log-sink discovery (RED-302) | Loads `<appPkgRoot>/app/logs/*.log.ts` at runner start | Also scans `<engineDir>/*.log.ts` inside `runGen`; `opts.logSinks` injects explicit sinks |
 | `runsRoot` | `join(cwd(), 'runs')` | Defaults to `<engineDir>/runs` when engine mode is detected; configurable per call |
 | `sessionId` | `CAMBIUM_SESSION_ID` env var | `opts.sessionId` option wins; host wrappers can set per-request |
 
-All five are now on `RunGenOptions` (engine-mode runtime catch-up). Everything else inside `runner.ts` is mode-agnostic already.
+All six are now on `RunGenOptions` (engine-mode runtime catch-up). Everything else inside `runner.ts` is mode-agnostic already.
 
 ---
 

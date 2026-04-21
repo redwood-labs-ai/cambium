@@ -479,6 +479,21 @@ function lintEngine(engineDir) {
     }
   }
 
+  // RED-302: log profiles under app/log_profiles/*.log_profile.rb.
+  const logProfileFiles = entries.filter(f => f.endsWith('.log_profile.rb'));
+  const knownLogProfiles = new Set();
+  for (const f of logProfileFiles) {
+    const profileName = f.replace('.log_profile.rb', '');
+    if (!NAME_REGEX.test(profileName)) {
+      fail(`log profile name "${profileName}" (${f}) must match ${NAME_REGEX}`);
+    } else {
+      pass(`log profile: ${f}`);
+      knownLogProfiles.add(profileName);
+    }
+  }
+  // Framework-builtin log destinations — legitimate inline references.
+  const BUILTIN_LOG_DESTINATIONS = new Set(['stdout', 'http_json', 'datadog']);
+
   // 8. Gen validation — walk every .cmb.rb and cross-check references.
   //    Framework-builtin tool / corrector names are legitimate refs too;
   //    lint only warns on unknown names (not fails) since the runner has
@@ -537,6 +552,22 @@ function lintEngine(engineDir) {
         if (!knownCorrectors.has(cname)) {
           warn(`${f}: corrects :${cname} — no sibling ${cname}.corrector.ts (ok if framework builtin)`);
         }
+      }
+    }
+
+    // RED-302: log :name — either a framework built-in destination
+    // (stdout/http_json/datadog), a profile file, or an app log-plugin
+    // (app/logs/<name>.log.ts). Warn on unknown names; don't fail
+    // because the runtime registry is authoritative.
+    for (const m of content.matchAll(/^\s*log\s+:(\w+)/gm)) {
+      const logName = m[1];
+      if (
+        !BUILTIN_LOG_DESTINATIONS.has(logName) &&
+        !knownLogProfiles.has(logName)
+      ) {
+        warn(`${f}: log :${logName} — no sibling ${logName}.log_profile.rb and not a framework built-in (ok if an app log plugin at app/logs/${logName}.log.ts)`);
+      } else if (knownLogProfiles.has(logName)) {
+        pass(`${f}: log :${logName} → ${logName}.log_profile.rb`);
       }
     }
 

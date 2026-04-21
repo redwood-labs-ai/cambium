@@ -51,7 +51,7 @@
         },
         {
           "comment": "Contract + policy primitives",
-          "match": "^\\s*(uses|corrects|constrain|extract|grounded_in|enrich|repair|mode|security|budget)\\b",
+          "match": "^\\s*(uses|corrects|constrain|extract|grounded_in|enrich|repair|mode|security|budget|log)\\b",
           "captures": {
             "1": { "name": "keyword.other.policy.cambium support.function.cambium" }
           }
@@ -65,7 +65,7 @@
         },
         {
           "comment": "Keyword arguments for primitives (RED-215 memory, RED-239 retain, RED-248/254/258/259 exec, RED-238 semantic query)",
-          "match": "\\b(to|type|path|strategy|passes|unit|target|operation|store_as|max_attempts|stop_on_no_improvement|network|filesystem|exec|allowlist|allowlist_paths|denylist|block_private|block_metadata|roots|allowed|per_tool|per_run|max_calls|size|top_k|scope|keyed_by|embed|ttl|max_entries|runtime|language|cpu|memory|timeout|query|arg_field|require_keyed_by_for|max_ttl|default_ttl|ban_scope|allowed_pools|require_citations):",
+          "match": "\\b(to|type|path|strategy|passes|unit|target|operation|store_as|max_attempts|stop_on_no_improvement|network|filesystem|exec|allowlist|allowlist_paths|denylist|block_private|block_metadata|roots|allowed|per_tool|per_run|max_calls|size|top_k|scope|keyed_by|embed|ttl|max_entries|runtime|language|cpu|memory|timeout|query|arg_field|require_keyed_by_for|max_ttl|default_ttl|ban_scope|allowed_pools|require_citations|include|granularity|endpoint|api_key_env):",
           "captures": {
             "1": { "name": "variable.parameter.cambium" }
           }

@@ -28,6 +28,8 @@ Define the auditable, replayable plan that the DSL compiles to.
 | `returnSchemaId` | `returns <Schema>` | validated against contracts.ts at compile (RED-210) |
 | `policies.tools_allowed` | `uses :a, :b` | deny-by-default allowlist |
 | `policies.correctors` | `corrects :math, :dates` | `Array<{name: string, max_attempts: number}>` — deterministic post-validation transforms. Each entry carries its own `max_attempts` (1..3, default 1, RED-298). Pre-RED-298 IRs with bare-string arrays are normalized to `max_attempts: 1` at run time. |
+| `policies.log` | `log :datadog, include: [:signals]` | `Array<{destination, include, granularity, endpoint?, api_key_env?, _profile?}>` — trace-fan-out destinations (RED-282 / RED-302). Profile references are resolved at compile time and inlined; `_profile` preserves the source name for trace observability. |
+| `policies.log_profiles` | (derived) | `Array<string>` — profile names referenced by any `log :name` call. Metadata-only; runner doesn't branch on it. |
 | `policies.constraints` | `constrain :budget, …` | legacy/ergonomic container for budget, tone, etc. |
 | `policies.grounding` | `grounded_in :document` | citation enforcement config |
 | `policies.security` | `security network: {...}` or `security :pack` | per-slot mixing; `_packs` metadata for trace (RED-214) |

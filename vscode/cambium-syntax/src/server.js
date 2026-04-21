@@ -25,6 +25,7 @@ let signalDefs = {};     // name → line (per-file extract declarations)
 let policyPacks = {};    // name → { path, content }                  -- RED-214
 let memoryPools = {};    // name → { path, content }                  -- RED-215
 let modelAliases = {};   // alias → { path, line, value }             -- RED-237
+let logProfiles = {};    // name → { path, content }                  -- RED-302
 
 // RED-286: inline Genfile shape detection. CommonJS LSP can't
 // easily import the .mjs helper in cli/workspace-shape.mjs; ~25 lines
@@ -174,6 +175,7 @@ function scanWorkspace() {
   policyPacks = {};
   memoryPools = {};
   modelAliases = {};
+  logProfiles = {};
 
   // App-mode scans gated on appPkgRoot being set. When workspaceRoot
   // is ITSELF an engine folder (e.g. user opened the engine dir
@@ -218,6 +220,18 @@ function scanWorkspace() {
       const fullPath = path.join(poolsDir, f);
       const content = fs.readFileSync(fullPath, 'utf8').trim();
       memoryPools[name] = { path: fullPath, content };
+    }
+  }
+
+  // Scan log profiles (RED-302)
+  const logProfilesDir = path.join(appPkgRoot, 'app/log_profiles');
+  if (fs.existsSync(logProfilesDir)) {
+    for (const f of fs.readdirSync(logProfilesDir)) {
+      if (!f.endsWith('.log_profile.rb')) continue;
+      const name = f.replace('.log_profile.rb', '');
+      const fullPath = path.join(logProfilesDir, f);
+      const content = fs.readFileSync(fullPath, 'utf8').trim();
+      logProfiles[name] = { path: fullPath, content };
     }
   }
 
@@ -391,6 +405,10 @@ const PRIMITIVE_DOCS = {
     detail: 'Dispatches a trigger action (RED-212).',
     doc: 'Parallel to `tool`, but for side-effect handlers (notifications, webhooks, Linear/Slack integrations) rather than data transforms. Declared at `app/actions/<name>.action.{json,ts}` and auto-discovered by the action registry.\n\n```ruby\non :latency_ms do\n  action :slack_notify, message: "latency spike detected"\nend\n```',
   },
+  log: {
+    detail: 'Declares trace-fan-out destinations (RED-282 / RED-302).',
+    doc: '`log` ships the run\'s event to one or more external destinations. Framework owns the event vocabulary (`complete` / `complete_with_warnings` / `failed`) and the dot-notation naming `<gen>.<method>.<event>` (e.g. `pattern_extractor.extract.complete`).\n\nProfile form (resolves from `app/log_profiles/<name>.log_profile.rb`):\n```ruby\nlog :app_default\n```\n\nInline form:\n```ruby\nlog :datadog, include: [:signals, :repair_attempts], granularity: :run\nlog :stdout\n```\n\nFramework built-in destinations: `:stdout` (human-readable, stderr), `:http_json` (generic POST), `:datadog` (DD intake with flattening + tags). App plugins via `app/logs/<name>.log.ts`.\n\nFire-and-forget async — sink errors emit `LogFailed` trace steps but never fail the run.',
+  },
   memory: {
     detail: 'Declares a memory slot (RED-215).',
     doc: 'Per-gen memory bucket. The runner reads from it before `Generate` (injecting as a `## Memory` block in the system prompt) and writes to it after a successful run.\n\nThree strategies:\n```ruby\nmemory :conversation, strategy: :sliding_window, size: 20\nmemory :facts, strategy: :semantic, top_k: 5, embed: "omlx:bge-small-en"\nmemory :activity, strategy: :log                 # append-only, no read\n```\n\nScopes: `:session` (default, auto-generated id), `:global` (shared across runs), or a named pool (`scope: :support_team`) defined at `app/memory_pools/<name>.pool.rb`. Pool-scoped memory inherits `strategy` / `embed` / `keyed_by` from the pool (authoritative); the gen-site decl can only set reader knobs (`size`, `top_k`).\n\nWith `retain` (RED-239):\n```ruby\nmemory :conversation, strategy: :sliding_window, size: 20,\n       retain: { ttl: "7d", max_entries: 1000 }\n```',
@@ -472,6 +490,18 @@ connection.onHover((params) => {
         contents: {
           kind: MarkupKind.Markdown,
           value: `**:${word}** — ${label}\n\n*${cf.path}*`,
+        },
+      };
+    }
+
+    // Log profile reference (RED-302) — only meaningful after `log :`
+    // at line start. Gated to avoid collision with tool/corrector symbols.
+    if (logProfiles[word] && /^\s*log\s+:/.test(line)) {
+      const lp = logProfiles[word];
+      return {
+        contents: {
+          kind: MarkupKind.Markdown,
+          value: `**:${word}** — Log profile\n\n*${lp.path}*\n\n---\n\n\`\`\`ruby\n${lp.content}\n\`\`\``,
         },
       };
     }
@@ -566,6 +596,10 @@ connection.onDefinition((params) => {
   // (RED-214). Other primitives can take colliding names without this.
   if (policyPacks[word] && /^\s*(security|budget)\s+:/.test(line)) {
     return { uri: 'file://' + policyPacks[word].path, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } };
+  }
+  // Log profile — only after `log :` at line start (RED-302).
+  if (logProfiles[word] && /^\s*log\s+:/.test(line)) {
+    return { uri: 'file://' + logProfiles[word].path, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } };
   }
   // Memory pool — only after `scope: :` (RED-215).
   if (memoryPools[word] && /\bscope:\s*:/.test(line)) {

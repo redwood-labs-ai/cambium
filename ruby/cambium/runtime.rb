@@ -891,6 +891,123 @@ module Cambium
     end
   end
 
+  # RED-282: named log profile bundling destinations + field configuration
+  # + granularity. Gens reference a profile by symbol (`log :app_default`);
+  # the compiler resolves it to fully-inlined destinations before IR
+  # emission. Mirrors the PolicyPack + MemoryPool load/builder pattern.
+  #
+  # File layout: `app/log_profiles/<name>.log_profile.rb`. Each file eval'd
+  # inside LogProfileBuilder. Name regex + realpath guards match the
+  # RED-214/215 stance.
+  class LogProfile
+    attr_reader :name, :destinations, :includes, :granularity
+
+    def initialize(name)
+      @name = name.to_s
+      @destinations = []
+      @includes = []
+      @granularity = 'run'
+    end
+
+    def self.load(name, search_dirs)
+      name_str = name.to_s
+      unless name_str =~ /\A[a-z][a-z0-9_]*\z/
+        raise CompileError,
+              "Invalid log profile name '#{name}'. Profile names must be lowercase " \
+              "identifiers matching /\\A[a-z][a-z0-9_]*\\z/ (e.g. :app_default)."
+      end
+
+      candidates = search_dirs.map { |d| File.join(d, "#{name_str}.log_profile.rb") }
+      file = candidates.find { |f| File.exist?(f) }
+      if file.nil?
+        raise CompileError,
+              "Log profile '#{name}' not found. Looked for:\n  " + candidates.join("\n  ")
+      end
+
+      profile = new(name)
+      builder = LogProfileBuilder.new(profile)
+      begin
+        builder.instance_eval(File.read(file), file)
+      rescue CompileError
+        raise
+      rescue ScriptError, StandardError => e
+        raise CompileError,
+              "Failed to load log profile '#{name}' from #{file}: " \
+              "#{e.class}: #{e.message}"
+      end
+
+      if profile.destinations.empty?
+        raise CompileError,
+              "Log profile '#{name}' at #{file} declares no destinations. " \
+              "Add at least one `destination :name, ...` directive."
+      end
+
+      profile
+    end
+  end
+
+  # Eval context for .log_profile.rb files. Provides `destination`,
+  # `include`, and `granularity` directives. Matches the flat filename-
+  # is-the-name layout of .policy.rb / .pool.rb so an author working
+  # in one file type knows how the others work.
+  class LogProfileBuilder
+    VALID_INCLUDES = %w[signals output_summary tool_calls repair_attempts errors].freeze
+    VALID_GRANULARITIES = %w[run step].freeze
+
+    def initialize(profile)
+      @profile = profile
+    end
+
+    # destination :datadog, endpoint: ENV["DD_URL"], api_key_env: "CAMBIUM_DATADOG_API_KEY"
+    # destination :stdout
+    #
+    # Destination name is NOT validated against a known set here —
+    # plugin backends (RED-282 app/logs/<name>.log.ts) are unknown at
+    # compile time. The runner validates at dispatch and errors clearly
+    # if a name doesn't resolve to a registered sink.
+    def destination(name, endpoint: nil, api_key_env: nil, **extra)
+      unless extra.empty?
+        raise CompileError,
+              "destination #{name}: unknown option(s) #{extra.keys.join(', ')}. " \
+              "Recognized: endpoint, api_key_env."
+      end
+      entry = { 'destination' => name.to_s }
+      entry['endpoint']    = endpoint    unless endpoint.nil?
+      entry['api_key_env'] = api_key_env unless api_key_env.nil?
+      @profile.destinations << entry
+    end
+
+    # include :signals, :usage, :output_summary
+    #
+    # Opt into richer payload fields beyond the framework-always set
+    # (run_id, ok, duration_ms, usage, trace_ref, etc.).
+    def include(*fields)
+      fields.each do |f|
+        f_str = f.to_s
+        unless VALID_INCLUDES.include?(f_str)
+          raise CompileError,
+                "log profile include: unknown field :#{f_str}. " \
+                "Recognized: #{VALID_INCLUDES.map { |v| ":#{v}" }.join(', ')}."
+        end
+        @profile.includes << f_str unless @profile.includes.include?(f_str)
+      end
+    end
+
+    # granularity :run | :step
+    #
+    # :run emits one event per run (default, lean). :step emits one
+    # event per trace step, mirroring the C-Trace vocabulary. Step-level
+    # is the opt-in firehose.
+    def granularity(g)
+      g_str = g.to_s
+      unless VALID_GRANULARITIES.include?(g_str)
+        raise CompileError,
+              "log profile granularity: must be :run or :step (got :#{g_str})"
+      end
+      @profile.instance_variable_set(:@granularity, g_str)
+    end
+  end
+
   # Internal builder used while a GenModel method runs.
   class PlanBuilder
     attr_reader :steps
@@ -1084,6 +1201,94 @@ module Cambium
         end
       end
 
+      # Log: declare trace-fan-out destinations for this gen. See
+      # RED-282 and docs/GenDSL Docs/N - Log Primitive (RED-282).md.
+      #
+      # Profile form (resolves from app/log_profiles/<name>.log_profile.rb):
+      #   log :app_default
+      #
+      # Inline form:
+      #   log :datadog, include: [:signals, :usage], granularity: :run
+      #   log :stdout
+      #
+      # Multiple calls accumulate destinations — same stance as
+      # `uses :a, :b`. Profile and inline opts are mutually exclusive
+      # within a single call (per-slot mixing rule from RED-214).
+      #
+      # Resolution: if `<name>.log_profile.rb` exists in any search dir,
+      # the arg is treated as a profile reference. Otherwise it's an
+      # inline destination name; the runner validates it against
+      # registered sinks (framework built-ins + app plugins) at dispatch.
+      def log(*args, include: nil, granularity: nil, endpoint: nil, api_key_env: nil, **extra)
+        unless extra.empty?
+          raise ArgumentError,
+                "log: unknown option(s) #{extra.keys.join(', ')}. " \
+                "Recognized: include, granularity, endpoint, api_key_env."
+        end
+        if args.length != 1
+          raise ArgumentError,
+                "log takes exactly one positional arg (destination or profile name), got #{args.length}"
+        end
+        name = args.first
+        unless name.is_a?(Symbol)
+          raise ArgumentError, "log: positional arg must be a Symbol (got #{name.class})"
+        end
+
+        # Profile-vs-inline discrimination: if a file exists, it's a
+        # profile reference. The Ruby name regex enforced by
+        # LogProfile.load catches path-traversal even though we're
+        # pre-walking the search dirs with a literal basename here.
+        name_str = name.to_s
+        profile_file = nil
+        if name_str =~ /\A[a-z][a-z0-9_]*\z/
+          profile_file = _cambium_log_profile_search_dirs.map do |d|
+            File.join(d, "#{name_str}.log_profile.rb")
+          end.find { |f| File.exist?(f) }
+        end
+
+        _cambium_defaults[:log] ||= []
+        _cambium_defaults[:log_profiles] ||= []
+
+        if profile_file
+          if !include.nil? || !granularity.nil? || !endpoint.nil? || !api_key_env.nil?
+            raise ArgumentError,
+                  "log :#{name}: cannot mix profile reference and inline options " \
+                  "(include/granularity/endpoint/api_key_env) in one call. " \
+                  "Either override via the profile file or use a separate inline log call."
+          end
+          profile = Cambium::LogProfile.load(name, _cambium_log_profile_search_dirs)
+          profile.destinations.each do |dest|
+            entry = dest.dup
+            entry['include'] = profile.includes.dup
+            entry['granularity'] = profile.granularity
+            entry['_profile'] = profile.name
+            _cambium_defaults[:log] << entry
+          end
+          unless _cambium_defaults[:log_profiles].include?(profile.name)
+            _cambium_defaults[:log_profiles] << profile.name
+          end
+        else
+          entry = { 'destination' => name_str }
+          inc = (include || []).map(&:to_s)
+          bad = inc.reject { |f| Cambium::LogProfileBuilder::VALID_INCLUDES.include?(f) }
+          unless bad.empty?
+            raise ArgumentError,
+                  "log :#{name} include: unknown field(s) #{bad.map { |f| ":#{f}" }.join(', ')}. " \
+                  "Recognized: #{Cambium::LogProfileBuilder::VALID_INCLUDES.map { |v| ":#{v}" }.join(', ')}."
+          end
+          entry['include'] = inc
+          g = (granularity || :run).to_s
+          unless Cambium::LogProfileBuilder::VALID_GRANULARITIES.include?(g)
+            raise ArgumentError,
+                  "log :#{name} granularity: must be :run or :step (got :#{g})"
+          end
+          entry['granularity'] = g
+          entry['endpoint']    = endpoint    unless endpoint.nil?
+          entry['api_key_env'] = api_key_env unless api_key_env.nil?
+          _cambium_defaults[:log] << entry
+        end
+      end
+
       # Internal: accumulate slots into _cambium_defaults[primitive], tracking
       # which source set each slot. Two sources for the same slot → error.
       def _cambium_add_slots(primitive, new_slots, source:)
@@ -1153,6 +1358,11 @@ module Cambium
       # RED-215: where to look for app/memory_pools/<name>.pool.rb.
       def _cambium_memory_pool_search_dirs
         _cambium_discovery_dirs('memory_pools')
+      end
+
+      # RED-282: where to look for app/log_profiles/<name>.log_profile.rb.
+      def _cambium_log_profile_search_dirs
+        _cambium_discovery_dirs('log_profiles')
       end
 
       # RED-215: declare a memory slot the gen wants read-injected
