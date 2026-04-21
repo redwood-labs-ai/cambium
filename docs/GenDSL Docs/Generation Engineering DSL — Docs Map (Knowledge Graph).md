@@ -50,6 +50,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[N - App Mode vs Engine Mode (RED-220)]] — engine-mode embedding design; runner-as-library, co-located gens, sentinel-aware authoring
 - [[N - Corrector Multi-Attempt (RED-296)]] — re-run corrector after Repair, per-gen `max_attempts` knob, `CorrectAcceptedWithErrors` terminal trace state
 - [[N - Engine-Mode Corrector Registry Isolation (RED-281)]] — shipped (RED-299): corrector registry is now per-`runGen` via `RunGenOptions.correctors`; `registerAppCorrectors` is a deprecated back-compat shim
+- [[N - Log Primitive (RED-282)]] — `log :datadog` / `log :app_default` for trace-fan-out to external observability platforms; framework-owned dot-notation event vocabulary, profile-based config, plugin pattern for app-specific backends
 
 ---
 
