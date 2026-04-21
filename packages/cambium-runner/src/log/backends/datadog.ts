@@ -1,6 +1,6 @@
 // ── Log backend: datadog (RED-282 / RED-302) ─────────────────────────
 //
-// Purpose-built for Datadog's log intake. Does three things the
+// Purpose-built for Datadog's log intake. Does four things the
 // generic http_json doesn't:
 //
 // 1. Sets `ddsource: cambium` and `ddtags: gen:<snake>,method:<snake>,ok:<bool>`
@@ -11,12 +11,17 @@
 //    `usage_prompt_tokens` etc. at the top level — DD indexes flat
 //    scalar fields efficiently; nested paths cost more and are harder
 //    to pivot on.
+// 4. Maps the framework event taxonomy (`complete` /
+//    `complete_with_warnings` / `failed`) to DD's `status` field
+//    (`info` / `warn` / `error`). Without this mapping every event
+//    lands as the DD default (`info`), breaking severity facets and
+//    monitor queries like `status:error`. See `mapDatadogStatus`.
 //
 // Endpoint default: `https://http-intake.logs.datadoghq.com/api/v2/logs`
 // (US1 region). Non-US operators set `endpoint:` in the profile.
 // Credential env var defaults to `CAMBIUM_DATADOG_API_KEY`.
 
-import type { LogSink } from '../event.js';
+import type { LogEvent, LogSink } from '../event.js';
 import { guardLogEndpoint } from '../guard.js';
 
 const DEFAULT_ENDPOINT = 'https://http-intake.logs.datadoghq.com/api/v2/logs';
@@ -43,6 +48,7 @@ export const datadog: LogSink = async (event, dest) => {
     ddsource: 'cambium',
     ddtags: buildTags(event),
     service: event.gen,
+    status: mapDatadogStatus(event),
     ...flattenEvent(event),
   };
 
@@ -89,4 +95,56 @@ function flattenEvent(event: any): Record<string, unknown> {
     }
   }
   return out;
+}
+
+/**
+ * Map a framework event to Datadog's `status` field.
+ *
+ * DD's log status drives severity facets (`@status:error`), monitor
+ * queries, and dashboard grouping. Without an explicit value DD
+ * defaults everything to `info`, so framework-owned failures silently
+ * collapse into the same bucket as successes and no monitor can key
+ * off run health without brittle message-text matching.
+ *
+ * The taxonomy is intentionally narrow — same stance as the framework
+ * event vocabulary (see `C - Trace (observability).md`). Adding a new
+ * event type means extending this mapping, not letting operators
+ * override per-shop.
+ *
+ * Run-level:
+ *   `complete`               → info
+ *   `complete_with_warnings` → warn   (CorrectAcceptedWithErrors, etc.)
+ *   `failed`                 → error  (all reasons: budget_exceeded,
+ *                                      validation_failed,
+ *                                      schema_broke_after_corrector,
+ *                                      error)
+ *
+ * Step-level (for forward compatibility when `granularity: :step`
+ * starts emitting):
+ *   `correct_accepted_with_errors` → warn   (unhealed-but-shippable)
+ *   anything else                  → info   (normal run progress)
+ *
+ * Note: `LogFailed` is a trace-step-only artifact pushed by
+ * `emitLogEvent` itself when a sink dispatch throws; it is never fed
+ * back through the log fan-out (a failing sink routing its own
+ * failures to the same sink would be a retry loop). So there is no
+ * `log_failed` case here — sink outages surface in `trace.json` only.
+ *
+ * Returns canonical spelled-out values (`info` / `warn` / `error`).
+ * DD accepts several aliases; canonical forms are stable across DD
+ * API versions.
+ */
+export function mapDatadogStatus(event: LogEvent): 'info' | 'warn' | 'error' {
+  switch (event.event) {
+    case 'complete':
+      return 'info';
+    case 'complete_with_warnings':
+      return 'warn';
+    case 'failed':
+      return 'error';
+    case 'correct_accepted_with_errors':
+      return 'warn';
+    default:
+      return 'info';
+  }
 }

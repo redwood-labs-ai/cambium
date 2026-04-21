@@ -52,7 +52,23 @@ log :http_json, endpoint: "...", ...   # also mirror to a private sink
 | --- | --- |
 | `:stdout` | Human-readable text per event, printed to stderr (stderr so stdout stays reserved for the gen's output JSON). Local-dev default. |
 | `:http_json` | Generic POST with a JSON body to the configured `endpoint`. Optional `Authorization: Bearer <env-var>` header via `api_key_env:`. |
-| `:datadog` | POSTs to DD's log intake with `ddsource: cambium`, `ddtags: gen:<snake>,method:<snake>,event:<kind>,ok:<bool>[,reason:<reason>]`, flattens `usage.*` into top-level `usage_*` fields for DD's indexed-field model. Credential via `DD-API-KEY` header, env var `CAMBIUM_DATADOG_API_KEY` by default. |
+| `:datadog` | POSTs to DD's log intake with `ddsource: cambium`, `ddtags: gen:<snake>,method:<snake>,event:<kind>,ok:<bool>[,reason:<reason>]`, flattens `usage.*` into top-level `usage_*` fields for DD's indexed-field model, and maps the framework event to DD's `status` field (see below) so severity facets and monitor queries work out of the box. Credential via `DD-API-KEY` header, env var `CAMBIUM_DATADOG_API_KEY` by default. |
+
+### Datadog `status` mapping
+
+DD's log `status` field drives severity facets (`@status:error`), monitor queries (`status:error count > N`), and dashboard grouping. Without an explicit value DD defaults everything to `info` — failures and successes collapse into the same bucket, and operators can't alert on run health without brittle message-text matching. The `:datadog` backend therefore sets `status` on every event using a framework-owned mapping:
+
+| Event | DD `status` | Rationale |
+| --- | --- | --- |
+| `complete` | `info` | Normal success. |
+| `complete_with_warnings` | `warn` | `CorrectAcceptedWithErrors` and similar — shippable output with unhealed corrector concerns. |
+| `failed` (any `reason:`) | `error` | Operator actionable. `reason:` stays in `ddtags` so monitors can still segment `budget_exceeded` vs `validation_failed` vs `schema_broke_after_corrector` vs `error`. |
+| `correct_accepted_with_errors` (step) | `warn` | Unhealed-but-shippable signal surfaced at step granularity. |
+| any other step event | `info` | `tool_call`, `repair`, `signal_fired`, etc. — normal run progress. |
+
+`LogFailed` is deliberately absent from this table. It's a trace-step-only artifact pushed by the log fan-out itself when a sink dispatch throws; it is never re-emitted as a log event (that would route a failing sink's failures back to the same sink). Sink outages surface in `trace.json` only — see *Failure semantics* below.
+
+The taxonomy is intentionally narrow and framework-owned (same stance as the event vocabulary). Adding a new event type means extending this mapping in `packages/cambium-runner/src/log/backends/datadog.ts` (`mapDatadogStatus`) and the row above — not letting operators override per-shop. Operators who need finer-grained paging policy build on top via DD monitor routing (e.g., page on `@reason:budget_exceeded`, ticket on `@reason:validation_failed`). `failed` is uniformly `error` rather than `critical` so in-framework mapping doesn't pre-empt that policy.
 
 ## App log plugins
 

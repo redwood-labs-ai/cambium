@@ -9,7 +9,7 @@ import { createServer, type Server } from 'node:http';
 import { AddressInfo } from 'node:net';
 import { stdout } from './stdout.js';
 import { http_json } from './http_json.js';
-import { datadog } from './datadog.js';
+import { datadog, mapDatadogStatus } from './datadog.js';
 import type { LogEvent, LogDestination } from '../event.js';
 
 function makeEvent(overrides: Partial<LogEvent> = {}): LogEvent {
@@ -246,6 +246,73 @@ describe('datadog log backend', () => {
       endpoint: url,
     });
     expect(captured[0].body.service).toBe('pattern_extractor');
+  });
+
+  it('sets status=info on complete events so DD severity facets work', async () => {
+    await datadog(makeEvent({ event: 'complete', ok: true }), {
+      destination: 'datadog',
+      include: [],
+      granularity: 'run',
+      endpoint: url,
+    });
+    expect(captured[0].body.status).toBe('info');
+  });
+
+  it('sets status=warn on complete_with_warnings events', async () => {
+    await datadog(makeEvent({ event: 'complete_with_warnings', ok: true }), {
+      destination: 'datadog',
+      include: [],
+      granularity: 'run',
+      endpoint: url,
+    });
+    expect(captured[0].body.status).toBe('warn');
+  });
+
+  it('sets status=error on failed events so monitor queries key off status', async () => {
+    await datadog(
+      makeEvent({ event: 'failed', ok: false, reason: 'validation_failed' }),
+      { destination: 'datadog', include: [], granularity: 'run', endpoint: url },
+    );
+    expect(captured[0].body.status).toBe('error');
+  });
+});
+
+describe('mapDatadogStatus (RED-302 follow-up: severity mapping)', () => {
+  const baseEvent: LogEvent = {
+    event_name: 'g.m.complete',
+    gen: 'g',
+    method: 'm',
+    event: 'complete',
+    run_id: 'r',
+    ok: true,
+  };
+
+  it('complete → info', () => {
+    expect(mapDatadogStatus({ ...baseEvent, event: 'complete' })).toBe('info');
+  });
+
+  it('complete_with_warnings → warn', () => {
+    expect(mapDatadogStatus({ ...baseEvent, event: 'complete_with_warnings' })).toBe('warn');
+  });
+
+  it('failed → error regardless of reason', () => {
+    for (const reason of ['budget_exceeded', 'validation_failed', 'schema_broke_after_corrector', 'error'] as const) {
+      expect(
+        mapDatadogStatus({ ...baseEvent, event: 'failed', ok: false, reason }),
+      ).toBe('error');
+    }
+  });
+
+  it('correct_accepted_with_errors step → warn (unhealed-but-shippable)', () => {
+    expect(
+      mapDatadogStatus({ ...baseEvent, event: 'correct_accepted_with_errors' }),
+    ).toBe('warn');
+  });
+
+  it('unrecognized step events default to info (safe default for run-progress steps)', () => {
+    expect(mapDatadogStatus({ ...baseEvent, event: 'tool_call' })).toBe('info');
+    expect(mapDatadogStatus({ ...baseEvent, event: 'repair' })).toBe('info');
+    expect(mapDatadogStatus({ ...baseEvent, event: 'signal_fired' })).toBe('info');
   });
 });
 
