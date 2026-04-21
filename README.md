@@ -2,10 +2,6 @@
 
 **Rails for generation engineering.** Write LLM programs in readable Ruby DSL, compile to auditable JSON, run with typed contracts, tools, repair loops, and full tracing.
 
-## What is this?
-
-Agentic LLM pipelines are hard to get right. Prompts drift. Outputs break silently. Debugging is a nightmare. Cambium gives you the same structure that Rails gave to web apps — conventions, contracts, and a runtime that handles the hard parts so you can focus on the logic.
-
 ```ruby
 class Analyst < GenModel
   model "omlx:gemma-4-31b-it-8bit"
@@ -27,74 +23,78 @@ class Analyst < GenModel
 end
 ```
 
-That's a complete, runnable LLM program. The compiler turns it into JSON IR. The runner handles generation, validation, repair, tool calls, citations, and budget tracking automatically.
+That's a complete, runnable LLM program. The Ruby compiler turns it into JSON IR. The TS runner handles generation, validation, repair, tool calls, citations, and budget tracking.
 
-## Key features
-
-- **Typed contracts** — TypeBox schemas define output shape. Validation catches bad outputs before they propagate.
-- **Repair loops** — Failed validation triggers targeted repair with configurable stop conditions.
-- **Tool use** — Declared, permissioned, logged. No surprise side effects.
-- **Tool sandboxing** — Network egress goes through an SSRF-guarded fetch with IP pinning and per-tool call budgets (RED-137). Bundles available as named policy packs (RED-214).
-- **Citation enforcement** — `grounded_in` verifies quotes exist verbatim in source documents.
-- **Agentic multi-turn** — Models that need to call tools mid-generation get a full conversation loop.
-- **Memory** — Declare `memory :conversation, strategy: :sliding_window` (or `:log`, `:semantic`) to persist across runs; the runtime handles SQLite storage, vec search, system-prompt injection, and post-run writes. Shared pools live in `app/memory_pools/*.pool.rb`; retro memory agents (`mode :retro`) can decide what to remember. Deps are optional — installs without memory don't require the native build.
-- **Full tracing** — Every run produces a `trace.json` with every step, token counts, tool calls, and timing.
-- **Correctors** — Deterministic post-processing (math, dates, currency, citations).
-- **Signals + triggers** — Extract data from outputs and fire deterministic actions.
-- **Budget tracking** — Token limits, tool call caps, time limits. Exceeded budgets fail safely.
-
-## Quick start
+## Install
 
 ```bash
-# Prerequisites: Ruby, Node.js, oMLX server (or Ollama)
+# CLI (Ruby DSL + scaffolders + `cambium run`)
+npm install -g cambium
 
-# Scaffold your first agent
+# OR: library only (engine-mode hosts that compose IR and invoke runGen directly)
+npm install @cambium/runner
+```
+
+### Prerequisites
+
+- **Node.js 18+**
+- **Ruby 3.0+** with the `json` gem (`gem install json` if missing) — Cambium ships the Ruby compiler; the Ruby runtime itself is a user-side prerequisite
+- An LLM provider — either:
+  - **oMLX** (OpenAI-compatible): set `CAMBIUM_OMLX_BASEURL` (default `http://localhost:8080`), optional `CAMBIUM_OMLX_API_KEY`
+  - **Ollama**: set `CAMBIUM_OLLAMA_BASEURL` (default `http://localhost:11434`)
+
+Run `cambium doctor` to verify your environment.
+
+## 5-minute quickstart
+
+```bash
+# 1. Create a new workspace
+cambium init my-project && cd my-project
+
+# 2. Scaffold an agent + schema + system prompt
 cambium new agent MyAnalyst
-
-# Define a return schema
 cambium new schema MyReport
 
-# Add system prompt
-cambium new system my_analyst
+# 3. Edit the generated files
+#    - app/gens/my_analyst.cmb.rb: wire up the generate call
+#    - src/contracts.ts: define the schema fields
+#    - app/systems/my_analyst.system.md: write the agent's role
 
-# Run it. Path convention depends on the Genfile shape:
-#   [workspace] monorepo → packages/cambium/app/gens/...
-#   [package]   flat app → app/gens/...
+# 4. Run it
+echo "hello world" > fixture.txt
 CAMBIUM_OMLX_API_KEY=<key> cambium run \
-  packages/cambium/app/gens/my_analyst.cmb.rb \
+  app/gens/my_analyst.cmb.rb \
   --method analyze \
-  --arg packages/cambium/examples/fixtures/incident.txt
+  --arg fixture.txt
 
-# Inspect the trace
+# 5. Inspect the trace
 cat runs/<run_id>/trace.json | jq .
 ```
 
-## Memory (opt-in)
+## Key features
 
-Any gen can declare memory slots that persist across runs:
-
-```ruby
-class Analyst < GenModel
-  model "omlx:Qwen3.5-27B-4bit"
-  system :analyst
-  returns AnalysisReport
-
-  memory :conversation, strategy: :sliding_window, size: 20
-  memory :facts, strategy: :semantic, top_k: 5, embed: "omlx:bge-small-en"
-end
-```
-
-On each run the runtime reads prior entries from `runs/memory/<scope>/<key>/<name>.sqlite`, injects them as a `## Memory` block in the system prompt, and appends a new entry after the run succeeds. Reuse a session across runs by setting `CAMBIUM_SESSION_ID`. Memory deps (`better-sqlite3`, `sqlite-vec`) are **optional** — installs without memory use never pay for the native build.
+- **Typed contracts** — TypeBox schemas define output shape; AJV validates before the output propagates.
+- **Repair loops** — Failed validation triggers targeted repair with configurable stop conditions.
+- **Tool use** — Declared, permissioned, logged, SSRF-guarded fetch with IP pinning and per-call budgets. Plugin pattern for app tools; bundled policy packs for shared security postures.
+- **Citation enforcement** — `grounded_in` verifies quotes exist verbatim in source documents.
+- **Agentic multi-turn** — Models that need mid-generation tool calls get a full conversation loop.
+- **Memory** — `memory :conversation, strategy: :sliding_window` (or `:log`, `:semantic`) persists across runs; SQLite-backed, vec-search capable, optional deps.
+- **Full tracing** — Every run produces a `trace.json` with every step, token counts, tool calls, and timing.
+- **Correctors** — Deterministic post-processing (math, dates, currency, citations) with automatic repair loops.
+- **Signals + triggers** — Extract data from outputs and fire deterministic actions.
+- **Budget tracking** — Token limits, tool call caps, time limits. Exceeded budgets fail safely.
+- **Scheduled runs** — `cron :daily, at: "9:00"` declares the schedule; `cambium schedule compile` emits deploy manifests for your platform (k8s CronJob, crontab, systemd, GitHub Actions, Render Cron).
+- **Observability** — `log :datadog` ships run + step events with a framework-owned severity mapping so monitors key off real run state.
 
 ## How it works
 
 ```
 .cmb.rb (Ruby DSL)
     │
-    ▼  compile.rb
+    ▼  compile.rb (Ruby)
 JSON IR (intermediate representation)
     │
-    ▼  runner.ts
+    ▼  @cambium/runner (TypeScript)
 ┌─────────────────────────────────┐
 │  Generate → Validate → Repair   │
 │       ↓                         │
@@ -107,87 +107,34 @@ JSON IR (intermediate representation)
 output.json + trace.json
 ```
 
-## Project structure
+## Documentation
 
-```
-├── packages/cambium/
-│   ├── app/
-│   │   ├── gens/          # GenModel definitions (.cmb.rb); retro memory
-│   │   │                  #   agents (mode :retro) live here too
-│   │   ├── systems/       # System prompts (.system.md)
-│   │   ├── tools/         # App plugin tools — paired .tool.json + .tool.ts
-│   │   ├── actions/       # App trigger actions — paired .action.json + .action.ts
-│   │   ├── correctors/    # App corrector plugins (.corrector.ts) — auto-discovered
-│   │   │                  #   in app-mode, override built-ins by name (RED-275)
-│   │   ├── policies/      # Named policy packs (.policy.rb) for security + budget
-│   │   ├── memory_pools/  # Named memory pools (.pool.rb) for shared strategy+embed
-│   │   ├── log_profiles/  # Named log profiles (.log_profile.rb) — trace fan-out config (RED-302)
-│   │   ├── logs/          # App log plugins (.log.ts) — custom backends (RED-302)
-│   │   └── config/        # Workspace config — models.rb (RED-237), memory_policy.rb (RED-239)
-│   ├── src/
-│   │   └── contracts.ts   # TypeBox schemas (source of truth)
-│   └── tests/
-├── packages/cambium-runner/ # @cambium/runner — TS runtime (RED-242)
-│   └── src/
-│       ├── runner.ts          # Core runtime (step pipeline + memory lifecycle)
-│       ├── step-handlers.ts   # Generate, validate, repair, correct, tool dispatch
-│       ├── builtin-tools/     # Framework tools — paired .tool.json + .tool.ts
-│       ├── builtin-actions/   # Framework trigger actions (notify_stderr, ...)
-│       ├── exec-substrate/    # ExecSubstrate adapter + :wasm/:firecracker/:native (RED-213)
-│       │                      #   :firecracker incl. firecracker-{snapshot,allowlist,netns,dns,protocol,api}.ts
-│       ├── tools/             # Tool infra (registry, ToolContext, network-guard)
-│       ├── actions/           # Action registry (parallel to tools/)
-│       ├── memory/            # Memory subsystem (backend, path, keys, retro-agent)
-│       ├── providers/         # Model + embed providers (oMLX, Ollama)
-│       ├── correctors/        # Built-in correctors (math, dates, currency, citations)
-│       │                      #   + app-loader.ts for RED-275 plugin discovery
-│       ├── signals.ts         # Signal extraction
-│       ├── triggers.ts        # Trigger evaluation (tool_call + action_call)
-│       ├── compound.ts        # Review + consensus
-│       ├── enrich.ts          # Sub-agent enrichment
-│       ├── context.ts         # Grounding-source document lookup (RED-276)
-│       ├── genfile.ts         # Genfile.toml [types].contracts resolver (RED-274)
-│       └── schema-describe.ts # Auto-generated schema descriptions
-├── ruby/cambium/
-│   ├── runtime.rb         # GenModel DSL primitives
-│   └── compile.rb         # Ruby → JSON IR compiler
-├── cli/
-│   ├── cambium.mjs        # CLI dispatch
-│   ├── compile.mjs        # `cambium compile` subcommand (RED-244)
-│   ├── generate.mjs       # `cambium new <type>` scaffolder + engine-mode detection (RED-246)
-│   ├── doctor.mjs         # `cambium doctor` env check
-│   ├── env-discovery.mjs  # Walk-up .env discovery + framework fallback (RED-295)
-│   ├── init.mjs           # `cambium init` workspace bootstrap
-│   ├── lint.mjs           # `cambium lint` package validation
-│   ├── scaffold-tool.mjs  # `cambium new tool --describe ...` agentic scaffolder (RED-216)
-│   ├── schedule.mjs       # `cambium schedule preview|list|compile` (RED-305)
-│   └── schedule-targets/  # Compile targets: k8s-cronjob, crontab, systemd, github-actions, render-cron
-├── runs/                  # Execution artifacts (ir.json, trace.json, output.json)
-│                          # plus memory/<scope>/<key>/<name>.sqlite buckets
-├── vscode/cambium-syntax/ # VS Code extension (syntax + LSP)
-└── docs/                  # Knowledge graph docs
+Full documentation is in [`docs/GenDSL Docs/`](docs/GenDSL%20Docs/) — a knowledge graph of primitives, compilation semantics, and design notes. Start with:
+
+- [`00 - Getting Started.md`](docs/GenDSL%20Docs/00%20-%20Getting%20Started.md)
+- [`01 - Core Concepts.md`](docs/GenDSL%20Docs/01%20-%20Core%20Concepts.md)
+- [`Generation Engineering DSL — Docs Map`](docs/GenDSL%20Docs/Generation%20Engineering%20DSL%20%E2%80%94%20Docs%20Map%20%28Knowledge%20Graph%29.md)
+
+## Engine mode
+
+Host projects that want to compose Cambium IR and invoke the runtime directly (rather than via the CLI) use `@cambium/runner` as a library:
+
+```ts
+import { runGen } from '@cambium/runner';
+import * as schemas from './schemas.js';
+
+const result = await runGen({ ir, schemas, mock: false });
+if (result.ok) {
+  console.log(result.output);
+}
 ```
 
-## Development
+See `docs/GenDSL Docs/N - App Mode vs Engine Mode (RED-220).md` for the full host-integration shape.
 
-```bash
-npm test              # Run test suite
-npm test -- --watch   # Watch mode
+## Contributing
 
-# Eval runner (GAIA benchmark)
-npx tsx scripts/gaia-eval.ts \
-  --questions packages/cambium/examples/gaia-questions/ \
-  --expected packages/cambium/examples/gaia-questions/expected.jsonl \
-  --output results.jsonl
-```
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the project structure, development loop, and architecture notes.
 
-## Docs
+## License
 
-Full documentation is in `docs/` — a knowledge graph with stable Doc IDs. Start with:
-- `docs/GenDSL Docs/00 - Getting Started.md`
-- `docs/GenDSL Docs/01 - Core Concepts.md`
-- Spec drafts at `docs/` root level
-
-## Status
-
-v0.2 — working core pipeline. Not published. Private repo.
+MIT — see [`LICENSE`](LICENSE).

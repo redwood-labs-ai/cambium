@@ -2,6 +2,10 @@ node_modules/
 runs/
 .DS_Store
 
+# Build output
+packages/*/dist/
+*.tgz
+
 # Secrets
 .env
 

@@ -1,4 +1,15 @@
 #!/usr/bin/env node
+// RED-306: register the tsx ESM loader hook at CLI startup so user
+// schemas (contracts.ts, engine-mode schemas.ts) load under plain
+// `node`. The prior subprocess architecture used `node --import tsx`
+// to get this hook; Option B (in-process runGenFromIr) needs the
+// equivalent registered programmatically on the one process we run.
+// `tsx/esm/api`'s `register()` returns an unregister callback we do
+// not currently call — the hook stays live for the duration of the
+// CLI invocation, which is what we want.
+import { register } from 'tsx/esm/api';
+register();
+
 // RED-295: load .env files before any CLI subcommand dispatch. Safe at
 // this placement because none of the below imports read process.env at
 // module-top-level — every access is inside a function body that runs
@@ -18,12 +29,15 @@ import { runDoctor } from './doctor.mjs';
 
 // Framework files resolved relative to the CLI's own location, not cwd.
 // External apps (app-mode, cf. RED-220 / RED-274) run `cambium run` from
-// their own project directory — a cwd-relative `./ruby/...` or
-// `./packages/...` is nowhere on their filesystem. `compile.mjs` already
-// took this stance; this mirrors it. (RED-274)
+// their own project directory — a cwd-relative `./ruby/...` is nowhere
+// on their filesystem. `compile.mjs` already took this stance; this
+// mirrors it. (RED-274)
+//
+// RED-306: the TS runner is no longer invoked as a subprocess. The CLI
+// imports `runGenFromIr` from `@cambium/runner` and invokes it
+// in-process (Option B).
 const CLI_DIR = dirname(fileURLToPath(import.meta.url));
 const RUBY_COMPILE_SCRIPT = resolve(CLI_DIR, '..', 'ruby', 'cambium', 'compile.rb');
-const RUNNER_SCRIPT = resolve(CLI_DIR, '..', 'packages', 'cambium-runner', 'src', 'runner.ts');
 
 function usage(msg) {
   if (msg) console.error(`\n${msg}`);
@@ -214,7 +228,9 @@ if (sessionId !== null) {
   }
 }
 
-// Compile with Ruby → IR JSON (stdout)
+// Compile with Ruby → IR JSON (stdout). Ruby stays a subprocess — the
+// compiler is Ruby and reading a Ruby process's stdout is the right
+// cross-runtime boundary.
 const compileEnv = { ...process.env };
 if (mock) compileEnv.CAMBIUM_ALLOW_MOCK = '1';
 // --session-id wins over an inherited CAMBIUM_SESSION_ID so the flag is
@@ -222,32 +238,68 @@ if (mock) compileEnv.CAMBIUM_ALLOW_MOCK = '1';
 if (sessionId !== null) compileEnv.CAMBIUM_SESSION_ID = sessionId;
 const compile = spawnSync('ruby', [RUBY_COMPILE_SCRIPT, file, '--method', method, '--arg', arg], {
   encoding: 'utf8',
-  maxBuffer: 50 * 1024 * 1024
+  maxBuffer: 50 * 1024 * 1024,
+  env: compileEnv,
 });
 if (compile.status !== 0) {
   console.error(compile.stdout || '');
   console.error(compile.stderr || '');
   process.exit(compile.status ?? 1);
 }
-const irJson = compile.stdout;
 
-// Run IR with TS runner
-const runnerArgs = ['--import', 'tsx', RUNNER_SCRIPT, '--ir', '-'];
-if (traceOut) runnerArgs.push('--trace', traceOut);
-if (outputOut) runnerArgs.push('--out', outputOut);
-if (mock) runnerArgs.push('--mock');
-for (const k of memoryKeys) runnerArgs.push('--memory-key', k);
-if (firedBy) runnerArgs.push('--fired-by', firedBy);
-const run = spawnSync('node', runnerArgs, {
-  input: irJson,
-  encoding: 'utf8',
-  maxBuffer: 50 * 1024 * 1024,
-  env: compileEnv,
-});
-if (run.status !== 0) {
-  console.error(run.stdout || '');
-  console.error(run.stderr || '');
-  process.exit(run.status ?? 1);
+// RED-306: run the IR in-process via `@cambium/runner`. Replaces the
+// prior `node --import tsx packages/cambium-runner/src/runner.ts`
+// subprocess. Benefits: no `tsx` runtime dep for end users, no
+// subprocess-boundary env-race for CAMBIUM_ALLOW_MOCK, faster startup.
+let ir;
+try {
+  ir = JSON.parse(compile.stdout);
+} catch (err) {
+  console.error(`Failed to parse IR JSON from ruby compile stdout: ${err?.message || err}`);
+  console.error(compile.stdout);
+  process.exit(1);
 }
-process.stdout.write(run.stdout);
-process.stderr.write(run.stderr);
+
+// Apply --session-id / --mock via env vars for any runGen-internal code
+// that reads them (matches the pre-RED-306 subprocess env). runGenFromIr
+// also restores CAMBIUM_ALLOW_MOCK on return.
+const previousMockEnv = process.env.CAMBIUM_ALLOW_MOCK;
+const previousSessionEnv = process.env.CAMBIUM_SESSION_ID;
+if (mock) process.env.CAMBIUM_ALLOW_MOCK = '1';
+if (sessionId !== null) process.env.CAMBIUM_SESSION_ID = sessionId;
+
+try {
+  const { runGenFromIr } = await import('@cambium/runner');
+  const result = await runGenFromIr({
+    ir,
+    cwd: process.cwd(),
+    traceOut,
+    outputOut,
+    mock,
+    memoryKeys,
+    sessionId: sessionId ?? undefined,
+    firedBy: firedBy ?? undefined,
+  });
+
+  if (!result.ok) {
+    if (result.errorMessage) {
+      console.error(`${result.errorMessage}. See ${result.tracePath}`);
+    }
+    process.exit(1);
+  }
+
+  console.log(JSON.stringify(result.output, null, 2));
+  console.error(`Trace: ${result.tracePath}`);
+} catch (err) {
+  console.error(err?.stack || String(err));
+  process.exit(1);
+} finally {
+  if (mock) {
+    if (previousMockEnv === undefined) delete process.env.CAMBIUM_ALLOW_MOCK;
+    else process.env.CAMBIUM_ALLOW_MOCK = previousMockEnv;
+  }
+  if (sessionId !== null) {
+    if (previousSessionEnv === undefined) delete process.env.CAMBIUM_SESSION_ID;
+    else process.env.CAMBIUM_SESSION_ID = previousSessionEnv;
+  }
+}

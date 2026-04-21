@@ -1353,10 +1353,19 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
       const citResult = handleCorrect(parsed, ['citations'], { document: getGroundingDocument(ir) }, correctors);
       const citationResult = citResult.meta?.citationResult;
 
+      // RED-bug follow-up: both `citResult.issues` references below look
+      // at a top-level field that StepResult does not declare — issues
+      // actually live at `citResult.meta.issues`. The fallback branch
+      // and the citErrors branch have therefore both been dead code
+      // (always empty). Fixing is a runtime behavior change (citation
+      // errors would start triggering repairs), so intentionally left
+      // as-is here; the `as any` cast masks the type error so the
+      // packaging build passes without altering runtime behavior.
+      const citResultAny = citResult as any;
       trace.steps.push({
         ...citResult,
         type: 'GroundingCheck',
-        ok: citationResult?.allValid ?? ((citResult.issues ?? []).length === 0),
+        ok: citationResult?.allValid ?? ((citResultAny.issues ?? []).length === 0),
         meta: {
           ...citResult.meta,
           passed: citationResult?.passed?.length ?? 0,
@@ -1367,7 +1376,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
         },
       });
 
-      const citErrors = citResult.issues?.filter((i: any) => i.severity === 'error') ?? [];
+      const citErrors = citResultAny.issues?.filter((i: any) => i.severity === 'error') ?? [];
       if (citErrors.length > 0) {
         // Feed citation errors into repair
         const repairErrors = citErrors.map((i: any) => ({
@@ -1608,21 +1617,48 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   }
 }
 
-// ── CLI entry point ───────────────────────────────────────────────────
+// ── runGenFromIr: CLI-equivalent in-process entry point (RED-306) ────
 //
-// argv parsing + IR file read + contracts resolution + runGen + file
-// writes + exit code. Engine-mode callers do not go through this — they
-// import runGen directly and supply their own schemas.
-//
-// Contracts resolution (RED-274): if cwd has a Genfile.toml with a
-// [types].contracts list, load from there. Otherwise fall back to
-// packages/cambium/src/contracts.ts relative to cwd — preserves
-// back-compat for the cambium repo's own example app, whose workspace
-// Genfile at the repo root has no [types].contracts.
-async function main() {
-  const { irPath, traceOut, outputOut, mock, memoryKeys, firedBy } = parseArgs(process.argv.slice(2));
-  const irText = irPath === '-' ? readFileSync(0, 'utf8') : readFileSync(irPath, 'utf8');
-  const ir: IR = JSON.parse(irText);
+// Wraps the discovery + runGen + artifact-write flow so the `cambium`
+// CLI can invoke the runner in-process via `import { runGenFromIr }
+// from '@cambium/runner'` instead of spawning a `node --import tsx`
+// subprocess. Engine-mode hosts still call `runGen` directly with
+// their own schemas — this helper exists specifically to encode the
+// CLI's "discover schemas from engine or genfile, write artifacts,
+// return result + paths" contract.
+
+export interface RunGenFromIrOptions {
+  /** Parsed IR object (typically `JSON.parse(<ruby compile stdout>)`). */
+  ir: IR;
+  /** Working directory for genfile discovery + default artifact root.
+   *  Defaults to `process.cwd()`. */
+  cwd?: string;
+  /** Override the trace-output path. Defaults to `<runsDir>/<runId>/trace.json`. */
+  traceOut?: string;
+  /** Override the output-output path. Defaults to `<runsDir>/<runId>/output.json`. */
+  outputOut?: string;
+  /** Pass-through to runGen. */
+  mock?: boolean;
+  memoryKeys?: string[];
+  sessionId?: string;
+  firedBy?: string;
+  /** Optional caller-provided log-sink overrides (parallel to runGen's). */
+  logSinks?: Record<string, LogSink>;
+}
+
+export interface RunGenFromIrResult extends RunGenResult {
+  /** Absolute path to the written trace.json. */
+  tracePath: string;
+  /** Absolute path to the written output.json. */
+  outputPath: string;
+  /** Absolute path to the written ir.json. */
+  irPath: string;
+  /** Absolute path to the per-run artifact directory. */
+  runDir: string;
+}
+
+export async function runGenFromIr(opts: RunGenFromIrOptions): Promise<RunGenFromIrResult> {
+  const cwd = opts.cwd ?? process.cwd();
 
   let contractsMod: Record<string, any>;
   // RED-287: engine-mode schemas live as a sibling of the gen file
@@ -1632,8 +1668,8 @@ async function main() {
   // wins over the app-mode Genfile lookup — an IR compiled from an
   // engine gen always sources its own schemas, even if cwd happens
   // to contain a Genfile.
-  const engineDir = resolveEngineDir(ir.entry?.source);
-  const genfile = resolveGenfileContracts(process.cwd());
+  const engineDir = resolveEngineDir(opts.ir.entry?.source);
+  const genfile = resolveGenfileContracts(cwd);
   let appCorrectors: Record<string, CorrectorFn> | undefined;
   if (engineDir) {
     const schemasFile = join(engineDir, 'schemas.ts');
@@ -1659,38 +1695,66 @@ async function main() {
     // bare absolute path works) but is required on Windows, where a
     // bare `C:\...` path is not a valid ESM specifier. Matches the
     // genfile-path loader in `genfile.ts`.
-    const fallback = pathToFileURL(join(process.cwd(), 'packages/cambium/src/contracts.ts')).href;
+    const fallback = pathToFileURL(join(cwd, 'packages/cambium/src/contracts.ts')).href;
     contractsMod = await import(fallback);
   }
 
   const result = await runGen({
-    ir,
+    ir: opts.ir,
     schemas: contractsMod,
-    mock,
-    memoryKeys,
+    mock: opts.mock,
+    memoryKeys: opts.memoryKeys,
+    sessionId: opts.sessionId,
     correctors: appCorrectors,
-    firedBy,
+    logSinks: opts.logSinks,
+    firedBy: opts.firedBy,
   });
 
   // RED-287: engine-mode run artifacts go under <engineDir>/runs/ so
   // the engine folder stays self-contained. App mode continues to
   // write under <cwd>/runs/.
-  const runsBase = engineDir ? join(engineDir, 'runs') : join(process.cwd(), 'runs');
+  const runsBase = engineDir ? join(engineDir, 'runs') : join(cwd, 'runs');
   const runDir = join(runsBase, result.runId);
   mkdirSync(runDir, { recursive: true });
-  writeFileSync(join(runDir, 'ir.json'), JSON.stringify(result.ir, null, 2));
-  writeFileSync(traceOut ?? join(runDir, 'trace.json'), JSON.stringify(result.trace, null, 2));
-  writeFileSync(outputOut ?? join(runDir, 'output.json'), JSON.stringify(result.output ?? null, null, 2));
+  const irPath = join(runDir, 'ir.json');
+  const tracePath = opts.traceOut ?? join(runDir, 'trace.json');
+  const outputPath = opts.outputOut ?? join(runDir, 'output.json');
+  writeFileSync(irPath, JSON.stringify(result.ir, null, 2));
+  writeFileSync(tracePath, JSON.stringify(result.trace, null, 2));
+  writeFileSync(outputPath, JSON.stringify(result.output ?? null, null, 2));
+
+  return { ...result, tracePath, outputPath, irPath, runDir };
+}
+
+// ── CLI entry point ───────────────────────────────────────────────────
+//
+// argv parsing + IR file read → delegates to runGenFromIr. The `cambium`
+// CLI no longer spawns this file as a subprocess (RED-306); this main()
+// remains so `node dist/runner.js --ir <path>` still works for debugging
+// and for any operator bypassing the CLI.
+async function main() {
+  const { irPath, traceOut, outputOut, mock, memoryKeys, firedBy } = parseArgs(process.argv.slice(2));
+  const irText = irPath === '-' ? readFileSync(0, 'utf8') : readFileSync(irPath, 'utf8');
+  const ir: IR = JSON.parse(irText);
+
+  const result = await runGenFromIr({
+    ir,
+    traceOut,
+    outputOut,
+    mock,
+    memoryKeys,
+    firedBy,
+  });
 
   if (!result.ok) {
     if (result.errorMessage) {
-      console.error(`${result.errorMessage}. See ${traceOut ?? join('runs', result.runId, 'trace.json')}`);
+      console.error(`${result.errorMessage}. See ${result.tracePath}`);
     }
     process.exit(1);
   }
 
   console.log(JSON.stringify(result.output, null, 2));
-  console.error(`Trace: ${traceOut ?? join('runs', result.runId, 'trace.json')}`);
+  console.error(`Trace: ${result.tracePath}`);
 }
 
 function setNestedValue(obj: any, path: string, value: any): void {

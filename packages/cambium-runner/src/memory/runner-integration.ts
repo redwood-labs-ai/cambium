@@ -1,4 +1,5 @@
 import type { MemoryDecl, MemoryPlan, MemoryRunContext, MemoryEntry } from './types.js';
+export type { MemoryPlan } from './types.js';
 import { SqliteMemoryBackend } from './backend.js';
 import { resolveBucketPath } from './path.js';
 import { formatMemoryBlock } from './prompt-block.js';

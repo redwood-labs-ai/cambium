@@ -44,6 +44,19 @@ function runCli(args: string[], cwd: string, env: Record<string, string> = {}) {
 function setupEngine(engineDir: string) {
   mkdirSync(engineDir, { recursive: true });
 
+  // RED-306: the CLI now loads engine TS files via `tsx/esm/api`'s
+  // programmatic register() — which honors the nearest package.json's
+  // "type" field. Real engine-mode users live inside a Node project
+  // that declares `"type": "module"`; the test fixture previously
+  // omitted this and coasted on the old `node --import tsx` subprocess
+  // path, which tolerated the missing declaration by falling back to
+  // CJS. Write an explicit package.json so the temp engine reflects
+  // how real users deploy.
+  writeFileSync(
+    join(engineDir, 'package.json'),
+    JSON.stringify({ name: 'e2e_engine_fixture', type: 'module', private: true }) + '\n',
+  );
+
   writeFileSync(
     join(engineDir, 'cambium.engine.json'),
     JSON.stringify({ name: 'e2e_engine', version: '0.1.0' }),
