@@ -422,6 +422,7 @@ export async function handleToolCall(
     toolName,
     policy: env.policy?.network,
     execPolicy: env.policy?.exec,
+    filesystemPolicy: env.policy?.filesystem,
     emitStep: env.traceEvents ? (step) => env.traceEvents!.push(step) : undefined,
   });
 
