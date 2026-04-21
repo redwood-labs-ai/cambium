@@ -14,7 +14,7 @@
  * Pure tools (calculator, read_file) ignore ctx entirely.
  */
 
-import type { NetworkPolicy, ExecPolicy } from './permissions.js';
+import type { NetworkPolicy, FilesystemPolicy, ExecPolicy } from './permissions.js';
 import { guardedFetch } from './network-guard.js';
 
 export type ToolContext = {
@@ -42,6 +42,11 @@ export type ToolContext = {
    *  that call tools directly) — callers that want the events must
    *  handle undefined. */
   emitStep?: (step: { type: string; ok?: boolean; id?: string; meta?: any }) => void;
+  /** Resolved `security.filesystem` policy. When present, filesystem tools
+   *  MUST verify the requested path falls within one of the declared roots
+   *  (after realpath resolution). Absent means no filesystem: block was
+   *  declared — tools should deny rather than silently allow. */
+  filesystemPolicy?: FilesystemPolicy;
 };
 
 /**
@@ -53,10 +58,11 @@ export function buildToolContext(args: {
   toolName: string;
   policy?: NetworkPolicy;
   execPolicy?: ExecPolicy;
+  filesystemPolicy?: FilesystemPolicy;
   signal?: AbortSignal;
   emitStep?: ToolContext['emitStep'];
 }): ToolContext {
-  const { toolName, policy, execPolicy, signal, emitStep } = args;
+  const { toolName, policy, execPolicy, filesystemPolicy, signal, emitStep } = args;
 
   const boundFetch = async (url: string, init?: RequestInit): Promise<Response> => {
     if (!policy) {
@@ -67,5 +73,5 @@ export function buildToolContext(args: {
     return guardedFetch(url, init, policy);
   };
 
-  return { toolName, fetch: boundFetch, signal, execPolicy, emitStep };
+  return { toolName, fetch: boundFetch, signal, execPolicy, filesystemPolicy, emitStep };
 }
