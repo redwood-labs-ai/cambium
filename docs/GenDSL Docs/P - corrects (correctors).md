@@ -58,6 +58,33 @@ Scaffold the boilerplate via `cambium new corrector <Name>` (RED-284) — the ge
 
 The name must match `/^[a-z][a-z0-9_]*$/` (traversal guard). The export name must match the file basename. App correctors override same-named built-ins with a one-time stderr warning per process (mirrors the RED-209 tool-plugin precedence rule).
 
+## Engine-mode hosts: `RunGenOptions.correctors` (RED-299)
+
+Library consumers that import `runGen` from `@cambium/runner` and drive multiple gens in one process pass correctors per-call via `RunGenOptions`:
+
+```ts
+import { runGen, builtinCorrectors } from '@cambium/runner';
+import { my_app_corrector } from './correctors/my_app.corrector';
+
+await runGen({
+  ir, schemas,
+  correctors: { ...builtinCorrectors, my_app: my_app_corrector },
+});
+```
+
+Precedence (low → high, later wins on name collision):
+
+1. Framework `builtinCorrectors` (`math`, `dates`, `currency`, `citations`)
+2. Legacy `registerAppCorrectors` map (deprecated; kept for back-compat)
+3. `opts.correctors` — the caller's map
+4. Engine-sibling correctors auto-discovered under `<engineDir>/*.corrector.ts`
+
+Each `runGen` call builds its own map; there is no module-global leakage across calls. `registerAppCorrectors` still exists for backward compatibility but emits a one-time stderr deprecation warning; new code should use `RunGenOptions.correctors`.
+
+App-mode CLI (`cambium run`) does this automatically — `main()` loads correctors via `loadAppCorrectors(genfileDir)` and passes them through. Most callers never set this option directly.
+
+See [[N - Engine-Mode Corrector Registry Isolation (RED-281)]] for the design rationale and [[N - App Mode vs Engine Mode (RED-220)]] for the engine-mode context.
+
 ## See also
 - [[C - Repair Loop]]
 - [[N - Failure Modes & Debugging]]

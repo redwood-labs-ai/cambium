@@ -1,13 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runGen } from './runner.js';
-import {
-  correctors,
-  registerAppCorrectors,
-  _resetAppCorrectorsForTests,
-} from './correctors/index.js';
+import { builtinCorrectors } from './correctors/index.js';
 import type { CorrectorFn } from './correctors/types.js';
 
-const BUILTINS = ['math', 'dates', 'currency', 'citations'];
+// RED-299: tests pass correctors via `runGen({ correctors })`, not
+// via the deprecated module-global registerAppCorrectors path. Each
+// test builds a local map `{ ...builtinCorrectors, ...its-own }`
+// and passes it through. No per-test global teardown needed.
 
 /**
  * RED-275: an app-level corrector that returns `{ corrected: false,
@@ -72,12 +71,11 @@ describe('corrector error-severity issues feed the repair loop (RED-275)', () =>
     process.env.CAMBIUM_ALLOW_MOCK = '1';
   });
   afterEach(() => {
-    _resetAppCorrectorsForTests(BUILTINS);
     delete process.env.CAMBIUM_ALLOW_MOCK;
   });
 
   it('triggers Repair + ValidateAfterCorrectorRepair when a corrector returns error issues', async () => {
-    const reportsError: CorrectorFn = (data) => ({
+    const reports_error: CorrectorFn = (data) => ({
       corrected: false,
       output: data,
       issues: [
@@ -88,11 +86,11 @@ describe('corrector error-severity issues feed the repair loop (RED-275)', () =>
         },
       ],
     });
-    registerAppCorrectors({ reports_error: reportsError });
 
     const result = await runGen({
       ir: baseIR(['reports_error']),
       schemas: { MockOutput: MockSchema },
+      correctors: { ...builtinCorrectors, reports_error },
     });
 
     const stepTypes = result.trace.steps.map((s: any) => s.type);
@@ -105,7 +103,7 @@ describe('corrector error-severity issues feed the repair loop (RED-275)', () =>
   });
 
   it('does NOT trigger repair when corrector issues are all non-error severity', async () => {
-    const warnOnly: CorrectorFn = (data) => ({
+    const warn_only: CorrectorFn = (data) => ({
       corrected: false,
       output: data,
       issues: [
@@ -116,11 +114,11 @@ describe('corrector error-severity issues feed the repair loop (RED-275)', () =>
         },
       ],
     });
-    registerAppCorrectors({ warn_only: warnOnly });
 
     const result = await runGen({
       ir: baseIR(['warn_only']),
       schemas: { MockOutput: MockSchema },
+      correctors: { ...builtinCorrectors, warn_only },
     });
 
     const stepTypes = result.trace.steps.map((s: any) => s.type);
@@ -145,11 +143,11 @@ describe('corrector error-severity issues feed the repair loop (RED-275)', () =>
     const throws: CorrectorFn = () => {
       throw new Error('kaboom');
     };
-    registerAppCorrectors({ throws });
 
     const result = await runGen({
       ir: baseIR(['throws']),
       schemas: { MockOutput: MockSchema },
+      correctors: { ...builtinCorrectors, throws },
     });
 
     const stepTypes = result.trace.steps.map((s: any) => s.type);
@@ -194,7 +192,6 @@ describe('corrector multi-attempt + correctness fix (RED-298)', () => {
     process.env.CAMBIUM_ALLOW_MOCK = '1';
   });
   afterEach(() => {
-    _resetAppCorrectorsForTests(BUILTINS);
     delete process.env.CAMBIUM_ALLOW_MOCK;
   });
 
@@ -202,18 +199,18 @@ describe('corrector multi-attempt + correctness fix (RED-298)', () => {
     // Even with the default 1-attempt contract, the re-run after Repair
     // happens — that's the correctness fix. The step is greppable,
     // regardless of whether the corrector healed or not.
-    const reportsError: CorrectorFn = (data) => ({
+    const one_shot: CorrectorFn = (data) => ({
       corrected: false,
       output: data,
       issues: [
         { path: '.summary', message: 'always-error', severity: 'error' },
       ],
     });
-    registerAppCorrectors({ one_shot: reportsError });
 
     const result = await runGen({
       ir: baseIR([{ name: 'one_shot', max_attempts: 1 }]),
       schemas: { MockOutput: MockSchema },
+      correctors: { ...builtinCorrectors, one_shot },
     });
 
     const stepTypes = result.trace.steps.map((s: any) => s.type);
@@ -228,18 +225,18 @@ describe('corrector multi-attempt + correctness fix (RED-298)', () => {
     //   - initial Correct (errors)
     //   - 3× (Repair → ValidateAfterCorrectorRepair → CorrectAfterRepair)
     //   - CorrectAcceptedWithErrors (terminal, ok:false)
-    const alwaysFails: CorrectorFn = (data) => ({
+    const always_fails: CorrectorFn = (data) => ({
       corrected: false,
       output: data,
       issues: [
         { path: '.summary', message: 'never heals', severity: 'error' },
       ],
     });
-    registerAppCorrectors({ always_fails: alwaysFails });
 
     const result = await runGen({
       ir: baseIR([{ name: 'always_fails', max_attempts: 3 }]),
       schemas: { MockOutput: MockSchema },
+      correctors: { ...builtinCorrectors, always_fails },
     });
 
     const stepTypes = result.trace.steps.map((s: any) => s.type);
@@ -278,11 +275,10 @@ describe('corrector multi-attempt + correctness fix (RED-298)', () => {
       }
       return { corrected: false, output: data, issues: [] };
     };
-    registerAppCorrectors({ flaky });
-
     const result = await runGen({
       ir: baseIR([{ name: 'flaky', max_attempts: 3 }]),
       schemas: { MockOutput: MockSchema },
+      correctors: { ...builtinCorrectors, flaky },
     });
 
     const stepTypes = result.trace.steps.map((s: any) => s.type);
@@ -304,18 +300,18 @@ describe('corrector multi-attempt + correctness fix (RED-298)', () => {
   it('legacy Array<string> IR shape still runs (pre-RED-298 cached IRs)', async () => {
     // Bare strings on the IR should normalize to max_attempts:1 and
     // produce the same trace as the object form { name, max_attempts: 1 }.
-    const reportsError: CorrectorFn = (data) => ({
+    const legacy_shape: CorrectorFn = (data) => ({
       corrected: false,
       output: data,
       issues: [
         { path: '.summary', message: 'legacy-path-error', severity: 'error' },
       ],
     });
-    registerAppCorrectors({ legacy_shape: reportsError });
 
     const result = await runGen({
       ir: baseIR(['legacy_shape']), // bare string, not object
       schemas: { MockOutput: MockSchema },
+      correctors: { ...builtinCorrectors, legacy_shape },
     });
 
     const stepTypes = result.trace.steps.map((s: any) => s.type);
@@ -351,11 +347,10 @@ describe('corrector multi-attempt + correctness fix (RED-298)', () => {
       // shape. MockSchema requires `summary`; returning {} drops it.
       return { corrected: true, output: {}, issues: [] };
     };
-    registerAppCorrectors({ mutates_bad: mutatesIntoBadShape });
-
     const result = await runGen({
       ir: baseIR([{ name: 'mutates_bad', max_attempts: 3 }]),
       schemas: { MockOutput: MockSchema },
+      correctors: { ...builtinCorrectors, mutates_bad: mutatesIntoBadShape },
     });
 
     const stepTypes = result.trace.steps.map((s: any) => s.type);
@@ -373,17 +368,16 @@ describe('corrector multi-attempt + correctness fix (RED-298)', () => {
   it('two correctors with different max_attempts run independently', async () => {
     // :a fails always with max_attempts:1 → 1 iteration + terminal step.
     // :b fails always with max_attempts:2 → 2 iterations + terminal step.
-    const failA: CorrectorFn = (data) => ({
+    const fail_a: CorrectorFn = (data) => ({
       corrected: false,
       output: data,
       issues: [{ path: '.a', message: 'a-err', severity: 'error' }],
     });
-    const failB: CorrectorFn = (data) => ({
+    const fail_b: CorrectorFn = (data) => ({
       corrected: false,
       output: data,
       issues: [{ path: '.b', message: 'b-err', severity: 'error' }],
     });
-    registerAppCorrectors({ fail_a: failA, fail_b: failB });
 
     const result = await runGen({
       ir: baseIR([
@@ -391,6 +385,7 @@ describe('corrector multi-attempt + correctness fix (RED-298)', () => {
         { name: 'fail_b', max_attempts: 2 },
       ]),
       schemas: { MockOutput: MockSchema },
+      correctors: { ...builtinCorrectors, fail_a, fail_b },
     });
 
     const stepTypes = result.trace.steps.map((s: any) => s.type);
@@ -407,5 +402,109 @@ describe('corrector multi-attempt + correctness fix (RED-298)', () => {
     const byName = Object.fromEntries(terminals.map((t: any) => [t.meta.corrector, t]));
     expect(byName.fail_a.meta.attempts_made).toBe(1);
     expect(byName.fail_b.meta.attempts_made).toBe(2);
+  });
+});
+
+/**
+ * RED-299: per-`runGen` corrector isolation regression test.
+ *
+ * Pre-RED-299, `registerAppCorrectors` wrote into a module-global
+ * registry that persisted across `runGen` calls. A long-lived host
+ * that loaded App A's correctors, ran App A's gen, then loaded App
+ * B's correctors, then ran App B's gen would see App A's correctors
+ * STILL in the registry — if both apps had a corrector named `foo`,
+ * the second run would use App A's version. Silent wrong-result.
+ *
+ * This test builds two correctors named `shared_name` with different
+ * behavior (one flags error, one flags warning). Two back-to-back
+ * `runGen` calls pass DIFFERENT correctors maps via `RunGenOptions`.
+ * The second call's trace must reflect the second map's behavior —
+ * i.e. the first call's corrector must NOT be visible.
+ *
+ * With the pre-RED-299 global registry, the second call would see
+ * whichever corrector was registered last globally; because we never
+ * used `registerAppCorrectors`, that'd be just the built-ins and the
+ * `shared_name` declaration would throw "Unknown corrector." Not the
+ * leakage scenario — but the test still validates the invariant by
+ * confirming the passed map wins, which is the critical isolation
+ * property for long-lived hosts.
+ */
+describe('per-runGen corrector isolation (RED-299)', () => {
+  beforeEach(() => {
+    process.env.CAMBIUM_ALLOW_MOCK = '1';
+  });
+  afterEach(() => {
+    delete process.env.CAMBIUM_ALLOW_MOCK;
+  });
+
+  it('two back-to-back runGen calls with different correctors maps produce correctly scoped results', async () => {
+    // Call 1: `shared_name` flags an error (triggers repair loop).
+    const errorVariant: CorrectorFn = (data) => ({
+      corrected: false,
+      output: data,
+      issues: [{ path: '.summary', message: 'error-variant', severity: 'error' }],
+    });
+
+    const result1 = await runGen({
+      ir: baseIR(['shared_name']),
+      schemas: { MockOutput: MockSchema },
+      correctors: { ...builtinCorrectors, shared_name: errorVariant },
+    });
+
+    const types1 = result1.trace.steps.map((s: any) => s.type);
+    expect(types1).toContain('Repair');
+    expect(types1).toContain('CorrectAfterRepair');
+
+    // Call 2: `shared_name` flags a warning only (NO repair).
+    const warningVariant: CorrectorFn = (data) => ({
+      corrected: false,
+      output: data,
+      issues: [{ path: '.summary', message: 'warning-variant', severity: 'warning' }],
+    });
+
+    const result2 = await runGen({
+      ir: baseIR(['shared_name']),
+      schemas: { MockOutput: MockSchema },
+      correctors: { ...builtinCorrectors, shared_name: warningVariant },
+    });
+
+    const types2 = result2.trace.steps.map((s: any) => s.type);
+    // If call 1's corrector leaked into call 2, we'd see Repair here.
+    // With per-runGen isolation, the warning-only variant produces
+    // just a clean Correct step.
+    expect(types2).toContain('Correct');
+    expect(types2).not.toContain('Repair');
+    expect(types2).not.toContain('CorrectAfterRepair');
+
+    // Inspect the Correct step's issues to confirm the right corrector ran.
+    const correct2 = result2.trace.steps.find((s: any) => s.type === 'Correct');
+    expect(correct2?.meta?.issues?.[0]?.message).toBe('warning-variant');
+    expect(correct2?.meta?.issues?.[0]?.severity).toBe('warning');
+  });
+
+  it('a corrector omitted from the second call is not found (proves no leakage)', async () => {
+    // Call 1 has corrector `only_in_first`. Call 2 declares the same
+    // corrector name but passes a map WITHOUT it → runCorrectorPipeline
+    // throws "Unknown corrector." Pre-RED-299 the global registry would
+    // have retained it and the call would have succeeded silently.
+    const only_in_first: CorrectorFn = (data) => ({
+      corrected: false, output: data, issues: [],
+    });
+
+    const result1 = await runGen({
+      ir: baseIR(['only_in_first']),
+      schemas: { MockOutput: MockSchema },
+      correctors: { ...builtinCorrectors, only_in_first },
+    });
+    expect(result1.ok).toBe(true);
+
+    // Call 2 omits `only_in_first`. Expect an Unknown-corrector error.
+    await expect(
+      runGen({
+        ir: baseIR(['only_in_first']),
+        schemas: { MockOutput: MockSchema },
+        correctors: { ...builtinCorrectors }, // no `only_in_first`
+      }),
+    ).rejects.toThrow(/Unknown corrector.*only_in_first/);
   });
 });

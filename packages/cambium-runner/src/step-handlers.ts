@@ -2,6 +2,7 @@ import type { ValidateFunction } from 'ajv';
 import { ToolRegistry } from './tools/registry.js';
 import { testOverrideHandlers } from './tools/index.js';
 import { runCorrectorPipeline } from './correctors/index.js';
+import type { CorrectorFn } from './correctors/types.js';
 import type { CorrectorResult } from './correctors/types.js';
 import { schemaPromptBlock } from './schema-describe.js';
 import { parseInlineToolCalls, stripInlineToolCalls } from './inline-tool-calls.js';
@@ -313,13 +314,19 @@ export async function handleRepair(
 }
 
 // ── Correct ───────────────────────────────────────────────────────────
+// RED-299: `correctors` map is passed in explicitly. Prior to RED-299
+// `runCorrectorPipeline` read a module-global; the runner now builds
+// a per-call map (built-ins ∪ legacy registerAppCorrectors ∪
+// opts.correctors ∪ engine-sibling) and threads it through every call
+// site. Any new caller of handleCorrect must pass the correctors map.
 export function handleCorrect(
   data: any,
   correctorNames: string[],
   context: { document?: string },
+  correctors: Record<string, CorrectorFn>,
 ): StepResult {
   const started = Date.now();
-  const { data: corrected, results } = runCorrectorPipeline(correctorNames, data, context);
+  const { data: corrected, results } = runCorrectorPipeline(correctorNames, data, context, correctors);
   const anyCorrected = results.some(r => r.corrected);
   const allIssues = results.flatMap(r => r.issues);
 

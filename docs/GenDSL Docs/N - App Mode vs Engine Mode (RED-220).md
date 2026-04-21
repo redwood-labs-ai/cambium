@@ -161,6 +161,7 @@ interface RunGenOptions {
   env?: Record<string, string>;                // API keys, model overrides
   sessionId?: string;                          // overrides CAMBIUM_SESSION_ID
   memoryKeys?: Record<string, string>;         // overrides --memory-key
+  correctors?: Record<string, CorrectorFn>;    // RED-299: per-call corrector map; omit for built-ins only
 }
 
 interface GenResult {
@@ -310,8 +311,8 @@ The RED-220 ticket lists five follow-up implementation pieces. With the decision
    - Resolved: new `packages/cambium-runner/src/engine-root.ts` exports `resolveEngineDir(sourcePath)`, which walks up from `ir.entry.source` looking for the sentinel. `runner.ts` calls it in three places:
      - `main()` branches on engine mode and loads `<engineDir>/schemas.ts` instead of framework contracts.
      - `runGen()` extends both tool and action registries to also scan the engine dir — siblings win on name collision.
-     - `runGen()` invokes `loadAppCorrectors(engineDir, { engineDir })` so sibling `*.corrector.ts` files are auto-registered. The `loadAppCorrectors` signature now accepts either an app-mode Genfile dir (scans `app/correctors/`) or an engine dir (scans siblings directly).
-   - `RunGenOptions` gains three optional fields per the design note: `engineDir` (overrides auto-detection), `runsRoot` (defaults to `<engineDir>/runs` in engine mode), `sessionId` (overrides `CAMBIUM_SESSION_ID`). Host wrappers that bundle a pre-compiled IR can inject any of them.
+     - `runGen()` invokes `loadAppCorrectors(engineDir, { engineDir })` so sibling `*.corrector.ts` files are discovered and merged into the per-call correctors map (RED-299). The `loadAppCorrectors` signature now accepts either an app-mode Genfile dir (scans `app/correctors/`) or an engine dir (scans siblings directly).
+   - `RunGenOptions` gains three optional fields per the design note: `engineDir` (overrides auto-detection), `runsRoot` (defaults to `<engineDir>/runs` in engine mode), `sessionId` (overrides `CAMBIUM_SESSION_ID`). Host wrappers that bundle a pre-compiled IR can inject any of them. *(RED-299 adds a fourth: `correctors` — per-call corrector map replacing the deprecated `registerAppCorrectors` global.)*
    - Ruby compile catch-up: `ModelAliases.search_candidates` and `MemoryPolicy.search_candidates` now return `[]` when the sentinel sits next to the gen — an engine folder does not inherit ancestor workspace config. `Cambium::ENGINE_SENTINEL` promoted to module scope. The RED-210 schema validator in `compile.rb` prepends `<genDir>/schemas.ts` so engine gens get real compile-time schema-name validation (typo detection, "did you mean" suggestions) instead of silently skipping.
    - Tests: `engine_mode_e2e.test.ts` compiles + runs a tmpdir engine with sibling tool + corrector end-to-end through the real CLI. `engine-root.test.ts` + `app-loader.test.ts` engine-mode cases + `compile_model_aliases.test.ts` + `compile_schema_validation.test.ts` engine-mode cases cover the unit-level invariants. Full suite after catch-up: 693 passed.
 

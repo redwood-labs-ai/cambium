@@ -46,7 +46,8 @@ import {
 } from './memory/retro-agent.js';
 import { resolveGenfileContracts, loadContractsFromGenfile } from './genfile.js';
 import { loadAppCorrectors } from './correctors/app-loader.js';
-import { registerAppCorrectors } from './correctors/index.js';
+import { builtinCorrectors, _getLegacyAppCorrectors } from './correctors/index.js';
+import type { CorrectorFn } from './correctors/types.js';
 import { getGroundingDocument } from './context.js';
 import { resolveAppRoot } from './app-root.js';
 import { resolveEngineDir } from './engine-root.js';
@@ -470,6 +471,22 @@ export interface RunGenOptions {
   /** RED-287: Explicit session id for memory `:session` scope. Wins
    *  over `CAMBIUM_SESSION_ID`. Defaults to auto-generated. */
   sessionId?: string;
+  /** RED-299: Per-`runGen` corrector map. Merged over framework
+   *  built-ins (`math`, `dates`, `currency`, `citations`) — entries
+   *  here override built-ins by name, same precedence rule as
+   *  pre-RED-299 `registerAppCorrectors`. Prefer this over the
+   *  deprecated global register path: isolation between concurrent
+   *  or sequential `runGen` calls in one process only holds when
+   *  correctors are scoped per-call.
+   *
+   *  App-mode CLI path: `cli/cambium.mjs` loads `app/correctors/*`
+   *  via `loadAppCorrectors` and passes the merged map through. Most
+   *  callers never set this directly.
+   *
+   *  Engine-mode: host wrapper passes its own correctors map; the
+   *  runner additionally scans the engine folder for sibling
+   *  `*.corrector.ts` and merges those on top. */
+  correctors?: Record<string, CorrectorFn>;
 }
 
 export interface RunGenResult {
@@ -504,6 +521,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     engineDir: engineDirOpt,
     runsRoot: runsRootOpt,
     sessionId: sessionIdOpt,
+    correctors: optsCorrectors,
   } = opts;
 
   // Plumb opts.mock through to the deterministic-mock branch in
@@ -594,16 +612,45 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     await actionRegistry.loadFromDir(engineDir);
   }
 
-  // ── Load app / engine correctors (RED-275, RED-287) ─────────────────
-  // App-mode correctors are loaded once in CLI main() via the Genfile
-  // path. Engine-mode correctors live as siblings of the gen and need
-  // to be loaded here in runGen — CLI main() and library hosts both
-  // flow through this path. Register into the mutable module-global
-  // registry; app plugins the CLI loaded earlier are left in place.
+  // ── Build per-`runGen` corrector map (RED-275, RED-287, RED-299) ─────
+  // Precedence (low → high; later entries win on name collision):
+  //   1. Framework built-ins (math, dates, currency, citations)
+  //   2. Legacy registerAppCorrectors map (deprecated back-compat)
+  //   3. opts.correctors — the new blessed path for engine-mode hosts
+  //      AND how the CLI ships app-mode correctors since RED-299
+  //   4. Engine-sibling correctors discovered via loadAppCorrectors
+  //      at <engineDir>/*.corrector.ts (engine-mode only)
+  //
+  // Pre-RED-299 this was a module-global that leaked across runGen
+  // calls. The per-call map is what lets a long-lived engine-mode
+  // host run App A's gen and App B's gen in one process without
+  // App A's correctors shadowing App B's (silent wrong-result).
+  //
+  // Design: docs/GenDSL Docs/N - Engine-Mode Corrector Registry
+  // Isolation (RED-281).md
+  const legacyCorrectors = _getLegacyAppCorrectors();
+  const correctors: Record<string, CorrectorFn> = {
+    ...builtinCorrectors,
+    ...legacyCorrectors,
+    ...(optsCorrectors ?? {}),
+  };
+  // Warn when the same name appears in both the deprecated global and
+  // the new opts path — opts wins silently otherwise, which is easy
+  // to mis-diagnose during a migration. Cheap to compute (both maps
+  // are small) and only fires for hosts still using both paths.
+  if (optsCorrectors) {
+    for (const name of Object.keys(optsCorrectors)) {
+      if (name in legacyCorrectors) {
+        console.error(
+          `[cambium] corrector "${name}" appears in both legacy registerAppCorrectors and RunGenOptions.correctors; opts.correctors wins. Remove the legacy registration (RED-299).`,
+        );
+      }
+    }
+  }
   if (engineDir) {
     const engineCorr = await loadAppCorrectors(engineDir, { engineDir });
-    if (Object.keys(engineCorr.correctors).length > 0) {
-      registerAppCorrectors(engineCorr.correctors);
+    for (const [name, fn] of Object.entries(engineCorr.correctors)) {
+      correctors[name] = fn;
     }
   }
 
@@ -1070,7 +1117,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
       // `parsed` and triggers a silent schema revalidate (only the
       // failure case is loud — matches pre-RED-298 observability).
       const correctResult = handleCorrect(
-        parsed, [correctorName], { document: getGroundingDocument(ir) },
+        parsed, [correctorName], { document: getGroundingDocument(ir) }, correctors,
       );
       trace.steps.push(correctResult);
 
@@ -1114,7 +1161,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
         // RED-298 correctness fix.
         parsed = repair.parsed;
         const rerun = handleCorrect(
-          parsed, [correctorName], { document: getGroundingDocument(ir) },
+          parsed, [correctorName], { document: getGroundingDocument(ir) }, correctors,
         );
         const stillErrors = (rerun.meta?.issues ?? [])
           .filter((i: any) => i.severity === 'error');
@@ -1178,7 +1225,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     // 5. Grounding: citation enforcement (auto-registered when grounded_in is declared)
     const grounding = ir.policies?.grounding;
     if (grounding?.require_citations) {
-      const citResult = handleCorrect(parsed, ['citations'], { document: getGroundingDocument(ir) });
+      const citResult = handleCorrect(parsed, ['citations'], { document: getGroundingDocument(ir) }, correctors);
       const citationResult = citResult.meta?.citationResult;
 
       trace.steps.push({
@@ -1410,6 +1457,7 @@ async function main() {
   // to contain a Genfile.
   const engineDir = resolveEngineDir(ir.entry?.source);
   const genfile = resolveGenfileContracts(process.cwd());
+  let appCorrectors: Record<string, CorrectorFn> | undefined;
   if (engineDir) {
     const schemasFile = join(engineDir, 'schemas.ts');
     if (!existsSync(schemasFile)) {
@@ -1422,10 +1470,12 @@ async function main() {
   } else if (genfile) {
     contractsMod = await loadContractsFromGenfile(genfile);
     // RED-275: app-mode correctors discovered under <genfileDir>/app/correctors/.
-    // Engine-mode correctors are discovered via runGen (RED-287 phase 3).
+    // RED-299: pass them via runGen's `correctors` option rather than
+    // mutating a module-global. Engine-mode correctors are discovered
+    // inside runGen via the engineDir scan (RED-287 phase 3).
     const app = await loadAppCorrectors(genfile.genfileDir);
     if (Object.keys(app.correctors).length > 0) {
-      registerAppCorrectors(app.correctors);
+      appCorrectors = app.correctors;
     }
   } else {
     // pathToFileURL is not strictly required on POSIX (`import()` of a
@@ -1436,7 +1486,13 @@ async function main() {
     contractsMod = await import(fallback);
   }
 
-  const result = await runGen({ ir, schemas: contractsMod, mock, memoryKeys });
+  const result = await runGen({
+    ir,
+    schemas: contractsMod,
+    mock,
+    memoryKeys,
+    correctors: appCorrectors,
+  });
 
   // RED-287: engine-mode run artifacts go under <engineDir>/runs/ so
   // the engine folder stays self-contained. App mode continues to

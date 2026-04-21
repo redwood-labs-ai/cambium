@@ -1,7 +1,7 @@
 ## Note: Engine-Mode Corrector Registry Isolation
 
 **Doc ID:** gen-dsl/note/engine-mode-corrector-registry
-**Status:** Draft (RED-281)
+**Status:** Shipped — RED-299
 **Last edited:** 2026-04-20
 
 ---

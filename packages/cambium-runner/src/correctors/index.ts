@@ -6,56 +6,80 @@ import { citations } from './citations.js';
 
 export type { CorrectorFn, CorrectorResult, CorrectorIssue } from './types.js';
 
-// Mutable per-process registry. Framework built-ins are the baseline;
-// `registerAppCorrectors` merges app-supplied correctors on top at
-// runner startup (RED-275).
+// RED-299: per-`runGen` corrector registry. Replaces the mutable
+// module-global that RED-275 introduced — see `docs/GenDSL Docs/N -
+// Engine-Mode Corrector Registry Isolation (RED-281).md` for the
+// design rationale.
 //
-// Note on long-lived hosts: this registry is process-global. CLI is
-// one-shot so this is fine; engine-mode hosts that load multiple
-// unrelated apps in one process would see app correctors from call N
-// leak into call N+1. The fix (move to per-`runGen` via `RunGenOptions`,
-// matching how tools/actions/schemas already work) is spec'd in the
-// design note `docs/GenDSL Docs/N - Engine-Mode Corrector Registry
-// Isolation (RED-281).md` but deferred until a forcing case surfaces.
-export const correctors: Record<string, CorrectorFn> = { math, dates, currency, citations };
+// Framework-built-in correctors are exported as `builtinCorrectors`
+// for hosts that want to merge them with their own (the conventional
+// pattern for engine-mode callers). The CLI does this automatically.
+// `runCorrectorPipeline` now takes the correctors map as a parameter
+// rather than reading a module-global.
+export const builtinCorrectors: Readonly<Record<string, CorrectorFn>> = Object.freeze({
+  math, dates, currency, citations,
+});
 
-// Names that have already warned this process. Prevents repeated noise
-// when a run loops or when tests re-register.
+// RED-275 back-compat: `registerAppCorrectors` was the only way to
+// install app correctors before RED-299. Hosts that still call it
+// write into this private legacy map; the runner merges it into
+// per-call correctors at lowest precedence (just above built-ins,
+// below `opts.correctors`). New callers should use
+// `RunGenOptions.correctors` instead.
+const legacyAppCorrectors: Record<string, CorrectorFn> = {};
 const warnedOverrides = new Set<string>();
+let deprecationWarned = false;
 
 /**
- * Merge app-supplied correctors into the registry. App-level names win
- * on collision (intentional override hook, mirrors the RED-209 plugin-
- * tool precedence rule). Logs a single stderr warning per overridden
- * name per process.
+ * @deprecated RED-299: pass `correctors` via `RunGenOptions` instead.
+ * This function still works for backward compatibility but writes into
+ * a process-global legacy map, which defeats per-`runGen` isolation in
+ * long-lived hosts. Emits a one-time stderr deprecation warning.
  */
 export function registerAppCorrectors(extras: Record<string, CorrectorFn>): void {
+  if (!deprecationWarned) {
+    deprecationWarned = true;
+    console.error(
+      '[cambium] registerAppCorrectors is deprecated (RED-299); pass correctors via RunGenOptions.correctors instead.',
+    );
+  }
   for (const [name, fn] of Object.entries(extras)) {
-    if (name in correctors && !warnedOverrides.has(name)) {
+    if (name in builtinCorrectors && !warnedOverrides.has(name)) {
       warnedOverrides.add(name);
       console.error(
         `[cambium] app corrector "${name}" overrides the framework built-in`,
       );
     }
-    correctors[name] = fn;
+    legacyAppCorrectors[name] = fn;
   }
 }
 
 /**
- * Clear registered app correctors and reset the override-warning set.
- * Test-only — the CLI is one-shot so there's no production caller.
+ * @internal Exported only so the runner and tests can read the legacy
+ * map. Host code must NOT call this — it would let one app read
+ * another app's correctors in a long-lived process, defeating the
+ * per-`runGen` isolation RED-299 enforces. Use `RunGenOptions.correctors`.
  */
-export function _resetAppCorrectorsForTests(builtinNames: string[]): void {
-  for (const name of Object.keys(correctors)) {
-    if (!builtinNames.includes(name)) delete correctors[name];
-  }
+export function _getLegacyAppCorrectors(): Record<string, CorrectorFn> {
+  return { ...legacyAppCorrectors };
+}
+
+/**
+ * Test-only: clear the legacy registry + warning state. The tests in
+ * `registry.test.ts` exercise the deprecated path directly and need
+ * teardown between cases. Production code should never call this.
+ */
+export function _resetLegacyCorrectorsForTests(): void {
+  for (const name of Object.keys(legacyAppCorrectors)) delete legacyAppCorrectors[name];
   warnedOverrides.clear();
+  deprecationWarned = false;
 }
 
 export function runCorrectorPipeline(
   names: string[],
   data: any,
   context: { document?: string },
+  correctors: Record<string, CorrectorFn>,
 ): { data: any; results: CorrectorResult[] } {
   const results: CorrectorResult[] = [];
   let current = data;
