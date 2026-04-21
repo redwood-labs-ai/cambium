@@ -53,6 +53,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[N - Engine-Mode Corrector Registry Isolation (RED-281)]] — shipped (RED-299): corrector registry is now per-`runGen` via `RunGenOptions.correctors`; `registerAppCorrectors` is a deprecated back-compat shim
 - [[N - Log Primitive (RED-282)]] — shipped (RED-302): `log :datadog` / `log :app_default` for trace-fan-out to external observability platforms; framework-owned dot-notation event vocabulary, profile-based config, plugin pattern for app-specific backends
 - [[N - Scheduled Gens (RED-273)]] — `cron :daily` declaration + `--fired-by` runtime semantics + compile-to-artifact (k8s CronJob / crontab / systemd / GH Actions / Render) for scheduled runs; framework owns semantics, operator owns lifecycle
+- [[N - Prior-Run State Accessors (RED-241)]] — settled as "no new primitive": existing memory + retro agents + `scope: :schedule` cover every forcing case; note documents the patterns and closes the ticket
 
 ---
 
