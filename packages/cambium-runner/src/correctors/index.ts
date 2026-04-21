@@ -13,9 +13,10 @@ export type { CorrectorFn, CorrectorResult, CorrectorIssue } from './types.js';
 // Note on long-lived hosts: this registry is process-global. CLI is
 // one-shot so this is fine; engine-mode hosts that load multiple
 // unrelated apps in one process would see app correctors from call N
-// leak into call N+1. If that becomes a real pattern, make the
-// registry per-runGen (plumb through `RunGenOptions`) rather than
-// keeping this surface but adding per-call reset gymnastics.
+// leak into call N+1. The fix (move to per-`runGen` via `RunGenOptions`,
+// matching how tools/actions/schemas already work) is spec'd in the
+// design note `docs/GenDSL Docs/N - Engine-Mode Corrector Registry
+// Isolation (RED-281).md` but deferred until a forcing case surfaces.
 export const correctors: Record<string, CorrectorFn> = { math, dates, currency, citations };
 
 // Names that have already warned this process. Prevents repeated noise
