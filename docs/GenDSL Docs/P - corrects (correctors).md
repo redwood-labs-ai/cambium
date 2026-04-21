@@ -12,12 +12,20 @@ Attach post-generation validators/repairers (correctors) such as math/date/curre
   - or constrained repair prompts that update only invalid fields
 - Corrector outcomes MUST be represented in the trace.
 - A corrector returning `corrected: true` with a modified `output` updates the pipeline value; the runtime re-validates against the schema afterwards (`ValidateAfterCorrect`).
-- A corrector returning `corrected: false` with any `issues[]` entry of `severity: 'error'` feeds those issues into one additional repair attempt, then re-validates (`ValidateAfterCorrectorRepair`, RED-275). This lets correctors that can verify but not auto-fix (e.g. "does this regex match its own test cases?") drive the LLM to regenerate.
+- A corrector returning `corrected: false` with any `issues[]` entry of `severity: 'error'` feeds those issues into a repair attempt. After the repair passes schema re-validation (`ValidateAfterCorrectorRepair`), the runtime re-runs the same corrector on the repaired output (`CorrectAfterRepair`, RED-298) — this is the correctness fix that surfaces "did the repair actually heal the concern?" as an observable state rather than an implicit assumption.
+- Each declared corrector carries its own `max_attempts` (default 1, ceiling 3, compile-time enforced). When `max_attempts` is exhausted with error-severity issues still pending, the runtime emits a terminal `CorrectAcceptedWithErrors` step (`ok: false`) so downstream consumers can refuse output on unhealed errors. The run itself does NOT fail — the output is schema-valid; policy "refuse on unhealed" is the caller's job.
 - A throwing corrector is caught by the pipeline and converted into a synthetic error issue — it does not terminate the run (RED-275).
 
 ## Example
 ```ruby
 corrects :math, :dates, :currency
+
+# RED-298: opt a corrector into multi-attempt repair. `max_attempts` applies
+# to every symbol in THIS call; separate calls carry separate budgets.
+corrects :regex_compiles_and_tests_pass, max_attempts: 3
+corrects :a, :b, max_attempts: 2         # both :a and :b get 2 attempts
+corrects :a, max_attempts: 1
+corrects :b, max_attempts: 3             # :a keeps 1, :b gets 3
 ```
 
 ## Built-in correctors

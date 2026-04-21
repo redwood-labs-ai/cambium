@@ -965,9 +965,25 @@ module Cambium
         _cambium_defaults[:tools].concat(tools.map(&:to_s))
       end
 
-      def corrects(*correctors)
+      # RED-298: each declared corrector carries its own repair budget.
+      # `corrects :math` → 1 attempt (today's contract, unchanged).
+      # `corrects :regex_x, max_attempts: 3` → up to 3 repair iterations.
+      # Ceiling is 3 — compile-time enforced to match RED-239's memory-TTL
+      # stance (opinionated Rails-style cap; lift via a follow-up if a real
+      # case surfaces). `max_attempts` applies to every symbol in THIS call
+      # — `corrects :a, :b, max_attempts: 2` gives both a and b 2 attempts.
+      def corrects(*correctors, max_attempts: 1)
+        unless max_attempts.is_a?(Integer) && (1..3).cover?(max_attempts)
+          raise ArgumentError,
+                "corrects max_attempts must be an Integer in 1..3, got #{max_attempts.inspect}"
+        end
         _cambium_defaults[:correctors] ||= []
-        _cambium_defaults[:correctors].concat(correctors.map(&:to_s))
+        correctors.each do |c|
+          _cambium_defaults[:correctors] << {
+            'name' => c.to_s,
+            'max_attempts' => max_attempts,
+          }
+        end
       end
 
       def constrain(key, **opts)

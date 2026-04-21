@@ -705,7 +705,28 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     }
   }
 
-  const correctorNames: string[] = ir.policies?.correctors ?? [];
+  // RED-298: IR shape changed from Array<string> to
+  // Array<{ name, max_attempts }>. Accept both so cached IRs compiled
+  // before RED-298 still run — bare strings normalize to max_attempts:1
+  // (today's contract). The runner always operates on the object form.
+  type CorrectorDecl = { name: string; max_attempts: number };
+  const correctorDecls: CorrectorDecl[] = (ir.policies?.correctors ?? []).map(
+    (raw: any): CorrectorDecl => {
+      // The Ruby DSL enforces max_attempts ∈ 1..3, but a host that
+      // constructs IR directly (or hand-edits a compiled IR) can bypass
+      // that guard. Clamp here as belt-and-suspenders — matches RED-239's
+      // stance (memory TTLs enforced at both Ruby AND TS).
+      const clamp = (n: number) => Math.min(3, Math.max(1, Math.floor(n)));
+      if (typeof raw === 'string') return { name: raw, max_attempts: 1 };
+      if (raw && typeof raw.name === 'string') {
+        const n = typeof raw.max_attempts === 'number' ? clamp(raw.max_attempts) : 1;
+        return { name: raw.name, max_attempts: n };
+      }
+      throw new Error(
+        `invalid corrector declaration in IR: ${JSON.stringify(raw)}`,
+      );
+    },
+  );
   const maxRepairAttempts = ir.policies?.max_repair_attempts ?? 2;
 
   // ── Repair policy (RED-139) ──────────────────────────────────────────
@@ -1011,35 +1032,65 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
       }
     }
 
-    // 4. Correctors (deterministic post-validation transforms)
-    if (correctorNames.length > 0) {
-      const correctResult = handleCorrect(parsed, correctorNames, { document: getGroundingDocument(ir) });
+    // 4. Correctors (deterministic post-validation transforms + verification)
+    //
+    // RED-298 reworked this block from "run all correctors in one pass,
+    // one repair attempt on combined issues" to a per-corrector loop with
+    // per-corrector `max_attempts`. Two reasons:
+    //
+    // 1. Correctness fix: the pre-RED-298 loop re-validated schema after
+    //    a corrector-feedback Repair but did NOT re-run the corrector.
+    //    A regex-verification corrector that flagged a bad regex would
+    //    get its issues fed into Repair; the LLM would produce new
+    //    schema-valid output; the runner would claim "healed" without
+    //    ever re-checking whether the corrector's actual concern was
+    //    addressed. Now: every successful schema revalidate after Repair
+    //    is followed by a `CorrectAfterRepair` re-run so "healed" is
+    //    observable instead of assumed.
+    //
+    // 2. Ergonomics: hard corrector-verified problems (regex synthesis
+    //    is the clean example) can survive one repair attempt but heal
+    //    within 2–3. Each declared corrector can opt into a higher
+    //    `max_attempts` (ceiling 3, enforced at compile time). Default
+    //    remains 1 — today's contract for every existing gen.
+    //
+    // Design note: docs/GenDSL Docs/N - Corrector Multi-Attempt (RED-296).md
+    // Local break flag — `finalOk` is the whole-run state and only
+    // flips to `true` much later in the pipeline (line 1226 range).
+    // We can't use it to detect "schema broke inside THIS corrector
+    // loop," so track that with a local variable.
+    let correctorSchemaBroke = false;
+    for (const decl of correctorDecls) {
+      const correctorName = decl.name;
+      const maxAttempts = decl.max_attempts;
+
+      // Initial pass: run just this corrector so the trace distinguishes
+      // it from any peers. Issues from the pipeline drive the repair
+      // loop; a `corrected: true` mutating-corrector result updates
+      // `parsed` and triggers a silent schema revalidate (only the
+      // failure case is loud — matches pre-RED-298 observability).
+      const correctResult = handleCorrect(
+        parsed, [correctorName], { document: getGroundingDocument(ir) },
+      );
       trace.steps.push(correctResult);
 
       if (correctResult.meta?.corrected) {
         parsed = correctResult.output;
-
-        // Re-validate after correction to ensure correctors didn't break schema
         const revalidate = handleValidate(parsed, validate, 'ValidateAfterCorrect');
         if (!revalidate.ok) {
           trace.steps.push(revalidate);
-          finalOk = false;
+          correctorSchemaBroke = true;
           break;
         }
       }
 
-      // RED-275: feed error-severity corrector issues back into repair,
-      // mirroring the grounding path below. A corrector that can verify
-      // (e.g. "does this regex match its own test cases") but can't
-      // auto-fix the problem returns `corrected: false` with issues;
-      // the LLM needs to see those issues to fix the output.
-      //
-      // Single additional repair attempt to bound cost — same stance
-      // grounding takes. If that repair fails validation, we keep the
-      // pre-repair parsed output and the trace records both outcomes.
-      const correctorErrors = (correctResult.meta?.issues ?? [])
+      let correctorErrors = (correctResult.meta?.issues ?? [])
         .filter((i: any) => i.severity === 'error');
-      if (correctorErrors.length > 0) {
+      let attemptsMade = 0;
+
+      while (correctorErrors.length > 0 && attemptsMade < maxAttempts) {
+        attemptsMade += 1;
+
         const repairErrors = correctorErrors.map((i: any) => ({
           message: `Corrector: ${i.message}`,
           instancePath: i.path,
@@ -1050,16 +1101,78 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
         );
         pushRepairStep(repair);
 
-        if (repair.parsed) {
-          const revalidate = handleValidate(repair.parsed, validate, 'ValidateAfterCorrectorRepair');
-          trace.steps.push(revalidate);
-          if (revalidate.ok) {
-            parsed = repair.parsed;
+        if (!repair.parsed) break; // Repair produced no usable JSON.
+
+        const revalidate = handleValidate(
+          repair.parsed, validate, 'ValidateAfterCorrectorRepair',
+        );
+        trace.steps.push(revalidate);
+        if (!revalidate.ok) break; // Repair broke schema; keep pre-repair parsed.
+
+        // Accept the repaired output and re-run THIS corrector to see
+        // whether the repair actually healed its concern. This is the
+        // RED-298 correctness fix.
+        parsed = repair.parsed;
+        const rerun = handleCorrect(
+          parsed, [correctorName], { document: getGroundingDocument(ir) },
+        );
+        const stillErrors = (rerun.meta?.issues ?? [])
+          .filter((i: any) => i.severity === 'error');
+        trace.steps.push({
+          ...rerun,
+          type: 'CorrectAfterRepair',
+          ok: stillErrors.length === 0,
+        });
+
+        // Mutating corrector on re-run: propagate + silent schema check,
+        // same stance as the initial pass.
+        if (rerun.meta?.corrected) {
+          parsed = rerun.output;
+          const postMutate = handleValidate(parsed, validate, 'ValidateAfterCorrect');
+          if (!postMutate.ok) {
+            trace.steps.push(postMutate);
+            correctorSchemaBroke = true;
+            break;
           }
-          // If revalidation failed, keep original parsed — matches the
-          // grounding branch's stance.
         }
+
+        correctorErrors = stillErrors;
       }
+
+      // Loop exhausted with errors still pending — emit the terminal
+      // observability step so downstream consumers (and `jq .steps[] |
+      // select(.ok == false)`) can see the framework gave up. Does not
+      // fail the run; the output is still schema-valid. Policy "refuse
+      // on unhealed errors" is the caller's job, not the runner's.
+      //
+      // Gated on !correctorSchemaBroke: if a mutating corrector on re-run
+      // broke schema, the loop exits via `break` without updating
+      // `correctorErrors`, which would otherwise spuriously emit
+      // CorrectAcceptedWithErrors on a run that's about to finalOk:false
+      // via the outer step loop. That would pollute the trace with a
+      // "corrector gave up" signal for a run that actually failed on a
+      // different axis.
+      if (correctorErrors.length > 0 && !correctorSchemaBroke) {
+        trace.steps.push({
+          type: 'CorrectAcceptedWithErrors',
+          ok: false,
+          id: `correct_accepted_with_errors_${correctorName}`,
+          meta: {
+            corrector: correctorName,
+            attempts_made: attemptsMade,
+            max_attempts: maxAttempts,
+            unhealed_issues: correctorErrors,
+          },
+        });
+      }
+
+      if (correctorSchemaBroke) break; // Schema broke inside this iteration.
+    }
+    if (correctorSchemaBroke) {
+      // Propagate to the outer step loop — matches pre-RED-298 behavior
+      // where a schema-breaking corrector aborted the whole run.
+      finalOk = false;
+      break;
     }
 
     // 5. Grounding: citation enforcement (auto-registered when grounded_in is declared)

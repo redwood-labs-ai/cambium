@@ -1,7 +1,7 @@
 ## Note: Corrector Multi-Attempt Repair + DSL Contract Surface
 
 **Doc ID:** gen-dsl/note/corrector-multi-attempt
-**Status:** Draft (RED-296)
+**Status:** Shipped — RED-298
 **Last edited:** 2026-04-20
 
 ---
@@ -145,7 +145,7 @@ Compile-time enforcement means the constraint is visible in the Ruby diagnostic,
 
 ## Implementation sketch
 
-See RED-298 (filed as a result of this note) for the detailed impl ticket. Shape:
+Shipped as RED-298 with the shape below:
 
 ### Ruby DSL (`ruby/cambium/runtime.rb`)
 

@@ -12,7 +12,10 @@ describe('smoke', () => {
     expect(ir.entry.class).toBe('Analyst')
     expect(ir.returnSchemaId).toBe('AnalysisReport')
     expect(ir.policies.tools_allowed).toContain('calculator')
-    expect(ir.policies.correctors).toContain('math')
+    // RED-298: correctors are now { name, max_attempts } objects, not bare strings.
+    expect(ir.policies.correctors).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'math' })]),
+    )
     expect(ir.signals).toHaveLength(1)
     expect(ir.triggers).toHaveLength(1)
     expect(ir.steps).toHaveLength(1)

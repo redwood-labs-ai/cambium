@@ -27,7 +27,7 @@ Define the auditable, replayable plan that the DSL compiles to.
 | `reads_trace_of` | `reads_trace_of :primary` | retro memory agents only |
 | `returnSchemaId` | `returns <Schema>` | validated against contracts.ts at compile (RED-210) |
 | `policies.tools_allowed` | `uses :a, :b` | deny-by-default allowlist |
-| `policies.correctors` | `corrects :math, :dates` | deterministic post-validation transforms |
+| `policies.correctors` | `corrects :math, :dates` | `Array<{name: string, max_attempts: number}>` — deterministic post-validation transforms. Each entry carries its own `max_attempts` (1..3, default 1, RED-298). Pre-RED-298 IRs with bare-string arrays are normalized to `max_attempts: 1` at run time. |
 | `policies.constraints` | `constrain :budget, …` | legacy/ergonomic container for budget, tone, etc. |
 | `policies.grounding` | `grounded_in :document` | citation enforcement config |
 | `policies.security` | `security network: {...}` or `security :pack` | per-slot mixing; `_packs` metadata for trace (RED-214) |
