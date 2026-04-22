@@ -2402,9 +2402,9 @@
         "typescript": "^5.8.3"
       },
       "optionalDependencies": {
-        "better-sqlite3": "^12.9.0",
+        "better-sqlite3": "~12.9.0",
         "quickjs-emscripten": "^0.32.0",
-        "sqlite-vec": "^0.1.6"
+        "sqlite-vec": "~0.1.6"
       }
     },
     "packages/cambium-runner/node_modules/@types/node": {
