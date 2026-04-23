@@ -9,7 +9,8 @@
   },
   "files": [
     "cli",
-    "ruby"
+    "ruby",
+    "npm-shrinkwrap.json"
   ],
   "workspaces": [
     "packages/*"
