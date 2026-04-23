@@ -216,4 +216,55 @@ describe('workspace memory policy (RED-239 v2)', () => {
     expect(ir).toBeNull()
     expect(stderr).toMatch(/unknown directive.*forever_cache/)
   })
+
+  // ── RED-306 bug fix: flat [package] layout resolution ───────────────
+  //
+  // Sibling bug to the ModelAliases flat-layout issue. Pre-fix,
+  // MemoryPolicy.search_candidates walked up only two directory levels
+  // from the gen's source file (producing a `<pkg>/app/app/config/`
+  // path), so flat [package] layouts silently loaded no policy —
+  // workspace monorepo was saved by a hardcoded cwd-relative fallback,
+  // flat layouts were not.
+
+  it('flat [package] layout: enforces policy from ./app/config/memory_policy.rb when gen lives at ./app/gens/', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cambium-red306-flat-policy-'))
+    const appDir = join(dir, 'app')
+    const configDir = join(appDir, 'config')
+    const gensDir = join(appDir, 'gens')
+    mkdirSync(configDir, { recursive: true })
+    mkdirSync(gensDir, { recursive: true })
+
+    writeFileSync(join(configDir, 'memory_policy.rb'), `max_ttl "1d"`)
+
+    const genPath = join(gensDir, 'flat_gen.cmb.rb')
+    writeFileSync(genPath, `
+class FlatPolicyGen < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  memory :conv, strategy: :log, retain: "30d"
+  def analyze(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`.trim())
+
+    // Retain of 30d exceeds max_ttl of 1d. Pre-fix, the policy was
+    // not discovered at all and compile would succeed silently.
+    // Post-fix, the policy is found and the compile error fires.
+    const repoRoot = process.cwd()
+    let stderr = ''
+    try {
+      execSync(
+        `ruby ${repoRoot}/ruby/cambium/compile.rb ${genPath} --method analyze --arg ${repoRoot}/${FIXTURE}`,
+        { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], cwd: dir },
+      )
+      throw new Error('Expected compile to fail with max_ttl violation')
+    } catch (e: any) {
+      stderr = String(e.stderr ?? '') + String(e.message ?? '')
+    }
+    expect(stderr).toMatch(/max_ttl|exceeds/i)
+  })
 })
