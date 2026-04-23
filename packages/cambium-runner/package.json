@@ -27,9 +27,9 @@
     "undici": "^8.1.0"
   },
   "optionalDependencies": {
-    "better-sqlite3": "^12.9.0",
+    "better-sqlite3": "~12.9.0",
     "quickjs-emscripten": "^0.32.0",
-    "sqlite-vec": "^0.1.6"
+    "sqlite-vec": "~0.1.6"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
