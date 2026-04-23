@@ -307,4 +307,52 @@ end
     const ir = compile(gen, 'analyze', FIXTURE_ARG)
     expect(ir.model.id).toBe('omlx:some-model')
   })
+
+  // ── RED-306 bug fix: flat [package] layout resolution ───────────────
+  //
+  // Prior to the PR 2 polish, ModelAliases.search_candidates walked up
+  // only two directory levels from the gen's source file, producing
+  // `<pkg>/app/app/config/models.rb` (double `app`). The workspace
+  // monorepo was papered over by a hardcoded cwd-relative
+  // `packages/cambium/app/config/models.rb` fallback; flat [package]
+  // layouts (RED-286) had no equivalent fallback and were broken —
+  // the first real external adopter discovered this.
+
+  it('flat [package] layout: resolves :default from ./app/config/models.rb when gen lives at ./app/gens/', () => {
+    // Simulate a flat [package] workspace: models.rb + gen both under
+    // ./app/, no packages/cambium/ ancestor. Pre-fix this would fail
+    // to resolve the alias because both candidate paths (source-derived
+    // with off-by-one + cwd-relative workspace-hardcoded) missed.
+    const dir = mkdtempSync(join(tmpdir(), 'cambium-red306-flat-aliases-'))
+    const appDir = join(dir, 'app')
+    const configDir = join(appDir, 'config')
+    const gensDir = join(appDir, 'gens')
+    execSync(`mkdir -p ${configDir} ${gensDir}`)
+
+    writeFileSync(join(configDir, 'models.rb'), `
+default "omlx:flat-layout-resolved"
+`.trim())
+
+    const genPath = join(gensDir, 'flat_gen.cmb.rb')
+    writeFileSync(genPath, `
+class FlatLayoutGen < GenModel
+  model :default
+  system "inline system prompt"
+  returns AnalysisReport
+  def analyze(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`.trim())
+
+    const repoRoot = process.cwd()
+    const stdout = execSync(
+      `ruby ${repoRoot}/ruby/cambium/compile.rb ${genPath} --method analyze --arg ${repoRoot}/${FIXTURE_ARG}`,
+      { encoding: 'utf8', cwd: dir },
+    )
+    const ir = JSON.parse(stdout)
+    expect(ir.model.id).toBe('omlx:flat-layout-resolved')
+  })
 })

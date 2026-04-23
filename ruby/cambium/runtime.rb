@@ -330,7 +330,16 @@ module Cambium
       end
       candidates = []
       if source_file
-        pkg_dir = File.dirname(File.dirname(File.expand_path(source_file)))
+        # Gen lives at `<pkg_dir>/app/gens/<name>.cmb.rb` in both the
+        # workspace layout (where <pkg_dir> = `packages/cambium/`) and
+        # the flat [package] layout (where <pkg_dir> is the project
+        # root). Walk up three levels to reach the package root that
+        # contains `app/`. Earlier revisions walked up only two, which
+        # produced `<pkg_dir>/app/app/config/models.rb` — silently
+        # missed in the workspace monorepo because the cwd-relative
+        # fallback below happened to resolve; totally broken in flat
+        # layouts which have no equivalent fallback.
+        pkg_dir = File.dirname(File.dirname(File.dirname(File.expand_path(source_file))))
         candidates << File.join(pkg_dir, 'app', 'config', 'models.rb')
       end
       candidates << File.join('packages', 'cambium', 'app', 'config', 'models.rb')
@@ -559,7 +568,11 @@ module Cambium
       end
       candidates = []
       if source_file
-        pkg_dir = File.dirname(File.dirname(File.expand_path(source_file)))
+        # Three-dirname walk-up to the package root that contains
+        # `app/` — works for both workspace (`packages/cambium/`) and
+        # flat [package] layouts. See ModelAliases.search_candidates
+        # for the full trace on why two dirnames is wrong.
+        pkg_dir = File.dirname(File.dirname(File.dirname(File.expand_path(source_file))))
         candidates << File.join(pkg_dir, 'app', 'config', 'memory_policy.rb')
       end
       candidates << File.join('packages', 'cambium', 'app', 'config', 'memory_policy.rb')
