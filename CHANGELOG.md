@@ -4,6 +4,71 @@ All notable changes to Cambium are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Cambium adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-04-24
+
+First feature release since the initial npm publish. Both packages bump to
+`0.2.0` together — prior releases had the CLI at `0.1.2` and the runner at
+`0.1.0` because the three packaging-fix patches (`0.1.1`, `0.1.2`) only
+touched the CLI. Unifying the version numbers now removes the skew before
+it gets more confusing.
+
+### Added
+
+- **`@redwood-labs/cambium-runner`** — Anthropic Messages API provider
+  (RED-321). New `"anthropic:<name>"` model-id path alongside the existing
+  `"omlx:<name>"` and `"ollama:<name>"` providers. Works for both
+  single-turn generate and agentic tool-use loops.
+  - **Prompt caching is on by default.** `cache_control: ephemeral` is
+    applied to the system block and the last tool entry, so a stable
+    system prompt + tool set pays cache creation once and hits on
+    subsequent turns or runs. Cache stats surface as
+    `usage.cache_creation_input_tokens` / `usage.cache_read_input_tokens`
+    in the trace.
+  - **Env** — `ANTHROPIC_API_KEY` (standard) or `CAMBIUM_ANTHROPIC_API_KEY`
+    (override); optional `CAMBIUM_ANTHROPIC_BASEURL` (default
+    `https://api.anthropic.com`). Header `anthropic-version: 2023-06-01`.
+  - **Model ids** — e.g. `"anthropic:claude-sonnet-4-6"`,
+    `"anthropic:claude-opus-4-7"`, `"anthropic:claude-haiku-4-5-20251001"`.
+  - **Deliberately non-scope** — no forced-schema / tool-use JSON hack
+    (Claude's first-pass JSON + the existing repair loop is enough); no
+    embedding provider (Anthropic has no native embeddings API — pair
+    with oMLX or Ollama for `embed:`); no SDK dependency (raw fetch,
+    matches the other providers).
+
+### Security
+
+- **Anthropic error messages drop the response body.** Anthropic's 401/403
+  bodies can echo credential fragments (e.g., last-4 of the API key).
+  Non-2xx responses surface only `HTTP <status>`, matching the oMLX pattern.
+  Flagged and fixed in the RED-321 security review.
+- Follow-up filed as RED-322 — operator-controlled provider base URLs
+  (`CAMBIUM_*_BASEURL`) bypass the `guardedFetch` private-range block.
+  Low-priority hardening; the existing default URLs are safe.
+
+### Changed
+
+- **`@redwood-labs/cambium`** bumps runner dep pin from `0.1.0` → `0.2.0`.
+  No CLI surface changes; the bump is required so the CLI picks up the
+  new runner feature.
+- `CLAUDE.md`, `README.md`, and `docs/GenDSL Docs/N - Model Identifiers.md`
+  updated to document Anthropic alongside oMLX and Ollama.
+
+### Upgrade from 0.1.x
+
+```bash
+npm install -g @redwood-labs/cambium@latest
+# or for local project deps:
+npm install @redwood-labs/cambium@latest
+```
+
+Existing gens using `"omlx:..."` or `"ollama:..."` model ids continue to
+work unchanged. To try Anthropic, set `ANTHROPIC_API_KEY` and change the
+model id on any gen:
+
+```ruby
+model "anthropic:claude-sonnet-4-6"
+```
+
 ## [0.1.2] — 2026-04-24
 
 ### Fixed
