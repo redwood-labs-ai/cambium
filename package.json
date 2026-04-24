@@ -4,7 +4,7 @@
   "description": "Rails for generation engineering — CLI for building reliable LLM programs with Cambium's Ruby DSL.",
   "license": "MIT",
   "author": {
-    "name": "Steve Keider",
+    "name": "Stephen Keider",
     "email": "hello@redwoodlabs.ai"
   },
   "homepage": "https://redwoodlabs.ai",
