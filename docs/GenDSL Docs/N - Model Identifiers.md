@@ -53,6 +53,83 @@ Anthropic has no native schema-enforced decoding like oMLX's xgrammar. Cambium r
 
 Anthropic doesn't offer an embeddings endpoint. `src/providers/embed.ts` stays oMLX + Ollama. Anthropic-primary gens that need semantic memory should pair with an oMLX or Ollama embed model (embed provider is independent of chat provider).
 
+## Native document input (RED-323)
+
+Anthropic's Messages API accepts typed content blocks for PDFs and images. Cambium's runner surfaces this via `ir.context`: string values continue to flow into the prompt as text, but **object values matching the document envelope shape** are extracted and emitted as content blocks instead.
+
+### Envelope shape
+
+```ruby
+# In a gen's method body — `with context:` accepts this hash directly:
+generate "analyze the invoice" do
+  with context: {
+    invoice: {
+      kind: "base64_pdf",
+      data: base64_encoded_pdf,
+      media_type: "application/pdf",
+    },
+  }
+  returns InvoiceExtraction
+end
+```
+
+Or from engine-mode / a direct `runGen` call:
+
+```ts
+await runGen({
+  ir: {
+    // ...
+    context: {
+      invoice: { kind: 'base64_pdf', data: b64, media_type: 'application/pdf' },
+      note: 'Customer is a repeat buyer.',  // plain text still works
+    },
+  },
+  schemas: { InvoiceExtraction },
+});
+```
+
+Supported `kind` values:
+- `"base64_pdf"` — `media_type` must be `"application/pdf"`
+- `"base64_image"` — `media_type` one of `"image/png"`, `"image/jpeg"`, `"image/gif"`, `"image/webp"`
+
+### Wire shape (Anthropic)
+
+The provider emits the document block BEFORE the text block in the first user message:
+
+```json
+{
+  "role": "user",
+  "content": [
+    { "type": "document", "source": { "type": "base64", "media_type": "application/pdf", "data": "..." }, "cache_control": { "type": "ephemeral" } },
+    { "type": "text", "text": "<the compiled prompt>" }
+  ]
+}
+```
+
+The `cache_control: ephemeral` on the last document block caches the doc bytes across agentic turns and subsequent runs in the same process.
+
+### Size limits
+
+- Per-document: 32 MiB (Anthropic's stated PDF limit)
+- Per-run total: 50 MiB across all documents. Override via `CAMBIUM_MAX_DOC_BYTES_PER_RUN=<bytes>`.
+
+Malformed base64, missing `media_type`, wrong `media_type` for the declared `kind`, and size overruns all raise fail-fast errors at extraction time — before any provider call.
+
+### Grounding interaction
+
+`grounded_in :<key>` requires text for verbatim quote verification. Pairing it with a base64 document at the same key raises a compile-style error:
+
+```
+grounded_in :invoice requires text (for verbatim quote verification), but ir.context.invoice is a base64_pdf document.
+Either drop grounded_in, or pre-extract text from the document into a separate key.
+```
+
+The workaround is to separate extracted text from the PDF into different context keys — use the text for grounding, pass the PDF alongside for Claude's native reasoning.
+
+### Non-Anthropic providers
+
+Ollama and oMLX have no native document support today. A gen that passes a typed doc object with an `ollama:` or `omlx:` model fails fast at dispatch with a clear message — don't silently JSON-stringify the base64 into the prompt (it would be a token bomb). Pre-extract to text when using those providers.
+
 ## Embed model identifiers (RED-215)
 
 Memory pools and memory decls with `strategy: :semantic` take an `embed:` value that follows the same `"<provider>:<name>"` convention as primary models:

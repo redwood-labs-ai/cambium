@@ -129,8 +129,23 @@ function parseModelId(modelId: string): { provider: string; name: string } {
 type TokenUsage = { prompt_tokens: number; completion_tokens: number; total_tokens: number };
 type GenerateResult = { text: string; usage?: TokenUsage };
 
-async function generateText(opts: { model: string; system: string; prompt: string; max_tokens?: number; temperature?: number; jsonSchema?: any; }): Promise<GenerateResult> {
+async function generateText(opts: { model: string; system: string; prompt: string; max_tokens?: number; temperature?: number; jsonSchema?: any; documents?: any[]; }): Promise<GenerateResult> {
   const { provider, name } = parseModelId(opts.model);
+  const documents = opts.documents ?? [];
+
+  // RED-323: fail fast if a gen with native document input hits a
+  // provider that doesn't support it. Silently JSON.stringifying a
+  // 30 KB+ base64 blob into the prompt would be a token bomb and
+  // produce a useless response. This gate runs BEFORE the mock check
+  // so `--mock` can't green-light a configuration that would fail in
+  // production (cambium-security RED-323 review finding).
+  if (documents.length > 0 && provider !== 'anthropic') {
+    const kinds = [...new Set(documents.map(d => d.kind))].join(', ');
+    throw new Error(
+      `Provider "${provider}" does not support native document input (kinds: ${kinds}). ` +
+      `Switch to an anthropic: model, or pre-extract text and pass it as a plain string.`
+    );
+  }
 
   // Force-mock path: `--mock` on the CLI sets CAMBIUM_ALLOW_MOCK=1, which
   // MUST mean "use the deterministic stub, do not contact any model
@@ -248,6 +263,7 @@ async function generateText(opts: { model: string; system: string; prompt: strin
         ],
         max_tokens: opts.max_tokens,
         temperature: opts.temperature,
+        documents,
       });
 
       const apiKey = process.env.CAMBIUM_ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_API_KEY;
@@ -303,8 +319,20 @@ async function generateWithTools(opts: {
   tools: any[];
   max_tokens?: number;
   temperature?: number;
+  documents?: any[];
 }): Promise<GenerateWithToolsResult> {
   const { provider, name } = parseModelId(opts.model);
+  const documents = opts.documents ?? [];
+
+  // RED-323: fail fast if a gen with native document input hits a
+  // provider that doesn't support it. Same posture as generateText.
+  if (documents.length > 0 && provider !== 'anthropic') {
+    const kinds = [...new Set(documents.map(d => d.kind))].join(', ');
+    throw new Error(
+      `Provider "${provider}" does not support native document input (kinds: ${kinds}). ` +
+      `Switch to an anthropic: model, or pre-extract text and pass it as a plain string.`
+    );
+  }
 
   if (provider === 'ollama') {
     // RED-208: Ollama's /api/chat accepts OpenAI-format tools and returns
@@ -361,6 +389,7 @@ async function generateWithTools(opts: {
       tools: opts.tools,
       max_tokens: opts.max_tokens,
       temperature: opts.temperature,
+      documents,
     });
 
     const apiKey = process.env.CAMBIUM_ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_API_KEY;
