@@ -131,7 +131,7 @@ This one *does not* collapse cleanly. It requires inter-slot query composition (
 
 **Deferred without a primitive because:**
 
-1. **No real-world forcing case has surfaced.** Curator, Swan, and hypothetical scheduled gens all fit cases 1–4.
+1. **No real-world forcing case has surfaced.** Curator, and hypothetical scheduled gens all fit cases 1–4.
 2. **The workaround is cheap when needed:** retro agent + an enrichment that does the semantic lookup explicitly. Verbose, but works.
 3. **Adding it as a primitive would commit to a substantial design surface** (how does the query plan interact with memory strategies? what's the IR shape for "read A using B.latest as query"? observability on the composed query?). Not worth it without a real forcing case.
 

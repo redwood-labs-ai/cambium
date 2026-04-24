@@ -4,7 +4,7 @@
   "description": "TS runtime for Cambium — executes compiled IR produced by the Cambium Ruby DSL.",
   "license": "MIT",
   "author": {
-    "name": "Steve Keider",
+    "name": "Stephen Keider",
     "email": "hello@redwoodlabs.ai"
   },
   "homepage": "https://redwoodlabs.ai",

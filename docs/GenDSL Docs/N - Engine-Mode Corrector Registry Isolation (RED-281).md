@@ -89,7 +89,7 @@ Changing `RunGenOptions` is a breaking change for callers that rely on the curre
 
 - The CLI — in-tree caller, updates atomically with the runner.
 - The `registerAppCorrectors` public export — used in tests (`_resetAppCorrectorsForTests` companion). Keep the function but deprecate it: it becomes a no-op wrapper that pushes into a process-global "legacy" map, which the runner merges at lowest precedence when `opts.correctors` is absent. Emits a one-time stderr deprecation.
-- External engine-mode hosts — do not exist yet (per the "Swan actively building on API stability" memory; external callers rely on `@redwood-labs/cambium-runner`'s published surface). Ship the new shape; document the migration in the same PR.
+- External engine-mode hosts — do not exist yet (per the "actively building on API stability" memory; external callers rely on `@redwood-labs/cambium-runner`'s published surface). Ship the new shape; document the migration in the same PR.
 
 The `correctors: Record<string, CorrectorFn>` export stays for backward reference but is re-exported from `builtinCorrectors`'s container. Hosts that reached into the module-global directly get a deprecation warning.
 
