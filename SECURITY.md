@@ -75,7 +75,7 @@ For code execution (`execute_code` tool), three substrates are available:
 
 - npm publishing uses an account with 2FA enabled (auth-and-writes).
 - Releases are published manually from a trusted machine. Automated CI-driven publishing with [npm provenance](https://docs.npmjs.com/generating-provenance-statements) is planned for a future release.
-- The `@redwood-labs/cambium` CLI ships with `npm-shrinkwrap.json` to pin transitive dependencies to the exact versions tested at release time.
+- A pre-publish structural check (`scripts/pre-publish-check.mjs`, runnable via `npm run pre-publish-check`) packs real tarballs, installs them into a realistic consumer project with other deps, and asserts: no `workspaces` field in the published manifest; no workspace-source / shrinkwrap leaks into the tarball; `cambium/` and `cambium-runner/` install as peer packages (no nested shell); CLI bin runs; library imports resolve. Must pass before every publish.
 
 ## Security-relevant design documents
 

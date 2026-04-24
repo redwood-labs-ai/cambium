@@ -4,6 +4,45 @@ All notable changes to Cambium are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Cambium adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] — 2026-04-24
+
+### Fixed
+
+- **`@redwood-labs/cambium`** — published tarball no longer ships
+  `npm-shrinkwrap.json`. The 0.1.1 tarball included a shrinkwrap that
+  had been generated in the monorepo-dev context, where
+  `@redwood-labs/cambium-runner` is a workspace-linked package. When
+  consumers installed 0.1.1, npm honored the shrinkwrap over the
+  (corrected) `workspaces`-free manifest and locked consumers into the
+  same nested `node_modules/@redwood-labs/cambium/node_modules/@redwood-labs/cambium-runner/`
+  shell that 0.1.1 was supposed to fix. 0.1.2 removes
+  `npm-shrinkwrap.json` from the tarball's `files:` allowlist entirely.
+  The file is renamed back to `package-lock.json` at the repo root —
+  it remains the dev-time lockfile but never ships.
+- **Pre-publish check**  — `scripts/pre-publish-check.mjs` is the new
+  automated gate. It packs real tarballs, installs them into a
+  realistic consumer project with unrelated deps, and asserts on the
+  installed structure (no nested shells, no shrinkwrap leaks, no
+  workspace-source leaks, CLI bin runs, library imports resolve).
+  Run via `npm run pre-publish-check`. Required before every publish
+  going forward — this is the gate that would have caught both the
+  0.1.0 `workspaces` bug and the 0.1.1 shrinkwrap bug.
+- `@redwood-labs/cambium-runner` stays at 0.1.0 — unaffected by this
+  fix.
+
+### Upgrade from 0.1.0 / 0.1.1
+
+```bash
+npm install -g @redwood-labs/cambium@latest
+# or for local project deps:
+npm install @redwood-labs/cambium@latest
+```
+
+If you were hand-removing the nested shell as a workaround
+(`rm -rf node_modules/@redwood-labs/cambium/node_modules`), the
+upgrade makes that unnecessary — the installed layout is correct
+from the start.
+
 ## [0.1.1] — 2026-04-23
 
 ### Fixed
