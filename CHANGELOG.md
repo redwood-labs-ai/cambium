@@ -4,6 +4,25 @@ All notable changes to Cambium are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Cambium adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — 2026-04-23
+
+### Fixed
+
+- **`@redwood-labs/cambium`** — published tarball no longer carries the
+  `workspaces: ["packages/*"]` field. The field is a monorepo-development
+  signal meant for the source root; leaving it in the published manifest
+  caused npm to create a hollow nested `node_modules/@redwood-labs/cambium/node_modules/@redwood-labs/cambium-runner/`
+  shell when the CLI was installed as a dep inside another project,
+  breaking resolution. Adopters who hit this on 0.1.0 can either upgrade
+  to 0.1.1 or `rm -rf node_modules/@redwood-labs/cambium/node_modules`
+  and let Node's resolver walk up to the hoisted sibling.
+  - Added `prepack` / `postpack` scripts (`scripts/prepack.mjs`,
+    `scripts/postpack.mjs`) that strip `workspaces`, `devDependencies`,
+    and dev-only script entries (`test`, `build`) from the published
+    manifest while preserving the working copy for dev.
+- `@redwood-labs/cambium-runner` stays at 0.1.0 — the bug was CLI-only
+  and the runner doesn't have a `workspaces` field.
+
 ## [0.1.0] — 2026-04-21
 
 First public release. Cambium ships as two npm packages:
