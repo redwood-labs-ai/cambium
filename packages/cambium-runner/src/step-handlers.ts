@@ -10,7 +10,7 @@ import type { SecurityPolicy } from './tools/permissions.js';
 import type { Budget } from './budget.js';
 import { buildToolContext } from './tools/tool-context.js';
 import { getGroundingDocument } from './context.js';
-import { extractDocuments, assertGroundingCompatibleWithDocuments, type DocumentBlock } from './documents.js';
+import { extractDocuments, type DocumentBlock } from './documents.js';
 
 export type StepResult = {
   type: string;
@@ -48,14 +48,16 @@ export async function handleGenerate(
   schema: any,
   generateText: GenerateTextFn,
   extractJson: ExtractJsonFn,
+  /** RED-323: pre-extracted docs + extracted PDF text, supplied by the
+   *  runner which extracts once per run (not per step). Optional so
+   *  external callers of this handler (tests, custom pipelines) keep
+   *  working without threading the extraction — in that case we run
+   *  it inline here. */
+  docInput?: { documents: DocumentBlock[]; groundingTextByKey: Record<string, string> },
 ): Promise<{ raw: string; parsed: any; result: StepResult }> {
-  // RED-323: separate typed doc blocks from plain-text context BEFORE
-  // any prompt assembly, so base64 bytes never land in the prompt. The
-  // extractor validates size + format and throws on malformed input.
-  const { documents } = extractDocuments(ir);
-  assertGroundingCompatibleWithDocuments(ir, documents);
+  const { documents, groundingTextByKey } = docInput ?? await extractDocuments(ir);
 
-  const doc = getGroundingDocument(ir);
+  const doc = getGroundingDocument(ir, groundingTextByKey);
   const constraints = ir.policies?.constraints ?? {};
   const schemaKeys = Object.keys(schema.properties ?? {});
 
@@ -343,16 +345,31 @@ export function handleCorrect(
   const anyCorrected = results.some(r => r.corrected);
   const allIssues = results.flatMap(r => r.issues);
 
+  // RED-323 fix: merge each corrector's `meta` into the StepResult's
+  // `meta` so downstream code can read corrector-specific results
+  // (e.g. the citations corrector exposes `citationResult` which the
+  // GroundingCheck step needs to determine if citations actually
+  // verified). Prior behavior dropped this meta, leaving the GroundingCheck's
+  // `ok` field defaulting to true regardless of actual citation matches —
+  // an acknowledged dead-code path called out in runner.ts. Fixed here
+  // as part of making grounded_in + PDF actually verify.
+  const mergedMeta: Record<string, any> = {
+    correctors: correctorNames,
+    corrected: anyCorrected,
+    issues: allIssues,
+  };
+  for (const r of results) {
+    if (r.meta && typeof r.meta === 'object') {
+      Object.assign(mergedMeta, r.meta);
+    }
+  }
+
   return {
     type: 'Correct',
     ms: Date.now() - started,
     ok: true,
     output: corrected,
-    meta: {
-      correctors: correctorNames,
-      corrected: anyCorrected,
-      issues: allIssues,
-    },
+    meta: mergedMeta,
   };
 }
 
@@ -499,14 +516,13 @@ export async function handleAgenticGenerate(
   extractJson: ExtractJsonFn,
   maxToolCalls: number,
   env: ToolCallEnv = {},
+  /** RED-323: pre-extracted docs + PDF text (runner-owned). Fallback
+   *  to inline extraction for external callers. */
+  docInput?: { documents: DocumentBlock[]; groundingTextByKey: Record<string, string> },
 ): Promise<{ raw: string; parsed: any; result: StepResult; traceSteps: StepResult[] }> {
-  // RED-323: extract document blocks from context. Fails fast on
-  // malformed base64 / oversize / grounding-on-binary before any
-  // provider call.
-  const { documents } = extractDocuments(ir);
-  assertGroundingCompatibleWithDocuments(ir, documents);
+  const { documents, groundingTextByKey } = docInput ?? await extractDocuments(ir);
 
-  const doc = getGroundingDocument(ir);
+  const doc = getGroundingDocument(ir, groundingTextByKey);
   const constraints = ir.policies?.constraints ?? {};
   const grounding = ir.policies?.grounding;
   const schemaKeys = Object.keys(schema.properties ?? {});
