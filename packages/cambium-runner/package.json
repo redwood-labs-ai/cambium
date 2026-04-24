@@ -3,6 +3,29 @@
   "version": "0.1.0",
   "description": "TS runtime for Cambium — executes compiled IR produced by the Cambium Ruby DSL.",
   "license": "MIT",
+  "author": {
+    "name": "Stephen Keider",
+    "email": "hello@redwoodlabs.ai"
+  },
+  "homepage": "https://redwoodlabs.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/redwood-labs-ai/cambium.git",
+    "directory": "packages/cambium-runner"
+  },
+  "bugs": {
+    "url": "https://github.com/redwood-labs-ai/cambium/issues"
+  },
+  "keywords": [
+    "llm",
+    "ai",
+    "agent",
+    "runtime",
+    "typebox",
+    "validation",
+    "prompt-engineering",
+    "typescript"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
