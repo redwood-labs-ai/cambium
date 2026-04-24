@@ -3,6 +3,29 @@
   "version": "0.1.0",
   "description": "Rails for generation engineering — CLI for building reliable LLM programs with Cambium's Ruby DSL.",
   "license": "MIT",
+  "author": {
+    "name": "Steve Keider",
+    "email": "hello@redwoodlabs.ai"
+  },
+  "homepage": "https://redwoodlabs.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/redwood-labs-ai/cambium.git"
+  },
+  "bugs": {
+    "url": "https://github.com/redwood-labs-ai/cambium/issues"
+  },
+  "keywords": [
+    "llm",
+    "ai",
+    "agent",
+    "dsl",
+    "ruby",
+    "typescript",
+    "framework",
+    "prompt-engineering",
+    "rails"
+  ],
   "type": "module",
   "bin": {
     "cambium": "./cli/cambium.mjs"
