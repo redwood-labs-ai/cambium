@@ -26,8 +26,11 @@ export async function runReview(
   schema: any,
   generateText: GenerateTextFn,
   extractJson: ExtractJsonFn,
+  /** RED-323: pass PDF-extracted text through so Review sees real
+   *  content when grounding source is a document envelope. */
+  groundingTextByKey?: Record<string, string>,
 ): Promise<ReviewResult> {
-  const doc = getGroundingDocument(ir);
+  const doc = getGroundingDocument(ir, groundingTextByKey);
 
   const system = [
     'You are a data quality reviewer.',

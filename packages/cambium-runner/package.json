@@ -1,6 +1,6 @@
 {
   "name": "@redwood-labs/cambium-runner",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "TS runtime for Cambium — executes compiled IR produced by the Cambium Ruby DSL.",
   "license": "MIT",
   "author": {
@@ -47,6 +47,7 @@
   "dependencies": {
     "@sinclair/typebox": "^0.34.40",
     "ajv": "^8.17.1",
+    "pdfjs-dist": "^5.6.205",
     "undici": "^8.1.0"
   },
   "optionalDependencies": {

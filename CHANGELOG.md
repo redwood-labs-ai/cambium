@@ -4,6 +4,79 @@ All notable changes to Cambium are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Cambium adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-04-24
+
+Patch release. Makes `grounded_in` + base64 PDFs actually work, and fixes
+a latent bug in the citation-verification path that pre-dates native
+document input.
+
+### Fixed
+
+- **`grounded_in :<key>` now works when `ir.context[<key>]` is a
+  `base64_pdf` envelope.** 0.3.0 hard-rejected the combination, which
+  broke a real downstream use case. The fix extracts the PDF's plain
+  text at runtime via `pdfjs-dist` and feeds that text into every
+  grounding-aware code path: citation verification, semantic memory
+  read, compound review, retro-agent context. Gen authors get native
+  Anthropic PDF reasoning AND Cambium's citation guarantee in a single
+  pass — no pre-extraction step required.
+- **Citation verification was silently always-passing.** An earlier
+  refactor dropped each corrector's `meta` when `handleCorrect` wrapped
+  its result, so `GroundingCheck.ok` defaulted to `true` regardless of
+  whether cited quotes actually appeared in the source document. The
+  acknowledged dead-code path (flagged in a `runner.ts` comment) has
+  been removed. `handleCorrect` now shallow-merges per-corrector meta
+  into its `StepResult.meta`, so the citations corrector's
+  `citationResult` reaches the grounding-check consumer and drives the
+  real `ok` value. Live verification: a PDF with two sentences that
+  the model cites produces `totalChecked=2, passed=2, failed=0,
+  allValid=true`.
+- **Removed `assertGroundingCompatibleWithDocuments`.** The guard that
+  rejected grounded_in + PDF at dispatch time is gone. Callers who
+  relied on the error for flow control should switch to trusting the
+  citation verifier's actual result.
+
+### Added
+
+- **`pdfjs-dist`** as a regular runtime dependency of
+  `@redwood-labs/cambium-runner` (for PDF text extraction). Lazily
+  imported — gens that don't use `base64_pdf` never pay the load cost.
+- **`extractPdfText(base64, docKey)`** helper in
+  `packages/cambium-runner/src/pdf-extract.ts`. Uses the `legacy` build
+  of pdfjs-dist for Node compatibility, disables eval/system-fonts
+  for defense-in-depth, throws a clear error when a PDF is
+  scanned/image-only (OCR is out of scope in v1).
+- **`groundingTextByKey` override on `getGroundingDocument`** — the
+  runner threads the PDF-extracted text into every grounding consumer.
+- **`DocumentExtractionFailed` trace step type** — emitted when
+  document extraction throws (malformed base64, oversize, bad PDF).
+  Runs fail with `errorMessage: "Document extraction failed: …"` rather
+  than proceeding with empty context.
+
+### Changed
+
+- **`extractDocuments` is now async.** The signature returns
+  `Promise<{ textContext, documents, groundingTextByKey }>`. Internal
+  callers updated; the optional 6th param on `handleGenerate` /
+  `handleAgenticGenerate` (`docInput`) lets the runner extract once
+  per run and hand the result to both handlers.
+- **`@redwood-labs/cambium`** bumps runner dep pin from `0.3.0` →
+  `0.3.1`. No CLI surface changes.
+
+### Upgrade from 0.3.0
+
+```bash
+npm install -g @redwood-labs/cambium@latest
+# or for local project deps:
+npm install @redwood-labs/cambium@latest
+```
+
+If your gen already uses `grounded_in :<key>` with a `base64_pdf`
+envelope, it will start working without changes — you no longer need
+to pre-extract text to a separate context key. If your app was
+catching the "grounded_in + PDF requires text" error, remove that
+error handler.
+
 ## [0.3.0] — 2026-04-24
 
 Additive release: native document input for Anthropic.

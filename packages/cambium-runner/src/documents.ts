@@ -11,6 +11,12 @@
 //
 // Providers without native support (Ollama, oMLX) fail fast at dispatch
 // rather than silently stringifying a base64 blob into the prompt.
+//
+// For `base64_pdf` entries the runner ALSO extracts the PDF's text via
+// pdfjs-dist so that `grounded_in :<same_key>` can verify citations
+// verbatim against the extracted text — the author gets native-PDF
+// reasoning in the model AND Cambium's citation guarantee in one pass.
+// An earlier version of this module refused the combo; that was wrong.
 
 export type DocumentKind = 'base64_pdf' | 'base64_image';
 
@@ -24,6 +30,19 @@ export type DocumentBlock = {
   media_type: string;
   /** Size in bytes after base64 decode — computed at extraction time. */
   decoded_bytes: number;
+};
+
+/**
+ * Output of `extractDocuments`. `groundingTextByKey` maps doc keys to
+ * their extracted text, populated only for `base64_pdf` entries (images
+ * require OCR, out of scope for v1). `getGroundingDocument` consults
+ * this map before falling back to `ir.context[source]` so a gen that
+ * uses `grounded_in :<same_key>` gets proper citation verification.
+ */
+export type ExtractedDocuments = {
+  textContext: Record<string, any>;
+  documents: DocumentBlock[];
+  groundingTextByKey: Record<string, string>;
 };
 
 // Per-doc cap matches Anthropic's stated PDF limit. Images practically
@@ -117,24 +136,37 @@ function validateMediaType(key: string, kind: DocumentKind, mediaType: string | 
  *   - `documents`: typed doc blocks, to be emitted as provider-native
  *     content blocks OR to trigger a fail-fast when the provider doesn't
  *     support them.
+ *   - `groundingTextByKey`: extracted text for every `base64_pdf` entry,
+ *     keyed by context key. Consumed by `getGroundingDocument` so that
+ *     a gen using `grounded_in :<same_key>` can verify citations verbatim
+ *     against the PDF's text. Not populated for `base64_image` (images
+ *     require OCR, out of scope for v1).
  *
  * Throws `Error` on:
  *   - malformed base64
  *   - missing/invalid media_type for the declared kind
  *   - per-doc size over 32 MiB
  *   - per-run total size over CAMBIUM_MAX_DOC_BYTES_PER_RUN (default 50 MiB)
+ *   - PDF parse failure or empty-text extraction (the caller sees a
+ *     clear error rather than a silent citation-verification failure)
  *
  * Plain strings and arbitrary non-doc objects pass through into
  * `textContext` — the existing JSON.stringify fallback in step-handlers
  * keeps working for structured text context.
+ *
+ * Async because PDF text extraction is I/O-bound (pdfjs-dist).
  */
-export function extractDocuments(ir: any): { textContext: Record<string, any>; documents: DocumentBlock[] } {
+export async function extractDocuments(ir: any): Promise<ExtractedDocuments> {
   const context = ir?.context ?? {};
   const textContext: Record<string, any> = {};
   const documents: DocumentBlock[] = [];
+  const groundingTextByKey: Record<string, string> = {};
   let totalBytes = 0;
   const perRunCap = maxBytesPerRun();
 
+  // First pass: validate + normalize (sync). Separating from the async
+  // text-extraction pass means we fail fast on size/format issues
+  // BEFORE spending any time loading pdfjs-dist.
   for (const [key, value] of Object.entries(context)) {
     if (isDocumentEntry(value)) {
       const kind = value.kind as DocumentKind;
@@ -157,24 +189,19 @@ export function extractDocuments(ir: any): { textContext: Record<string, any>; d
     }
   }
 
-  return { textContext, documents };
-}
-
-/**
- * Grounding interaction guard. `grounded_in :document` requires text
- * for verbatim quote verification. If the grounding source resolves to
- * a base64 document, fail fast with a clear error — don't let the
- * downstream citation check return confusing "document is empty"
- * results.
- */
-export function assertGroundingCompatibleWithDocuments(ir: any, documents: DocumentBlock[]): void {
-  if (documents.length === 0) return;
-  const source = ir?.policies?.grounding?.source;
-  if (!source) return;
-  if (documents.some(d => d.key === source)) {
-    throw new Error(
-      `grounded_in :${source} requires text (for verbatim quote verification), but ir.context.${source} is a ${documents.find(d => d.key === source)?.kind} document. ` +
-      `Either drop grounded_in, or pre-extract text from the document into a separate key.`
-    );
+  // Second pass: extract text from every base64_pdf so `grounded_in`
+  // can verify citations against real content. Only run when at least
+  // one PDF is present — skips pdfjs-dist loading for the common
+  // text-only case.
+  const hasPdf = documents.some(d => d.kind === 'base64_pdf');
+  if (hasPdf) {
+    const { extractPdfText } = await import('./pdf-extract.js');
+    for (const doc of documents) {
+      if (doc.kind === 'base64_pdf') {
+        groundingTextByKey[doc.key] = await extractPdfText(doc.data, doc.key);
+      }
+    }
   }
+
+  return { textContext, documents, groundingTextByKey };
 }
