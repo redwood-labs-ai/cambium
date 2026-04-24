@@ -232,6 +232,48 @@ async function generateText(opts: { model: string; system: string; prompt: strin
       };
     }
 
+    if (provider === 'anthropic') {
+      // RED-321: Anthropic Messages API. Provider-level prompt caching is
+      // applied automatically (system block + last tool) via
+      // buildAnthropicMessagesRequest.
+      const { buildAnthropicMessagesRequest, normalizeAnthropicMessagesResponse } = await import('./providers/anthropic.js');
+      const baseUrl = process.env.CAMBIUM_ANTHROPIC_BASEURL ?? 'https://api.anthropic.com';
+      const url = `${baseUrl.replace(/\/$/, '')}/v1/messages`;
+
+      const body = buildAnthropicMessagesRequest({
+        model: name,
+        messages: [
+          { role: 'system', content: opts.system },
+          { role: 'user', content: opts.prompt },
+        ],
+        max_tokens: opts.max_tokens,
+        temperature: opts.temperature,
+      });
+
+      const apiKey = process.env.CAMBIUM_ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_API_KEY;
+      if (!apiKey) {
+        throw new Error('Anthropic: ANTHROPIC_API_KEY (or CAMBIUM_ANTHROPIC_API_KEY) is required.');
+      }
+      const headers: Record<string, string> = {
+        'content-type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      };
+
+      const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+      if (!res.ok) {
+        // Drop the response body from the error message: Anthropic 401/403 bodies
+        // can echo credential fragments (e.g., last-4 of the key). Match oMLX path.
+        throw new Error(`Anthropic error: HTTP ${res.status}`);
+      }
+      const json: any = await res.json();
+      const normalized = normalizeAnthropicMessagesResponse(json);
+      return {
+        text: normalized.message.content ?? '',
+        usage: normalized.usage,
+      };
+    }
+
     throw new Error(`Unknown model provider: ${provider}`);
   } catch (err: any) {
     // Allow a deterministic mock for local development when the provider isn't reachable.
@@ -240,6 +282,8 @@ async function generateText(opts: { model: string; system: string; prompt: strin
     }
     const hint = provider === 'omlx'
       ? 'oMLX fetch failed. Check CAMBIUM_OMLX_BASEURL (default http://100.114.183.54:8080) and server status.'
+      : provider === 'anthropic'
+      ? 'Anthropic fetch failed. Check ANTHROPIC_API_KEY and network reachability to api.anthropic.com.'
       : 'Ollama fetch failed. Start Ollama (`ollama serve`).';
     throw new Error(`${hint}\nOriginal error: ${err?.message ?? String(err)}`);
   }
@@ -303,8 +347,61 @@ async function generateWithTools(opts: {
     };
   }
 
+  if (provider === 'anthropic') {
+    // RED-321: Anthropic Messages API. Request/response shaping lives in
+    // src/providers/anthropic.ts so it's unit-testable without a live server.
+    // Prompt caching on system + last tool is applied by the builder.
+    const { buildAnthropicMessagesRequest, normalizeAnthropicMessagesResponse } = await import('./providers/anthropic.js');
+    const baseUrl = process.env.CAMBIUM_ANTHROPIC_BASEURL ?? 'https://api.anthropic.com';
+    const url = `${baseUrl.replace(/\/$/, '')}/v1/messages`;
+
+    const body = buildAnthropicMessagesRequest({
+      model: name,
+      messages: opts.messages,
+      tools: opts.tools,
+      max_tokens: opts.max_tokens,
+      temperature: opts.temperature,
+    });
+
+    const apiKey = process.env.CAMBIUM_ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      throw new Error('Anthropic: ANTHROPIC_API_KEY (or CAMBIUM_ANTHROPIC_API_KEY) is required.');
+    }
+    const headers: Record<string, string> = {
+      'content-type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    };
+
+    const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+    if (!res.ok) {
+      // Drop the response body from the error message — Anthropic 401/403 bodies
+      // can echo credential fragments. Match oMLX path.
+      throw new Error(`Anthropic error: HTTP ${res.status}`);
+    }
+    const json: any = await res.json();
+    const normalized = normalizeAnthropicMessagesResponse(json);
+
+    // Inline tool-call parsing fallback — models that emit tool calls as
+    // markup in text content rather than structured tool_use blocks.
+    let content = normalized.message.content;
+    let toolCalls = normalized.message.tool_calls;
+    if ((!toolCalls || toolCalls.length === 0) && content) {
+      const parsed = parseInlineToolCalls(content);
+      if (parsed.length > 0) {
+        toolCalls = parsed;
+        content = stripInlineToolCalls(content);
+      }
+    }
+
+    return {
+      message: { content, tool_calls: toolCalls },
+      usage: normalized.usage,
+    };
+  }
+
   if (provider !== 'omlx') {
-    throw new Error(`Agentic mode: unknown provider "${provider}". Supported: omlx, ollama.`);
+    throw new Error(`Agentic mode: unknown provider "${provider}". Supported: omlx, ollama, anthropic.`);
   }
 
   const baseUrl = process.env.CAMBIUM_OMLX_BASEURL ?? 'http://100.114.183.54:8080';
