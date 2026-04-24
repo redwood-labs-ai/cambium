@@ -953,6 +953,38 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     meta: { tools_checked: toolsAllowed, policy: securityPolicy, ...(packsMeta ? { packs: packsMeta } : {}) },
   });
 
+  // ── Native document input (RED-323): extract + text-extract PDFs ────
+  // Extract typed document envelopes from ir.context and, for any
+  // base64_pdf entries, run text extraction via pdfjs-dist. The result
+  // `groundingTextByKey` is passed into every `getGroundingDocument`
+  // call in this function scope so that citation verification, semantic
+  // memory, enrichments, and retro-agent context all see the PDF's
+  // text content — not the raw base64 envelope. Placed BEFORE memory
+  // planning so semantic memory can query against the PDF content.
+  const { extractDocuments } = await import('./documents.js');
+  let documents: any[] = [];
+  let groundingTextByKey: Record<string, string> = {};
+  try {
+    const extracted = await extractDocuments(ir);
+    documents = extracted.documents;
+    groundingTextByKey = extracted.groundingTextByKey;
+  } catch (e: any) {
+    trace.steps.push({
+      type: 'DocumentExtractionFailed',
+      ok: false,
+      errors: [{ message: e?.message ?? String(e) }],
+    });
+    return {
+      ok: false,
+      output: null,
+      trace,
+      runId,
+      schemaId: schema.$id,
+      ir,
+      errorMessage: `Document extraction failed: ${e?.message ?? String(e)}`,
+    };
+  }
+
   // ── Memory (RED-215 phase 3): plan + pre-generate read ──────────────
   // Each memory decl opens its SQLite bucket, optionally reads recent
   // entries (sliding_window), and contributes a block that is appended
@@ -988,7 +1020,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
       ? join(engineDir, 'runs')
       : join(process.cwd(), 'runs'));
     const memCtx = {
-      input: getGroundingDocument(ir),
+      input: getGroundingDocument(ir, groundingTextByKey),
       sessionId,
       keys,
       runsRoot,
@@ -1146,6 +1178,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
         step, ir, schema, toolsOpenAI, toolRegistry, toolsAllowed,
         generateWithTools, extractJsonObject, maxToolCalls,
         { policy: securityPolicy, budget, traceEvents: trace.steps },
+        { documents, groundingTextByKey },
       );
 
       trace.steps.push(agenticResult.result);
@@ -1157,7 +1190,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
       raw = agenticResult.raw;
       parsed = agenticResult.parsed;
     } else {
-      const gen = await handleGenerate(step, ir, schema, generateText, extractJsonObject);
+      const gen = await handleGenerate(step, ir, schema, generateText, extractJsonObject, { documents, groundingTextByKey });
       trace.steps.push(gen.result);
       budgetTrack(gen.result);
       raw = gen.raw;
@@ -1222,7 +1255,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
 
     // 3a. Compound review: LLM audits the output against the source document
     if (constraints.compound?.strategy === 'review') {
-      const review = await runReview(parsed, ir, schema, generateText, extractJsonObject);
+      const review = await runReview(parsed, ir, schema, generateText, extractJsonObject, groundingTextByKey);
       const reviewTraceEntry = {
         type: 'Review',
         ok: review.ok,
@@ -1264,7 +1297,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
 
       for (let p = 0; p < extraPasses; p++) {
         const passId = `${step.id}_pass_${p + 2}`;
-        const extraGen = await handleGenerate(step, ir, schema, generateText, extractJsonObject);
+        const extraGen = await handleGenerate(step, ir, schema, generateText, extractJsonObject, { documents, groundingTextByKey });
         trace.steps.push({ ...extraGen.result, id: passId });
 
         let extraRaw = extraGen.raw;
@@ -1368,7 +1401,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
       // `parsed` and triggers a silent schema revalidate (only the
       // failure case is loud — matches pre-RED-298 observability).
       const correctResult = handleCorrect(
-        parsed, [correctorName], { document: getGroundingDocument(ir) }, correctors,
+        parsed, [correctorName], { document: getGroundingDocument(ir, groundingTextByKey) }, correctors,
       );
       trace.steps.push(correctResult);
 
@@ -1412,7 +1445,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
         // RED-298 correctness fix.
         parsed = repair.parsed;
         const rerun = handleCorrect(
-          parsed, [correctorName], { document: getGroundingDocument(ir) }, correctors,
+          parsed, [correctorName], { document: getGroundingDocument(ir, groundingTextByKey) }, correctors,
         );
         const stillErrors = (rerun.meta?.issues ?? [])
           .filter((i: any) => i.severity === 'error');
@@ -1476,22 +1509,25 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     // 5. Grounding: citation enforcement (auto-registered when grounded_in is declared)
     const grounding = ir.policies?.grounding;
     if (grounding?.require_citations) {
-      const citResult = handleCorrect(parsed, ['citations'], { document: getGroundingDocument(ir) }, correctors);
+      const citResult = handleCorrect(parsed, ['citations'], { document: getGroundingDocument(ir, groundingTextByKey) }, correctors);
+      // RED-323 fix: handleCorrect now shallow-merges each corrector's
+      // `meta` into its result, so `citationResult` is properly
+      // available here (previously dropped, leaving `ok` defaulting
+      // to true regardless of actual verification). Issues live at
+      // `citResult.meta.issues` — the earlier `citResultAny.issues`
+      // fallback path was dead code and has been removed.
       const citationResult = citResult.meta?.citationResult;
+      const allIssues = citResult.meta?.issues ?? [];
 
-      // RED-bug follow-up: both `citResult.issues` references below look
-      // at a top-level field that StepResult does not declare — issues
-      // actually live at `citResult.meta.issues`. The fallback branch
-      // and the citErrors branch have therefore both been dead code
-      // (always empty). Fixing is a runtime behavior change (citation
-      // errors would start triggering repairs), so intentionally left
-      // as-is here; the `as any` cast masks the type error so the
-      // packaging build passes without altering runtime behavior.
-      const citResultAny = citResult as any;
       trace.steps.push({
         ...citResult,
         type: 'GroundingCheck',
-        ok: citationResult?.allValid ?? ((citResultAny.issues ?? []).length === 0),
+        // If the citations corrector produced a structured result, trust
+        // its allValid flag. Otherwise (defensive: corrector didn't run
+        // or threw), treat absence of error-severity issues as pass.
+        ok: citationResult
+          ? citationResult.allValid
+          : !allIssues.some((i: any) => i.severity === 'error'),
         meta: {
           ...citResult.meta,
           passed: citationResult?.passed?.length ?? 0,
@@ -1502,7 +1538,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
         },
       });
 
-      const citErrors = citResultAny.issues?.filter((i: any) => i.severity === 'error') ?? [];
+      const citErrors = allIssues.filter((i: any) => i.severity === 'error');
       if (citErrors.length > 0) {
         // Feed citation errors into repair
         const repairErrors = citErrors.map((i: any) => ({
@@ -1563,7 +1599,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     if (finalOk && !hasMemoryAgent) {
       try {
         const writeTrace = await commitMemoryWrites(
-          memoryPlans, memoryBackends, getGroundingDocument(ir), finalParsed,
+          memoryPlans, memoryBackends, getGroundingDocument(ir, groundingTextByKey), finalParsed,
         );
         for (const t of writeTrace) trace.steps.push(t);
       } catch (e: any) {
@@ -1593,7 +1629,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
           }],
         });
       } else {
-        const ctx = buildRetroContext(getGroundingDocument(ir), finalParsed, trace);
+        const ctx = buildRetroContext(getGroundingDocument(ir, groundingTextByKey), finalParsed, trace);
         const result = invokeRetroAgent({ agentFile, ctx, mockMode: Boolean(mockFlag) });
         if (!result.ok) {
           trace.steps.push({

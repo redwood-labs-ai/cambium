@@ -117,14 +117,36 @@ Malformed base64, missing `media_type`, wrong `media_type` for the declared `kin
 
 ### Grounding interaction
 
-`grounded_in :<key>` requires text for verbatim quote verification. Pairing it with a base64 document at the same key raises a compile-style error:
+`grounded_in :<key>` works natively with `base64_pdf` envelopes as of 0.3.1 (RED-323 follow-up). The runner extracts the PDF's plain text via `pdfjs-dist` and feeds that text into Cambium's citation verifier — so the model reasons over the PDF as a native document block (preserving Claude's native PDF capabilities), AND Cambium verifies every cited quote against the extracted text.
 
-```
-grounded_in :invoice requires text (for verbatim quote verification), but ir.context.invoice is a base64_pdf document.
-Either drop grounded_in, or pre-extract text from the document into a separate key.
+```ruby
+class InvoiceAnalyst < GenModel
+  model :default
+  returns InvoiceReport
+  grounded_in :invoice, require_citations: true
+
+  def analyze(pdf_base64)
+    generate "extract key facts and cite them" do
+      with context: {
+        invoice: {
+          kind: "base64_pdf",
+          data: pdf_base64,
+          media_type: "application/pdf",
+        },
+      }
+      returns InvoiceReport
+    end
+  end
+end
 ```
 
-The workaround is to separate extracted text from the PDF into different context keys — use the text for grounding, pass the PDF alongside for Claude's native reasoning.
+Every `citations[].quote` field in the output is checked verbatim against the PDF's extracted text. Quotes that don't match feed into the repair loop; unhealed errors surface as `GroundingCheck.ok: false`.
+
+**Scanned/image-only PDFs:** if a PDF has no selectable text (scanned images only), extraction produces an empty result and the run fails with a clear error. OCR is out of scope for v1.
+
+**Images with `grounded_in`:** not supported — images require OCR, deferred. A gen that pairs `grounded_in :<key>` with `{ kind: 'base64_image' }` will not get citation verification, since there's no text to verify against.
+
+**Pre-0.3.1 behavior:** earlier 0.3.0 rejected `grounded_in` + `base64_pdf` with a hard compile-time error. That was wrong. The 0.3.1 patch release removed the guard and wired in real text extraction.
 
 ### Non-Anthropic providers
 
