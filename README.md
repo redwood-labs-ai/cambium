@@ -39,9 +39,10 @@ npm install @redwood-labs/cambium-runner
 
 - **Node.js 18+**
 - **Ruby 3.0+** with the `json` gem (`gem install json` if missing) — Cambium ships the Ruby compiler; the Ruby runtime itself is a user-side prerequisite
-- An LLM provider — either:
+- An LLM provider — one of:
   - **oMLX** (OpenAI-compatible): set `CAMBIUM_OMLX_BASEURL` (default `http://localhost:8080`), optional `CAMBIUM_OMLX_API_KEY`
   - **Ollama**: set `CAMBIUM_OLLAMA_BASEURL` (default `http://localhost:11434`)
+  - **Anthropic**: set `ANTHROPIC_API_KEY` (or `CAMBIUM_ANTHROPIC_API_KEY`); optional `CAMBIUM_ANTHROPIC_BASEURL`. Use model ids like `"anthropic:claude-sonnet-4-6"`. Prompt caching is applied automatically to system prompts + tool definitions.
 
 Run `cambium doctor` to verify your environment.
 

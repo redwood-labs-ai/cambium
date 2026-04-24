@@ -8,17 +8,50 @@ Use the readable string form `"<provider>:<model>"`:
 
 - `"omlx:Qwen3.5-27B-4bit"` — oMLX server (OpenAI-compatible). Most common in Cambium today.
 - `"ollama:llama3:70b"` — local Ollama daemon (RED-208). Supports tool-use / agentic mode.
+- `"anthropic:claude-sonnet-4-6"` — Anthropic Messages API (RED-321). Supports tool-use / agentic mode; prompt caching is on by default.
 
 If no `provider:` prefix is given, the bare string is treated as `"ollama:<name>"` — Ollama is the default because it's the zero-config local option.
 
 ## Supported providers (current)
 
-| Provider | Agentic mode | Embed | Config |
-|---|---|---|---|
-| `omlx`   | ✅ | ✅ (`POST /v1/embeddings`) | `CAMBIUM_OMLX_BASEURL`, optional `CAMBIUM_OMLX_API_KEY` |
-| `ollama` | ✅ | ✅ (`POST /api/embed`) | `CAMBIUM_OLLAMA_BASEURL` (default `http://localhost:11434`) |
+| Provider    | Agentic mode | Embed | Prompt caching | Config |
+|---|---|---|---|---|
+| `omlx`      | ✅ | ✅ (`POST /v1/embeddings`) | n/a | `CAMBIUM_OMLX_BASEURL`, optional `CAMBIUM_OMLX_API_KEY` |
+| `ollama`    | ✅ | ✅ (`POST /api/embed`) | n/a | `CAMBIUM_OLLAMA_BASEURL` (default `http://localhost:11434`) |
+| `anthropic` | ✅ | ❌ (no native embeddings API) | ✅ system block + last tool | `ANTHROPIC_API_KEY` (or `CAMBIUM_ANTHROPIC_API_KEY`), optional `CAMBIUM_ANTHROPIC_BASEURL` (default `https://api.anthropic.com`) |
 
-Agentic mode is the tool-use loop (`mode :agentic`). Single-turn `generate` works for both providers too.
+Agentic mode is the tool-use loop (`mode :agentic`). Single-turn `generate` works for all three providers.
+
+## Anthropic prompt caching (RED-321)
+
+`buildAnthropicMessagesRequest` automatically applies `cache_control: {type: 'ephemeral'}` to two blocks:
+
+1. The top-level `system` block (always, when a system prompt exists).
+2. The last entry in `tools[]` (which caches the whole tools array up through it).
+
+Cache stats surface through the usual usage channel and are carried in the trace:
+
+```json
+"usage": {
+  "prompt_tokens": 1200,
+  "completion_tokens": 340,
+  "total_tokens": 1540,
+  "cache_creation_input_tokens": 1100,
+  "cache_read_input_tokens": 0
+}
+```
+
+On the second agentic turn (or second run in the same process), stable system + tool content hits the cache: `cache_read_input_tokens` becomes large and `input_tokens` drops to just the new user message + conversation additions. The total reported `prompt_tokens` follows Anthropic's own accounting — cache reads are billed at ~10% of normal input pricing.
+
+Caching is on by default because the cost/latency improvement is monotonic when prompts + tools are stable within a run. It can be turned off via `buildAnthropicMessagesRequest({ ..., cache: false })` at the library level, but there's no DSL surface for this — framework-owned behavior, same stance as oMLX's `/no_think` injection.
+
+### Non-goal: forced-schema
+
+Anthropic has no native schema-enforced decoding like oMLX's xgrammar. Cambium relies on Claude's first-pass JSON quality plus the existing repair loop. If future evidence shows the repair loop is firing often, an opt-in `CAMBIUM_ANTHROPIC_SCHEMA_MODE=tool_use` forced-tool-call path is a safe follow-up — it's deliberately NOT wired today to keep the `generateText` surface free of synthetic tools that would collide with real agentic tools.
+
+### Non-goal: embeddings
+
+Anthropic doesn't offer an embeddings endpoint. `src/providers/embed.ts` stays oMLX + Ollama. Anthropic-primary gens that need semantic memory should pair with an oMLX or Ollama embed model (embed provider is independent of chat provider).
 
 ## Embed model identifiers (RED-215)
 
