@@ -4,6 +4,89 @@ All notable changes to Cambium are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Cambium adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-04-24
+
+Additive release: native document input for Anthropic.
+
+### Added
+
+- **`@redwood-labs/cambium-runner`** — native base64 PDF + image input
+  via `ir.context` typed envelopes (RED-323). Plain-string context
+  values continue to flow as text (back-compat). Typed objects
+  `{ kind: 'base64_pdf' | 'base64_image', data, media_type }` are
+  extracted and emitted as Anthropic Messages-API content blocks, with
+  `cache_control: ephemeral` on the last document so bytes are cached
+  across agentic turns and repeat runs.
+  - **Envelope kinds** — `base64_pdf` (`media_type: application/pdf`),
+    `base64_image` (`media_type: image/png`, `image/jpeg`, `image/gif`,
+    `image/webp`).
+  - **Size caps** — 32 MiB per document (Anthropic's stated PDF limit);
+    50 MiB per run total. Override the per-run cap via
+    `CAMBIUM_MAX_DOC_BYTES_PER_RUN=<bytes>`.
+  - **Base64 strictness** — malformed input is rejected before any API
+    call (`base64 data is malformed`, `base64 decoded to suspiciously
+    small buffer`, etc.). URL-safe alphabets (`-`/`_`) are accepted as
+    input and normalized to standard base64 before dispatch — Anthropic
+    rejects the URL-safe form in `source.data`.
+  - **Grounding guard** — pairing `grounded_in :<key>` with a base64
+    document at the same key raises a compile-style error. Citations
+    require text for verbatim quote verification.
+  - **Non-Anthropic providers** — `ollama:` and `omlx:` fail fast at
+    dispatch with a clear error when documents are present. Don't
+    silently JSON-stringify a 30 KB base64 blob into the prompt.
+  - **Live smoke verified** — Claude read a synthetic PDF and returned
+    the exact embedded secret string; document caching round-trip
+    measured at 2308 tokens created → 2308 tokens read on the second
+    call.
+
+### Security
+
+- Anthropic provider's documents fail-fast gate runs BEFORE the
+  `CAMBIUM_ALLOW_MOCK` early-return, so `--mock` cannot green-light a
+  production-broken config (non-Anthropic provider + documents).
+  Flagged and fixed in the RED-323 security review.
+- The extractor stores the standard-alphabet-normalized base64 in its
+  output (not the original URL-safe input), because Anthropic rejects
+  `-`/`_` in `source.data`. Flagged and fixed in the RED-323 security
+  review.
+
+### Changed
+
+- **`@redwood-labs/cambium`** bumps runner dep pin from `0.2.0` → `0.3.0`.
+  No CLI surface changes.
+- `docs/GenDSL Docs/C - IR (Intermediate Representation).md` updates the
+  `context[<source>]` row to document both value shapes (plain string
+  and typed envelope).
+- `docs/GenDSL Docs/N - Model Identifiers.md` gains a "Native document
+  input (RED-323)" section with envelope shape, wire shape, size caps,
+  grounding interaction, and non-Anthropic fail-fast behavior.
+
+### Upgrade from 0.2.0
+
+```bash
+npm install -g @redwood-labs/cambium@latest
+# or for local project deps:
+npm install @redwood-labs/cambium@latest
+```
+
+No breaking changes. Existing gens using plain-string `ir.context` values
+continue to work unchanged. To pass a PDF or image:
+
+```ruby
+generate "analyze the invoice" do
+  with context: {
+    invoice: {
+      kind: "base64_pdf",
+      data: Base64.strict_encode64(File.binread("invoice.pdf")),
+      media_type: "application/pdf",
+    },
+  }
+  returns InvoiceExtraction
+end
+```
+
+Requires `model "anthropic:..."`.
+
 ## [0.2.0] — 2026-04-24
 
 First feature release since the initial npm publish. Both packages bump to
