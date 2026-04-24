@@ -31,6 +31,16 @@ type TokenUsage = {
   cache_read_input_tokens?: number;
 };
 
+// RED-323 native document input. Mirrors the shape in documents.ts; the
+// provider module deliberately restates the type to keep it a leaf-level
+// dependency (unit tests don't need to pull in the whole documents module).
+type AnthropicDocumentBlock = {
+  key: string;
+  kind: 'base64_pdf' | 'base64_image';
+  data: string;
+  media_type: string;
+};
+
 export type AnthropicMessagesResult = {
   message: {
     content: string | null;
@@ -50,7 +60,8 @@ export type AnthropicMessagesRequestOpts = {
   tools?: any[];           // OpenAI-format tool definitions; translated to Anthropic shape
   max_tokens?: number;
   temperature?: number;
-  cache?: boolean;         // default true — apply cache_control to system block + last tool
+  cache?: boolean;         // default true — apply cache_control to system block + last tool + last document
+  documents?: AnthropicDocumentBlock[];  // RED-323: emitted as content blocks on the FIRST user message
 };
 
 /**
@@ -79,6 +90,34 @@ export function buildAnthropicMessagesRequest(opts: AnthropicMessagesRequestOpts
     }
   }
   const systemText = systemParts.join('\n\n');
+
+  // RED-323: document blocks go on the FIRST user-role message in the
+  // ORIGINAL conversation (before tool_result turns translated into
+  // role:'user'). Tracked with a flag so only the initial prompt carries
+  // them; Anthropic's cache_control on the last doc block means
+  // subsequent agentic turns hit cache at ~10% cost without repeating
+  // the block list.
+  const documents = opts.documents ?? [];
+  let documentsConsumed = false;
+  const buildDocumentBlocks = (): any[] => {
+    if (documents.length === 0) return [];
+    return documents.map((d, i) => {
+      const base: any = {
+        type: d.kind === 'base64_pdf' ? 'document' : 'image',
+        source: {
+          type: 'base64',
+          media_type: d.media_type,
+          data: d.data,
+        },
+      };
+      // cache_control on the last document caches the whole document
+      // block stack up through it — one-shot cache for all docs.
+      if (useCache && i === documents.length - 1) {
+        base.cache_control = { type: 'ephemeral' };
+      }
+      return base;
+    });
+  };
 
   // Translate the conversation into Anthropic's message + content-block shape.
   const translatedMessages: any[] = [];
@@ -130,10 +169,30 @@ export function buildAnthropicMessagesRequest(opts: AnthropicMessagesRequestOpts
     }
 
     // Default: role === 'user' or any other role — pass through.
+    if (m.role === 'user' && !documentsConsumed && documents.length > 0) {
+      // RED-323: prepend document blocks to the FIRST user message. Per
+      // Anthropic's guidance, document blocks should precede the text
+      // block in the same user message for best attention.
+      const docBlocks = buildDocumentBlocks();
+      const textBlock = { type: 'text', text: m.content ?? '' };
+      translatedMessages.push({
+        role: 'user',
+        content: [...docBlocks, textBlock],
+      });
+      documentsConsumed = true;
+      continue;
+    }
     translatedMessages.push({
       role: m.role,
       content: m.content ?? '',
     });
+  }
+
+  // If documents were provided but no user message appeared in the
+  // conversation to attach them to, that's a caller bug — Anthropic
+  // would reject a request with orphan document blocks. Fail explicit.
+  if (documents.length > 0 && !documentsConsumed) {
+    throw new Error('Anthropic: documents provided but no user message found to attach them to');
   }
 
   // Translate OpenAI-format tools → Anthropic format.

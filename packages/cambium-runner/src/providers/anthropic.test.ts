@@ -330,6 +330,140 @@ describe('normalizeAnthropicMessagesResponse', () => {
   });
 });
 
+describe('buildAnthropicMessagesRequest with documents (RED-323)', () => {
+  const pdfDoc = {
+    key: 'invoice',
+    kind: 'base64_pdf' as const,
+    data: 'UERGIGRhdGE=',  // "PDF data"
+    media_type: 'application/pdf',
+  };
+  const imgDoc = {
+    key: 'screenshot',
+    kind: 'base64_image' as const,
+    data: 'UE5HIGRhdGE=',  // "PNG data"
+    media_type: 'image/png',
+  };
+
+  it('prepends document block to first user message content', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [
+        { role: 'system', content: 'You analyze documents.' },
+        { role: 'user', content: 'Summarize the invoice.' },
+      ],
+      documents: [pdfDoc],
+    });
+
+    expect(body.messages).toHaveLength(1);
+    const userMsg = body.messages[0];
+    expect(userMsg.role).toBe('user');
+    expect(Array.isArray(userMsg.content)).toBe(true);
+    expect(userMsg.content).toHaveLength(2);
+    // Document FIRST per Anthropic's attention guidance
+    expect(userMsg.content[0]).toEqual({
+      type: 'document',
+      source: {
+        type: 'base64',
+        media_type: 'application/pdf',
+        data: 'UERGIGRhdGE=',
+      },
+      cache_control: { type: 'ephemeral' },
+    });
+    // Text block follows
+    expect(userMsg.content[1]).toEqual({
+      type: 'text',
+      text: 'Summarize the invoice.',
+    });
+  });
+
+  it('emits image blocks with type "image" (not "document")', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [{ role: 'user', content: 'Describe this.' }],
+      documents: [imgDoc],
+    });
+    const firstBlock = body.messages[0].content[0];
+    expect(firstBlock.type).toBe('image');
+    expect(firstBlock.source.media_type).toBe('image/png');
+  });
+
+  it('marks only the LAST document block with cache_control', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [{ role: 'user', content: 'Compare.' }],
+      documents: [pdfDoc, imgDoc],
+    });
+    const blocks = body.messages[0].content;
+    expect(blocks).toHaveLength(3);  // pdf + img + text
+    expect(blocks[0].cache_control).toBeUndefined();
+    expect(blocks[1].cache_control).toEqual({ type: 'ephemeral' });
+    expect(blocks[2].type).toBe('text');
+  });
+
+  it('respects cache:false by omitting cache_control on documents', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [{ role: 'user', content: 'Q.' }],
+      documents: [pdfDoc],
+      cache: false,
+    });
+    expect(body.messages[0].content[0].cache_control).toBeUndefined();
+  });
+
+  it('does not modify non-first user messages (e.g. tool-result translations)', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: 'Initial ask about the invoice.' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{ id: 'tc1', type: 'function', function: { name: 'web_search', arguments: '{}' } }],
+        },
+        { role: 'tool', content: '{"result":"ok"}', tool_call_id: 'tc1' },
+      ],
+      documents: [pdfDoc],
+    });
+    expect(body.messages).toHaveLength(3);
+    // First user message has the doc block
+    expect(body.messages[0].role).toBe('user');
+    expect(body.messages[0].content[0].type).toBe('document');
+    expect(body.messages[0].content[1].type).toBe('text');
+    // Assistant tool_use message unchanged
+    expect(body.messages[1].role).toBe('assistant');
+    // Tool-result user message does NOT have the doc block prepended
+    expect(body.messages[2].role).toBe('user');
+    expect(body.messages[2].content[0].type).toBe('tool_result');
+    expect(body.messages[2].content).toHaveLength(1);
+  });
+
+  it('throws when documents present but no user message in conversation', () => {
+    expect(() => buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [{ role: 'system', content: 'sys only' }],
+      documents: [pdfDoc],
+    })).toThrow(/no user message found to attach them to/);
+  });
+
+  it('back-compat: omitting documents keeps plain string content', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [{ role: 'user', content: 'plain question' }],
+    });
+    expect(body.messages[0].content).toBe('plain question');
+  });
+
+  it('empty documents array is treated the same as omitted', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [{ role: 'user', content: 'q' }],
+      documents: [],
+    });
+    expect(body.messages[0].content).toBe('q');
+  });
+});
+
 describe('buildAnthropicMessagesRequest → normalizeAnthropicMessagesResponse round-trip', () => {
   it('tool-call → tool-result round-trip translates through both shapes', () => {
     // Model first response: tool_use only

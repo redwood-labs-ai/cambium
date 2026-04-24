@@ -10,6 +10,7 @@ import type { SecurityPolicy } from './tools/permissions.js';
 import type { Budget } from './budget.js';
 import { buildToolContext } from './tools/tool-context.js';
 import { getGroundingDocument } from './context.js';
+import { extractDocuments, assertGroundingCompatibleWithDocuments, type DocumentBlock } from './documents.js';
 
 export type StepResult = {
   type: string;
@@ -32,6 +33,11 @@ export type GenerateTextFn = (opts: {
   max_tokens?: number;
   temperature?: number;
   jsonSchema?: any;
+  /** RED-323: typed document blocks extracted from ir.context. Providers
+   *  with native doc support (Anthropic) emit these as content blocks;
+   *  providers without (Ollama, oMLX) fail fast at dispatch. Empty/absent
+   *  = text-only generation (back-compat). */
+  documents?: DocumentBlock[];
 }) => Promise<GenerateTextResult>;
 
 export type ExtractJsonFn = (text: string) => any;
@@ -43,6 +49,12 @@ export async function handleGenerate(
   generateText: GenerateTextFn,
   extractJson: ExtractJsonFn,
 ): Promise<{ raw: string; parsed: any; result: StepResult }> {
+  // RED-323: separate typed doc blocks from plain-text context BEFORE
+  // any prompt assembly, so base64 bytes never land in the prompt. The
+  // extractor validates size + format and throws on malformed input.
+  const { documents } = extractDocuments(ir);
+  assertGroundingCompatibleWithDocuments(ir, documents);
+
   const doc = getGroundingDocument(ir);
   const constraints = ir.policies?.constraints ?? {};
   const schemaKeys = Object.keys(schema.properties ?? {});
@@ -122,6 +134,7 @@ export async function handleGenerate(
     max_tokens: outMax,
     temperature: ir.model.temperature,
     jsonSchema: schema,
+    documents,
   });
 
   const raw = genResult.text;
@@ -468,6 +481,11 @@ export type GenerateWithToolsFn = (opts: {
   tools: any[];
   max_tokens?: number;
   temperature?: number;
+  /** RED-323: typed document blocks extracted from ir.context, same as
+   *  the generateText path. Anthropic emits them as user-message content
+   *  blocks on the first turn (subsequent turns reuse them via cache).
+   *  Ollama/oMLX fail fast when documents are present. */
+  documents?: DocumentBlock[];
 }) => Promise<{ message: { content: string | null; tool_calls?: ToolCallMsg[] }; usage?: TokenUsage }>;
 
 export async function handleAgenticGenerate(
@@ -482,6 +500,12 @@ export async function handleAgenticGenerate(
   maxToolCalls: number,
   env: ToolCallEnv = {},
 ): Promise<{ raw: string; parsed: any; result: StepResult; traceSteps: StepResult[] }> {
+  // RED-323: extract document blocks from context. Fails fast on
+  // malformed base64 / oversize / grounding-on-binary before any
+  // provider call.
+  const { documents } = extractDocuments(ir);
+  assertGroundingCompatibleWithDocuments(ir, documents);
+
   const doc = getGroundingDocument(ir);
   const constraints = ir.policies?.constraints ?? {};
   const grounding = ir.policies?.grounding;
@@ -566,6 +590,7 @@ export async function handleAgenticGenerate(
       tools: toolsForTurn,
       max_tokens: Number(ir.model.max_tokens ?? 1200),
       temperature: ir.model.temperature,
+      documents,
     });
 
     const msg = response.message;
