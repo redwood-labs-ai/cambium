@@ -19,7 +19,7 @@
   "Constrain block": {
     "prefix": "constrain",
     "body": [
-      "constrain :${1|tone,compound,consistency,budget|}, ${2|to,strategy,passes,max_tool_calls|}: ${3:value}"
+      "constrain :${1|tone,compound,consistency,budget|}, ${2|to,strategy,max_tokens,temperature,model,passes,max_tool_calls|}: ${3:value}"
     ],
     "description": "Runtime constraint declaration"
   },
@@ -107,9 +107,9 @@
   "Compound review": {
     "prefix": "review",
     "body": [
-      "constrain :compound, strategy: :review, passes: ${1:2}"
+      "constrain :compound, strategy: :review, max_tokens: ${1:2000}, temperature: ${2:0.0}"
     ],
-    "description": "Compound review with multiple passes"
+    "description": "Second-LLM-call review of generated output (RED-325)."
   },
   "Policy pack ref (security)": {
     "prefix": "secpack",

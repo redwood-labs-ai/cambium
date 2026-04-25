@@ -157,8 +157,34 @@ check('Genfile.toml (workspace or package)', () => {
   return { warn: true, detail: 'No Genfile.toml in cwd. If this is a new project, run `cambium init`.' };
 });
 
+// RED-325 follow-up: surface base-URL policy issues at doctor time
+// rather than at first dispatch. Closes the doctor-passes-runtime-
+// fails inconsistency: doctor used to report "reachable" but the
+// runner could still refuse the URL on policy grounds (non-https
+// without escape hatch). The check below covers the common case
+// (non-https on a non-localhost host); the runner's full validator
+// also rejects RFC1918 + 169.254 + ULA + link-local IPv6 + 127.0.0.0/8
+// + IPv4-mapped IPv6, but those cases are operator-misconfiguration-
+// only — they'd surface immediately at first dispatch even if doctor
+// missed them.
+check('CAMBIUM_OMLX_BASEURL valid (policy)', () => {
+  const base = process.env.CAMBIUM_OMLX_BASEURL ?? 'http://localhost:8080';
+  try {
+    const u = new URL(base);
+    const host = u.hostname;
+    const isLocalhost = ['localhost', '127.0.0.1', '::1', '[::1]'].includes(host.toLowerCase());
+    const escapeHatch = process.env.CAMBIUM_ALLOW_PRIVATE_PROVIDER_BASEURL === '1';
+    if (u.protocol !== 'https:' && !isLocalhost && !escapeHatch) {
+      return { fail: true, detail: `${base} uses non-https on a non-localhost host. Set CAMBIUM_ALLOW_PRIVATE_PROVIDER_BASEURL=1 if this is an internal-VLAN proxy.` };
+    }
+    return { ok: true, detail: `${base} passes validator` };
+  } catch (e) {
+    return { fail: true, detail: `${base} is malformed: ${e.message}` };
+  }
+});
+
 check('CAMBIUM_OMLX_BASEURL reachable', () => {
-  const base = process.env.CAMBIUM_OMLX_BASEURL ?? 'http://100.114.183.54:8080';
+  const base = process.env.CAMBIUM_OMLX_BASEURL ?? 'http://localhost:8080';
   const url = `${base.replace(/\/$/, '')}/health`;
   try {
     // Use a short timeout — we just want to know if it's up

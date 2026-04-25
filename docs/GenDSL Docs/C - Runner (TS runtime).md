@@ -36,7 +36,7 @@ Roughly, the runner does this per IR:
 
 Agentic mode (`mode :agentic` + tool-use loop) supports:
 
-- **oMLX** (OpenAI-compatible). Config: `CAMBIUM_OMLX_BASEURL` (default `http://100.114.183.54:8080`), optional `CAMBIUM_OMLX_API_KEY`. Model id form: `"omlx:<name>"`.
+- **oMLX** (OpenAI-compatible). Config: `CAMBIUM_OMLX_BASEURL` (default `http://localhost:8080`), optional `CAMBIUM_OMLX_API_KEY`. Model id form: `"omlx:<name>"`.
 - **Ollama** (RED-208). Config: `CAMBIUM_OLLAMA_BASEURL` (default `http://localhost:11434`), no API key. Model id form: `"ollama:<name>"` or a bare name (Ollama is the default when no `provider:` prefix is given).
 
 Single-turn `generate` (no tool-use) also supports both providers via the same model-id convention.

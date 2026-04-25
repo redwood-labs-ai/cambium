@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { validateProviderBaseUrl } from './base-url-validator.js';
 
 /**
  * RED-215 phase 5: embedding provider — vectorize a string using
@@ -58,7 +59,8 @@ export async function embedText(model: string, text: string): Promise<EmbedResul
   const { provider, name } = parseModelId(model);
 
   if (provider === 'omlx') {
-    const base = process.env.CAMBIUM_OMLX_BASEURL ?? 'http://100.114.183.54:8080';
+    const base = process.env.CAMBIUM_OMLX_BASEURL ?? 'http://localhost:8080';
+    validateProviderBaseUrl('oMLX embed (CAMBIUM_OMLX_BASEURL)', base);
     const apiKey = process.env.CAMBIUM_OMLX_API_KEY;
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
@@ -77,6 +79,7 @@ export async function embedText(model: string, text: string): Promise<EmbedResul
 
   if (provider === 'ollama') {
     const base = process.env.CAMBIUM_OLLAMA_BASEURL ?? 'http://localhost:11434';
+    validateProviderBaseUrl('Ollama embed (CAMBIUM_OLLAMA_BASEURL)', base);
     const res = await fetch(`${base}/api/embed`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

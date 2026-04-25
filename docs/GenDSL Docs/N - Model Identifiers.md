@@ -152,6 +152,36 @@ Every `citations[].quote` field in the output is checked verbatim against the PD
 
 Ollama and oMLX have no native document support today. A gen that passes a typed doc object with an `ollama:` or `omlx:` model fails fast at dispatch with a clear message — don't silently JSON-stringify the base64 into the prompt (it would be a token bomb). Pre-extract to text when using those providers.
 
+## Model options: `disable_thinking` (RED-325, 0.3.2)
+
+Qwen 3.x and other thinking-enabled models emit huge `reasoning_content` blocks before the actual JSON output, which (a) blows token budgets and (b) confuses Cambium's parser when the final answer leaks into `reasoning_content` instead of `content`. The `disable_thinking` model option suppresses thinking-mode at the source.
+
+```ruby
+class FastReviewer < GenModel
+  model "omlx:Qwen3.5-27B-4bit", disable_thinking: true
+end
+```
+
+Effect on the request: sets `chat_template_kwargs.enable_thinking: false` in the OpenAI-compat request body AND injects `/no_think` into both system and user prompts (some Qwen builds only respect it in system position). Three signals stacked.
+
+**Auto-detection:** if the model id matches `/qwen3/i` and `disable_thinking` is not explicitly set, Cambium defaults it to `true` and emits a one-time stderr note. To opt back into thinking, set `disable_thinking: false` explicitly.
+
+**Provider-error fallback (RED-325 Part 4):** if a thinking model still leaks the answer to `reasoning_content` despite the suppression, the runner falls back to reading from `reasoning_content` with a stderr warning rather than failing. Less correct than fixing the source — but it stops a silent failure when an unknown thinking-model variant slips past auto-detection.
+
+This is an oMLX-specific surface today. Anthropic and Ollama don't have an equivalent thinking-mode toggle — `disable_thinking: true` is silently ignored for `anthropic:` and `ollama:` model ids. (Anthropic's extended-thinking mode is a separate API surface controlled by request-shape decisions in `providers/anthropic.ts`, not by a DSL-level kwarg.)
+
+## Provider base-URL validation (RED-322 / RED-325 Part 5, 0.3.2)
+
+Operator-controlled `CAMBIUM_*_BASEURL` env vars are validated at first dispatch:
+
+- Reject non-`https://` UNLESS host is localhost (`127.0.0.1`, `::1`)
+- Reject private-range IPs (RFC1918 + 169.254 + ULA + link-local IPv6)
+- Tailscale CGNAT (100.64.0.0/10) is intentionally allowed (so tailnet/wg-fronted self-hosted models work over https without the escape hatch)
+
+Escape hatch: `CAMBIUM_ALLOW_PRIVATE_PROVIDER_BASEURL=1` opts in to BOTH private-range URLs AND non-https schemes on non-localhost hosts (legitimate internal-VLAN proxy setups, Tailscale-CGNAT-over-http, etc). When engaged, Cambium emits a one-time stderr warning per (provider, URL, gate) so the choice is auditable. A URL that trips both gates (e.g. `http://192.168.1.100`) produces two distinct warnings — one for scheme, one for range.
+
+The check is once-per-(provider, URL) — startup cost is negligible. Hostnames pass without DNS resolution; the validator targets static URL strings (the misconfigured-env vector), not DNS-rebinding.
+
 ## Embed model identifiers (RED-215)
 
 Memory pools and memory decls with `strategy: :semantic` take an `embed:` value that follows the same `"<provider>:<name>"` convention as primary models:
