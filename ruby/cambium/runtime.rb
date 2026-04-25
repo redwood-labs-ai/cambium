@@ -1063,8 +1063,21 @@ module Cambium
         sub.instance_variable_set(:@_cambium_defaults, {})
       end
 
-      def model(id)
+      # RED-325 Part 3: optional kwargs alongside the model id. Today only
+      # `disable_thinking:` — maps to chat_template_kwargs.enable_thinking
+      # false in the request body for OpenAI-compat providers (oMLX/vLLM).
+      # Cleaner than the brittle /no_think user-prompt directive.
+      MODEL_KWARGS = %i[disable_thinking].freeze
+
+      def model(id, **opts)
+        unknown = opts.keys - MODEL_KWARGS
+        unless unknown.empty?
+          raise ArgumentError,
+                "model: unknown kwargs: #{unknown.join(', ')}. " \
+                "Allowed: #{MODEL_KWARGS.join(', ')}."
+        end
         _cambium_defaults[:model] = id
+        _cambium_defaults[:model_options] = opts unless opts.empty?
       end
 
       # Mode: :agentic enables multi-turn tool-use loop in generate.
@@ -1117,7 +1130,23 @@ module Cambium
         end
       end
 
+      # RED-325 Part 1: per-key kwarg whitelists. Today only :compound has
+      # validated kwargs — `strategy:` is required, plus optional knobs
+      # `max_tokens:`, `temperature:`, `model:` that flow into runReview.
+      # Other keys (e.g. :tone, :budget) accept anything until they grow
+      # their own validation.
+      CONSTRAIN_COMPOUND_KWARGS = %i[strategy max_tokens temperature model].freeze
+
       def constrain(key, **opts)
+        if key == :compound
+          unknown = opts.keys - CONSTRAIN_COMPOUND_KWARGS
+          unless unknown.empty?
+            raise ArgumentError,
+                  "constrain :compound — unknown kwargs: #{unknown.join(', ')}. " \
+                  "Allowed: #{CONSTRAIN_COMPOUND_KWARGS.join(', ')}. " \
+                  "Did you mean :max_tokens (not :max_token)?"
+          end
+        end
         _cambium_defaults[:constraints] ||= {}
         _cambium_defaults[:constraints][key.to_s] = opts
       end

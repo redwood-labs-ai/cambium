@@ -1,6 +1,6 @@
 {
   "name": "@redwood-labs/cambium-runner",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "TS runtime for Cambium — executes compiled IR produced by the Cambium Ruby DSL.",
   "license": "MIT",
   "author": {

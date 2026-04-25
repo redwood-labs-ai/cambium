@@ -38,6 +38,10 @@ export type GenerateTextFn = (opts: {
    *  providers without (Ollama, oMLX) fail fast at dispatch. Empty/absent
    *  = text-only generation (back-compat). */
   documents?: DocumentBlock[];
+  /** RED-325 Part 3: per-model options from `model "id", disable_thinking: true`.
+   *  Empty/absent = legacy behavior (oMLX path applies thinking-suppression
+   *  ONLY when disable_thinking explicit-true OR auto-detected for Qwen3). */
+  modelOptions?: { disable_thinking?: boolean };
 }) => Promise<GenerateTextResult>;
 
 export type ExtractJsonFn = (text: string) => any;
@@ -137,6 +141,7 @@ export async function handleGenerate(
     temperature: ir.model.temperature,
     jsonSchema: schema,
     documents,
+    modelOptions: ir.model.options,
   });
 
   const raw = genResult.text;
@@ -306,6 +311,7 @@ export async function handleRepair(
     max_tokens: outMax,
     temperature: ir.model.temperature,
     jsonSchema: schema,
+    modelOptions: ir.model.options,
   });
 
   const newRaw = genResult.text;
@@ -503,6 +509,8 @@ export type GenerateWithToolsFn = (opts: {
    *  blocks on the first turn (subsequent turns reuse them via cache).
    *  Ollama/oMLX fail fast when documents are present. */
   documents?: DocumentBlock[];
+  /** RED-325 Part 3: per-model options from `model "id", disable_thinking: true`. */
+  modelOptions?: { disable_thinking?: boolean };
 }) => Promise<{ message: { content: string | null; tool_calls?: ToolCallMsg[] }; usage?: TokenUsage }>;
 
 export async function handleAgenticGenerate(
@@ -607,6 +615,7 @@ export async function handleAgenticGenerate(
       max_tokens: Number(ir.model.max_tokens ?? 1200),
       temperature: ir.model.temperature,
       documents,
+      modelOptions: ir.model.options,
     });
 
     const msg = response.message;

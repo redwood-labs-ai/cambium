@@ -4,6 +4,136 @@ All notable changes to Cambium are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Cambium adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] — 2026-04-25
+
+Patch release. Six adjacent items bundled together: configurable compound
+review, real bug fixes in runReview's exception handling, cleaner
+thinking-mode suppression, debugger-friendly oMLX errors, provider
+base-URL validation, and a notation that 0.3.1 already closed the latent
+GroundingCheck dead-code path.
+
+### Fixed
+
+- **`runReview` no longer crashes the host gen on provider failure.**
+  runReview is documented as advisory ("review failures should be
+  skippable") but pre-0.3.2 a single flaky 30-second API call would
+  crash the gen hosting `constrain :compound, strategy: :review`.
+  Provider exceptions now produce `{ok: false, meta: { skipped_reason:
+  'provider_error', error: <message> }}` and the gen continues to render
+  + commit. Trace consumers can branch on `review.ok` to distinguish
+  "review ran and found nothing" from "review couldn't run."
+- **`runReview` default `max_tokens` raised from 300 → 2000.** 300 was
+  too small for any non-trivial review; even a short `{"issues": [...]}`
+  envelope with 5–10 items would truncate, silently degrading the
+  grounding feedback that flows into repair. The new default fits real
+  reviews. Per-gen override available — see Added below.
+- **Provider-error ergonomics for oMLX.** Pre-0.3.2 the runner threw
+  `oMLX error: HTTP <status>` and `oMLX: missing choices[0].message.content`
+  with no upstream body — every provider quirk became a 30-minute
+  detective session. Both error paths now include up to 1500 chars of
+  the upstream response. Anthropic's path is UNCHANGED — Anthropic 401/403
+  bodies can echo credential fragments, so its `HTTP <status>` posture
+  from 0.3.0 is preserved.
+- **`content || reasoning_content` fallback for OpenAI-compat thinking
+  models.** Some Qwen builds leak final output to `reasoning_content`
+  rather than `content`. Pre-0.3.2 Cambium failed; now it falls back to
+  `reasoning_content` with a stderr warning pointing at `disable_thinking`
+  as the cleaner fix. Less correct than fixing the source, but stops a
+  silent failure when an unknown thinking-model variant slips past
+  auto-detection.
+
+### Added
+
+- **Per-gen review knobs (RED-325 Part 1).** Three optional kwargs on
+  `constrain :compound, strategy: :review`:
+  - `max_tokens:` — defaults to 2000 (raised from 300)
+  - `temperature:` — defaults to 0.1
+  - `model:` — defaults to inheriting `ir.model.id`. The high-leverage
+    one: a gen running its main call on Sonnet 4.6 can run its review
+    on Haiku, cutting review cost ~3-4x without quality loss for
+    "internally consistent" checks.
+  
+  Unknown kwargs raise a clear compile-time error so typos
+  (`max_token: 2000`) don't silently fall through to defaults.
+
+- **`disable_thinking` model option (RED-325 Part 3).** Cleaner DSL
+  for thinking-mode suppression than the legacy `/no_think` injection:
+  
+  ```ruby
+  model "omlx:Qwen3.5-27B-4bit", disable_thinking: true
+  ```
+  
+  Maps to `chat_template_kwargs.enable_thinking: false` in the request
+  body AND injects `/no_think` into both system and user prompts (some
+  Qwen builds only respect it in system position). Three signals
+  stacked.
+  
+  **Auto-detection:** if model id matches `/qwen3/i` and the flag isn't
+  explicitly set, defaults to `disable_thinking: true` with a one-time
+  stderr note. Set `disable_thinking: false` explicitly to opt back into
+  thinking.
+
+- **Provider base-URL validator (RED-325 Part 5; absorbs RED-322).**
+  `CAMBIUM_*_BASEURL` env vars are validated at first dispatch:
+  rejects non-`https://` (except localhost), rejects RFC1918 + 169.254
+  + ULA + link-local IPv6 + 127.0.0.0/8 (loopback) + IPv4-mapped IPv6
+  to private addresses. Tailscale CGNAT (100.64.0.0/10) is intentionally
+  allowed so tailnet/wg-fronted self-hosted models work over https
+  without the escape hatch.
+  Escape hatch: `CAMBIUM_ALLOW_PRIVATE_PROVIDER_BASEURL=1` opts in to
+  BOTH private-range URLs AND non-https schemes on non-localhost hosts
+  (legitimate internal-VLAN proxy setups, Tailscale-CGNAT-over-http).
+  Per-(provider, URL, gate) one-time stderr warnings — a URL that trips
+  both gates produces two distinct warnings. Closes RED-322.
+- **`cambium doctor` now validates base-URL policy, not just reachability.**
+  A new check fires the same scheme rule the runner enforces, so a
+  misconfigured `CAMBIUM_OMLX_BASEURL=http://example.com` surfaces at
+  doctor time rather than at first dispatch.
+
+### Security
+
+- The base-URL validator (Part 5) closes a credential-leak path: a
+  poisoned-env CI job or careless deploy manifest setting
+  `CAMBIUM_ANTHROPIC_BASEURL=http://169.254.169.254` would silently
+  ship the API key to the AWS metadata endpoint. Now rejected before
+  the first fetch.
+- oMLX error-body inclusion is intentionally NOT extended to Anthropic.
+  Anthropic 401/403 responses can echo credential fragments; preserving
+  the body-stripped error message protects against trace.json + log-sink
+  leaks.
+
+### Changed
+
+- **`@redwood-labs/cambium`** bumps runner dep pin from `0.3.1` →
+  `0.3.2`. No CLI surface changes.
+- `docs/GenDSL Docs/P - Compound Generation.md` documents the per-gen
+  review knobs + the resilience contract (provider failure → skipped,
+  not crashed).
+- `docs/GenDSL Docs/N - Model Identifiers.md` documents the
+  `disable_thinking` model option + the base-URL validator behavior.
+
+### Closes
+
+- **RED-322** (provider base-URL validation) — absorbed into RED-325 Part 5.
+- **RED-308** (citation-corrector dead-code path) — already fixed in
+  0.3.1's `handleCorrect` meta-merge change. Mentioned here so the
+  changelog reflects the closure.
+
+### Upgrade from 0.3.1
+
+```bash
+npm install -g @redwood-labs/cambium@latest
+# or for local project deps:
+npm install @redwood-labs/cambium@latest
+```
+
+No breaking changes for gens that don't use `constrain :compound,
+strategy: :review` or set custom `CAMBIUM_*_BASEURL` env vars. Gens
+using `constrain :compound, strategy: :review` automatically benefit
+from the 300 → 2000 default bump and the throw-fix. Gens declaring
+unknown kwargs to `constrain :compound, …` (typos, etc.) will start
+raising clear compile errors instead of silently falling through.
+
 ## [0.3.1] — 2026-04-24
 
 Patch release. Makes `grounded_in` + base64 PDFs actually work, and fixes
