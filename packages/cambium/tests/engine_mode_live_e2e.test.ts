@@ -7,7 +7,7 @@
  * engine_mode_e2e.test.ts trivially passes.
  *
  * The live test uses whatever oMLX server the project is configured
- * against (`CAMBIUM_OMLX_BASEURL` default: `http://100.114.183.54:8080`).
+ * against (`CAMBIUM_OMLX_BASEURL` default: `http://localhost:8080`).
  * If `CAMBIUM_LIVE_TESTS=1` is set but the server is unreachable, the
  * test will fail with a spawn error — intentional; the opt-in means
  * "I've verified I have a live backend." Don't silently skip when the
