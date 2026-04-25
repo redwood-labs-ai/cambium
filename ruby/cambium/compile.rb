@@ -329,8 +329,11 @@ ir = {
   'model' => {
     'id' => defs[:model],
     'temperature' => defs[:temperature],
-    'max_tokens' => defs[:max_tokens]
-  },
+    'max_tokens' => defs[:max_tokens],
+    # RED-325 Part 3: per-model options (e.g. disable_thinking).
+    # Optional; emitted only when the gen sets at least one option.
+    'options' => (defs[:model_options] && !defs[:model_options].empty? ? defs[:model_options] : nil)
+  }.compact,
   'system' => system_prompt,
   'mode' => defs[:mode],
   'policies' => {

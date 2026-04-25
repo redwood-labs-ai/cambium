@@ -29,6 +29,7 @@ import {
   stripInlineToolCalls,
   type ToolCallMessage,
 } from './inline-tool-calls.js';
+import { validateProviderBaseUrl } from './providers/base-url-validator.js';
 import {
   planMemory,
   readMemoryForRun,
@@ -129,9 +130,31 @@ function parseModelId(modelId: string): { provider: string; name: string } {
 type TokenUsage = { prompt_tokens: number; completion_tokens: number; total_tokens: number };
 type GenerateResult = { text: string; usage?: TokenUsage };
 
-async function generateText(opts: { model: string; system: string; prompt: string; max_tokens?: number; temperature?: number; jsonSchema?: any; documents?: any[]; }): Promise<GenerateResult> {
+// RED-325 Part 3: one-time stderr note for auto-detected disable_thinking.
+const _autoDisableThinkingWarned = new Set<string>();
+function resolveDisableThinking(modelName: string, modelOptions?: { disable_thinking?: boolean }): boolean {
+  if (modelOptions?.disable_thinking !== undefined) return modelOptions.disable_thinking;
+  // Auto-detect Qwen3.x — they ship with thinking on by default and
+  // produce huge reasoning_content blobs that break our parsing
+  // and blow token budgets. Safe assumption that a Cambium gen using
+  // Qwen3 wants the JSON output, not the chain-of-thought.
+  if (/qwen3/i.test(modelName)) {
+    if (!_autoDisableThinkingWarned.has(modelName)) {
+      _autoDisableThinkingWarned.add(modelName);
+      process.stderr.write(
+        `[cambium] auto-detected Qwen3 model "${modelName}"; defaulting to disable_thinking: true. ` +
+        `Set \`model "${modelName}", disable_thinking: false\` in your gen if you want thinking enabled.\n`
+      );
+    }
+    return true;
+  }
+  return false;
+}
+
+async function generateText(opts: { model: string; system: string; prompt: string; max_tokens?: number; temperature?: number; jsonSchema?: any; documents?: any[]; modelOptions?: { disable_thinking?: boolean }; }): Promise<GenerateResult> {
   const { provider, name } = parseModelId(opts.model);
   const documents = opts.documents ?? [];
+  const disableThinking = resolveDisableThinking(name, opts.modelOptions);
 
   // RED-323: fail fast if a gen with native document input hits a
   // provider that doesn't support it. Silently JSON.stringifying a
@@ -187,25 +210,30 @@ async function generateText(opts: { model: string; system: string; prompt: strin
 
     if (provider === 'omlx') {
       // oMLX server (OpenAI-compatible)
-      const baseUrl = process.env.CAMBIUM_OMLX_BASEURL ?? 'http://100.114.183.54:8080';
+      const baseUrl = process.env.CAMBIUM_OMLX_BASEURL ?? 'http://localhost:8080';
+      validateProviderBaseUrl('oMLX (CAMBIUM_OMLX_BASEURL)', baseUrl);
       const url = `${baseUrl.replace(/\/$/, '')}/v1/chat/completions`;
 
-      // Append /no_think token to suppress Qwen 3.x thinking mode.
-      // This is more reliable than chat_template_kwargs.enable_thinking=false,
-      // which can silently disable xgrammar (vllm#39130, sglang#6675).
-      const userContent = opts.prompt + '\n/no_think';
+      // RED-325 Part 3: thinking-mode suppression is now opt-in via the
+      // DSL `disable_thinking` flag (auto-detected for Qwen3). When on,
+      // we inject `/no_think` into BOTH system and user prompts (some
+      // Qwen builds only respect it in system position) AND send the
+      // chat_template_kwargs flag — three signals stacked.
+      const systemContent = disableThinking ? `/no_think\n${opts.system}` : opts.system;
+      const userContent = disableThinking ? `${opts.prompt}\n/no_think` : opts.prompt;
 
       const body: any = {
         model: name,
         temperature: opts.temperature ?? 0.2,
         max_tokens: opts.max_tokens ?? 1200,
         messages: [
-          { role: 'system', content: opts.system },
+          { role: 'system', content: systemContent },
           { role: 'user', content: userContent }
         ],
-        // Belt-and-suspenders: also send chat_template_kwargs to disable thinking.
-        chat_template_kwargs: { enable_thinking: false },
       };
+      if (disableThinking) {
+        body.chat_template_kwargs = { enable_thinking: false };
+      }
 
       // Structured output (vLLM-compatible) — requires xgrammar enabled on the server.
       if (opts.jsonSchema && (process.env.CAMBIUM_OMLX_STRUCTURED_OUTPUTS ?? '1') === '1') {
@@ -232,10 +260,33 @@ async function generateText(opts: { model: string; system: string; prompt: strin
         headers,
         body: JSON.stringify(body)
       });
-      if (!res.ok) throw new Error(`oMLX error: HTTP ${res.status}`);
+      if (!res.ok) {
+        // RED-325 Part 4: include up to 1500 chars of upstream body so
+        // we don't lose the actual oMLX/vLLM error context. Anthropic's
+        // path keeps the body OUT (credential leak posture); oMLX bodies
+        // are server-internal and safe to surface.
+        const errBody = (await res.text().catch(() => '')).slice(0, 1500);
+        throw new Error(`oMLX error: HTTP ${res.status}${errBody ? ` — ${errBody}` : ''}`);
+      }
       const json: any = await res.json();
-      const content = json?.choices?.[0]?.message?.content;
-      if (!content) throw new Error('oMLX: missing choices[0].message.content');
+      const message = json?.choices?.[0]?.message;
+      let content = message?.content;
+      // RED-325 Part 4: belt-and-suspenders fallback. Some thinking
+      // models leak final output to reasoning_content rather than content
+      // (Qwen + thinking-mode-on does this). Less correct than fixing
+      // disable_thinking (Part 3) but stops a silent failure when an
+      // unknown thinking-model variant slips past auto-detection.
+      if (!content && typeof message?.reasoning_content === 'string') {
+        process.stderr.write(
+          `[cambium] oMLX: empty content but reasoning_content present (${message.reasoning_content.length} chars). ` +
+          `Falling back to reasoning_content. Consider \`model "<id>", disable_thinking: true\` to address at the source.\n`
+        );
+        content = message.reasoning_content;
+      }
+      if (!content) {
+        const bodyPreview = JSON.stringify(json).slice(0, 1500);
+        throw new Error(`oMLX: missing choices[0].message.content — ${bodyPreview}`);
+      }
       const usage = json?.usage;
       return {
         text: content as string,
@@ -253,6 +304,7 @@ async function generateText(opts: { model: string; system: string; prompt: strin
       // buildAnthropicMessagesRequest.
       const { buildAnthropicMessagesRequest, normalizeAnthropicMessagesResponse } = await import('./providers/anthropic.js');
       const baseUrl = process.env.CAMBIUM_ANTHROPIC_BASEURL ?? 'https://api.anthropic.com';
+      validateProviderBaseUrl('Anthropic (CAMBIUM_ANTHROPIC_BASEURL)', baseUrl);
       const url = `${baseUrl.replace(/\/$/, '')}/v1/messages`;
 
       const body = buildAnthropicMessagesRequest({
@@ -297,7 +349,7 @@ async function generateText(opts: { model: string; system: string; prompt: strin
       return { text: mockGenerate(opts.prompt) };
     }
     const hint = provider === 'omlx'
-      ? 'oMLX fetch failed. Check CAMBIUM_OMLX_BASEURL (default http://100.114.183.54:8080) and server status.'
+      ? 'oMLX fetch failed. Check CAMBIUM_OMLX_BASEURL (default http://localhost:8080) and server status.'
       : provider === 'anthropic'
       ? 'Anthropic fetch failed. Check ANTHROPIC_API_KEY and network reachability to api.anthropic.com.'
       : 'Ollama fetch failed. Start Ollama (`ollama serve`).';
@@ -320,9 +372,11 @@ async function generateWithTools(opts: {
   max_tokens?: number;
   temperature?: number;
   documents?: any[];
+  modelOptions?: { disable_thinking?: boolean };
 }): Promise<GenerateWithToolsResult> {
   const { provider, name } = parseModelId(opts.model);
   const documents = opts.documents ?? [];
+  const disableThinking = resolveDisableThinking(name, opts.modelOptions);
 
   // RED-323: fail fast if a gen with native document input hits a
   // provider that doesn't support it. Same posture as generateText.
@@ -340,6 +394,7 @@ async function generateWithTools(opts: {
     // src/providers/ollama.ts so it's unit-testable without a live server.
     const { buildOllamaChatRequest, normalizeOllamaChatResponse } = await import('./providers/ollama.js');
     const baseUrl = process.env.CAMBIUM_OLLAMA_BASEURL ?? 'http://localhost:11434';
+    validateProviderBaseUrl('Ollama (CAMBIUM_OLLAMA_BASEURL)', baseUrl);
     const url = `${baseUrl.replace(/\/$/, '')}/api/chat`;
     const body = buildOllamaChatRequest({
       model: name,
@@ -381,6 +436,7 @@ async function generateWithTools(opts: {
     // Prompt caching on system + last tool is applied by the builder.
     const { buildAnthropicMessagesRequest, normalizeAnthropicMessagesResponse } = await import('./providers/anthropic.js');
     const baseUrl = process.env.CAMBIUM_ANTHROPIC_BASEURL ?? 'https://api.anthropic.com';
+    validateProviderBaseUrl('Anthropic (CAMBIUM_ANTHROPIC_BASEURL)', baseUrl);
     const url = `${baseUrl.replace(/\/$/, '')}/v1/messages`;
 
     const body = buildAnthropicMessagesRequest({
@@ -433,24 +489,36 @@ async function generateWithTools(opts: {
     throw new Error(`Agentic mode: unknown provider "${provider}". Supported: omlx, ollama, anthropic.`);
   }
 
-  const baseUrl = process.env.CAMBIUM_OMLX_BASEURL ?? 'http://100.114.183.54:8080';
+  const baseUrl = process.env.CAMBIUM_OMLX_BASEURL ?? 'http://localhost:8080';
+  validateProviderBaseUrl('oMLX (CAMBIUM_OMLX_BASEURL)', baseUrl);
   const url = `${baseUrl.replace(/\/$/, '')}/v1/chat/completions`;
 
-  // Append /no_think to the last user message
-  const messages = opts.messages.map((m, i) => {
-    if (m.role === 'user' && i === opts.messages.findLastIndex(msg => msg.role === 'user')) {
-      return { ...m, content: (m.content ?? '') + '\n/no_think' };
-    }
-    return m;
-  });
+  // RED-325 Part 3: only inject /no_think when disableThinking resolved
+  // true (explicit DSL flag or auto-detected Qwen3). When on, append to
+  // the LAST user message AND prepend to the first system message; same
+  // three-signal stack as the non-agentic path.
+  let messages = opts.messages;
+  if (disableThinking) {
+    messages = opts.messages.map((m, i) => {
+      if (m.role === 'user' && i === opts.messages.findLastIndex(msg => msg.role === 'user')) {
+        return { ...m, content: (m.content ?? '') + '\n/no_think' };
+      }
+      if (m.role === 'system' && i === opts.messages.findIndex(msg => msg.role === 'system')) {
+        return { ...m, content: `/no_think\n${m.content ?? ''}` };
+      }
+      return m;
+    });
+  }
 
   const body: any = {
     model: name,
     temperature: opts.temperature ?? 0.2,
     max_tokens: opts.max_tokens ?? 1200,
     messages,
-    chat_template_kwargs: { enable_thinking: false },
   };
+  if (disableThinking) {
+    body.chat_template_kwargs = { enable_thinking: false };
+  }
 
   // Include tools if we have them; force content output if empty
   if (opts.tools.length > 0) {
@@ -466,17 +534,33 @@ async function generateWithTools(opts: {
   if (apiKey) headers['authorization'] = `Bearer ${apiKey}`;
 
   const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
-  if (!res.ok) throw new Error(`oMLX error: HTTP ${res.status}`);
+  if (!res.ok) {
+    // RED-325 Part 4: include up to 1500 chars of upstream body in oMLX errors.
+    const errBody = (await res.text().catch(() => '')).slice(0, 1500);
+    throw new Error(`oMLX error: HTTP ${res.status}${errBody ? ` — ${errBody}` : ''}`);
+  }
   const json: any = await res.json();
 
   const msg = json?.choices?.[0]?.message;
-  if (!msg) throw new Error('oMLX: missing choices[0].message');
+  if (!msg) {
+    const bodyPreview = JSON.stringify(json).slice(0, 1500);
+    throw new Error(`oMLX: missing choices[0].message — ${bodyPreview}`);
+  }
 
   const usage = json?.usage;
 
   // Standard OpenAI tool_calls, or parse from content for models that use inline formats
   let toolCalls = msg.tool_calls ?? undefined;
   let content = msg.content ?? null;
+  // RED-325 Part 4: reasoning_content fallback for thinking models that
+  // leak the final answer into reasoning_content rather than content.
+  if (!content && typeof msg.reasoning_content === 'string') {
+    process.stderr.write(
+      `[cambium] oMLX (agentic): empty content but reasoning_content present (${msg.reasoning_content.length} chars). ` +
+      `Falling back to reasoning_content.\n`
+    );
+    content = msg.reasoning_content;
+  }
 
   if (!toolCalls && content) {
     const parsed = parseInlineToolCalls(content);
@@ -1255,12 +1339,26 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
 
     // 3a. Compound review: LLM audits the output against the source document
     if (constraints.compound?.strategy === 'review') {
-      const review = await runReview(parsed, ir, schema, generateText, extractJsonObject, groundingTextByKey);
+      // RED-325 Part 1: lift max_tokens / temperature / model from the
+      // compound constraint declaration (set in the gen via
+      // `constrain :compound, strategy: :review, max_tokens: 2000, …`)
+      // and pass through to runReview. Shape comes straight from
+      // ir.policies.constraints.compound — Ruby DSL captures unknown
+      // kwargs into the same dict.
+      const compoundConfig = {
+        max_tokens: constraints.compound.max_tokens,
+        temperature: constraints.compound.temperature,
+        model: constraints.compound.model,
+      };
+      const review = await runReview(parsed, ir, schema, generateText, extractJsonObject, groundingTextByKey, compoundConfig);
       const reviewTraceEntry = {
         type: 'Review',
         ok: review.ok,
         ms: review.ms,
-        meta: { issues: review.issues, raw_preview: review.raw_preview, usage: review.usage },
+        // RED-325 docs review fix: spread review.meta into the trace
+        // entry so skipped_reason + error reach trace.json. Pre-fix the
+        // doc promised this field but the trace-write dropped it.
+        meta: { issues: review.issues, raw_preview: review.raw_preview, usage: review.usage, ...review.meta },
       };
       trace.steps.push(reviewTraceEntry);
       budgetTrack(reviewTraceEntry);
