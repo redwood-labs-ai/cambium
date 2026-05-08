@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { resolveEngineDir } from './engine-root.js';
+import { resolveEngineDir, findEngineDirFromCwd } from './engine-root.js';
 
 let scratch: string;
 beforeEach(() => {
@@ -57,5 +57,36 @@ describe('resolveEngineDir', () => {
     } finally {
       process.chdir(prevCwd);
     }
+  });
+});
+
+describe('findEngineDirFromCwd (RED-353 cross-env fallback)', () => {
+  it('returns the engine dir when the sentinel sits in the given dir', () => {
+    writeFileSync(join(scratch, 'cambium.engine.json'), '{}');
+    expect(findEngineDirFromCwd(scratch)).toBe(scratch);
+  });
+
+  it('walks up from a nested cwd to find the sentinel', () => {
+    writeFileSync(join(scratch, 'cambium.engine.json'), '{}');
+    const deep = join(scratch, 'sub', 'nested');
+    mkdirSync(deep, { recursive: true });
+    expect(findEngineDirFromCwd(deep)).toBe(scratch);
+  });
+
+  it('returns null when no sentinel is found up to fs root', () => {
+    // The walk-up may climb past the scratch root into the developer's
+    // own filesystem and find an unrelated engine sentinel. Assert
+    // only that the result, if non-null, is NOT inside scratch — the
+    // function did not fabricate a hit from scratch's own descendants.
+    const result = findEngineDirFromCwd(scratch);
+    if (result !== null) {
+      expect(result.startsWith(scratch)).toBe(false);
+    }
+  });
+
+  it('returns null when startDir is undefined / null / empty', () => {
+    expect(findEngineDirFromCwd(undefined)).toBeNull();
+    expect(findEngineDirFromCwd(null)).toBeNull();
+    expect(findEngineDirFromCwd('')).toBeNull();
   });
 });

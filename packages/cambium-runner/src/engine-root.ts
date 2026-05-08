@@ -49,3 +49,25 @@ export function resolveEngineDir(sourcePath: string | undefined | null): string 
     dir = parent;
   }
 }
+
+/**
+ * Walk up from a directory (NOT a file path) looking for the engine
+ * sentinel. RED-353 fallback: when `ir.entry.source` is unreachable
+ * (e.g., IR compiled on a host then run in a container with a different
+ * filesystem layout), the source-anchored walk-up returns null. The
+ * runner can recover by walking up from cwd at run time — provided cwd
+ * is the engine directory or an ancestor of it.
+ *
+ * Path-traversal: same fixed-name `existsSync` shape as `resolveEngineDir`,
+ * no user-controlled segments interpolated.
+ */
+export function findEngineDirFromCwd(startDir: string | undefined | null): string | null {
+  if (!startDir) return null;
+  let dir = resolve(startDir);
+  while (true) {
+    if (existsSync(join(dir, ENGINE_SENTINEL))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}

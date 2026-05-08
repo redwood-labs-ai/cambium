@@ -37,7 +37,7 @@ import {
   closeBackends,
   type MemoryPlan,
 } from './memory/runner-integration.js';
-import { parseMemoryKeys, resolveSessionId, validateScheduleId } from './memory/keys.js';
+import { parseMemoryKeys, resolveSessionId, validateScheduleId, validateSafeSegment } from './memory/keys.js';
 import type { SqliteMemoryBackend } from './memory/backend.js';
 import {
   findRetroAgentFile,
@@ -53,9 +53,15 @@ import { builtinLogSinks, emitLogEvent, loadAppLogSinks, buildRunLogEvent, class
 import type { LogSink, LogDestination } from './log/index.js';
 import { getGroundingDocument } from './context.js';
 import { resolveAppRoot } from './app-root.js';
-import { resolveEngineDir } from './engine-root.js';
+import { resolveEngineDir, findEngineDirFromCwd } from './engine-root.js';
 
-type IR = any;
+// RED-354: exported so consumers can write
+//   import type { IR } from '@redwood-labs/cambium-runner';
+//   const ir: IR = { ...irData };
+// instead of `as any`-casting at every call site. The type is still
+// loose (alias for `any`) — sharpening to a structured interface is a
+// follow-up; the export gives consumers a stable name to import today.
+export type IR = any;
 
 type Args = {
   irPath: string;
@@ -730,6 +736,13 @@ export interface RunGenOptions {
    *    - `ctx.fire_id` on action handlers gets `<id>:<ts>`
    *    - `log` events gain a `fired_by:schedule` ddtag */
   firedBy?: string;
+  /** RED-330: explicit run id to use for this invocation. When omitted,
+   *  runGen generates one (`run_<UTC>_<rand>`). Hoisted to the options
+   *  so callers can emit the run dir / trace path on stderr before
+   *  invoking runGen — useful for `runGenFromIr` (the CLI path) which
+   *  wants every exit path to leave a discoverable artifact location.
+   *  Library callers typically omit this. */
+  runId?: string;
 }
 
 export interface RunGenResult {
@@ -767,6 +780,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     correctors: optsCorrectors,
     logSinks: optsLogSinks,
     firedBy: optsFiredBy,
+    runId: optsRunId,
   } = opts;
 
   // Plumb opts.mock through to the deterministic-mock branch in
@@ -782,7 +796,17 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   const previousMockEnv = process.env.CAMBIUM_ALLOW_MOCK;
   if (mockFlag) process.env.CAMBIUM_ALLOW_MOCK = '1';
 
-  const runId = `run_${nowId()}_${Math.random().toString(16).slice(2, 8)}`;
+  // RED-330 / RED-353 follow-up (security review): a library-caller-supplied
+  // `runId` joins into `runs/<runId>/...` for the eager mkdir + stderr emit
+  // and into per-step trace refs. `node:path.join` normalizes `..` silently,
+  // so a hostile runId like `../../etc/foo` would resolve outside the runs
+  // root. Reuse the same SAFE_VALUE_RE / 128-char guard as `--memory-key`
+  // and `CAMBIUM_SESSION_ID` (RED-215 phase 3). The auto-generated shape
+  // trivially passes; legitimate callers are unaffected.
+  if (optsRunId !== undefined) {
+    validateSafeSegment('runId', optsRunId, 'opts.runId');
+  }
+  const runId = optsRunId ?? `run_${nowId()}_${Math.random().toString(16).slice(2, 8)}`;
 
   // ── Parse --fired-by / CAMBIUM_FIRED_BY (RED-305) ───────────────────
   // Shape: `schedule:<id>[@<iso_ts>]`. Absent → interactive run.
@@ -1921,6 +1945,15 @@ export interface RunGenFromIrResult extends RunGenResult {
 export async function runGenFromIr(opts: RunGenFromIrOptions): Promise<RunGenFromIrResult> {
   const cwd = opts.cwd ?? process.cwd();
 
+  // RED-330: generate the run id and emit the run dir + trace path to
+  // stderr BEFORE any heavy work (schema resolution, app correctors,
+  // memory planning, LLM calls). Every exit path — clean exit, early
+  // abort, killed, OOM — leaves a discoverable artifact location on
+  // stderr. Downstream tooling (loop drivers, CI scripts) can grep
+  // `[cambium] run` to find traces without scanning the filesystem.
+  // Format is single-line key=value so it stays parseable.
+  const runId = `run_${nowId()}_${Math.random().toString(16).slice(2, 8)}`;
+
   let contractsMod: Record<string, any>;
   // RED-287: engine-mode schemas live as a sibling of the gen file
   // (`<engineDir>/schemas.ts`) rather than under an app/ convention.
@@ -1929,7 +1962,42 @@ export async function runGenFromIr(opts: RunGenFromIrOptions): Promise<RunGenFro
   // wins over the app-mode Genfile lookup — an IR compiled from an
   // engine gen always sources its own schemas, even if cwd happens
   // to contain a Genfile.
-  const engineDir = resolveEngineDir(opts.ir.entry?.source);
+  //
+  // RED-353: when entry.source is unreachable at run time (IR compiled
+  // on a host with a different filesystem layout — Docker, CI, peer
+  // dev), the source-anchored walk-up returns null and the runner
+  // would silently fall through to app mode. That misroutes engine
+  // schema loading. Fall back to walking up from cwd in that case;
+  // the operator's contract is "cwd at run time is the engine dir or
+  // an ancestor." Source-anchored detection still wins when the path
+  // exists — the test in engine_mode_e2e (run-from-anywhere) keeps
+  // working because the absolute path is reachable in-process.
+  const sourceFromIr = opts.ir.entry?.source;
+  const engineFromSource = resolveEngineDir(sourceFromIr);
+  const engineFromCwd = !engineFromSource && sourceFromIr && !existsSync(sourceFromIr)
+    ? findEngineDirFromCwd(cwd)
+    : null;
+  const engineDir = engineFromSource ?? engineFromCwd;
+
+  // RED-330: now that engineDir is known, compute the runDir + trace
+  // path and emit. Eagerly mkdir so the tail-side reader sees the dir
+  // already exists. If mkdir fails (FS error, permissions), emit with
+  // a `(not yet created)` suffix so the operator knows where to look
+  // once the underlying issue is fixed.
+  const runsBaseForEmit = engineDir ? join(engineDir, 'runs') : join(cwd, 'runs');
+  const runDirForEmit = join(runsBaseForEmit, runId);
+  const tracePathForEmit = opts.traceOut ?? join(runDirForEmit, 'trace.json');
+  let runDirCreated = false;
+  try {
+    mkdirSync(runDirForEmit, { recursive: true });
+    runDirCreated = true;
+  } catch {
+    // Fall through; emit with suffix.
+  }
+  const emitSuffix = runDirCreated ? '' : ' (not yet created)';
+  process.stderr.write(
+    `[cambium] run ${runId} dir=${runDirForEmit}${emitSuffix} trace=${tracePathForEmit}${emitSuffix}\n`,
+  );
   // Source-anchored Genfile lookup: walk up from `ir.entry.source` first,
   // fall back to cwd. The cwd-only path resolves the wrong workspace's
   // contracts when a Cambium app runs against another Cambium project
@@ -1976,6 +2044,12 @@ export async function runGenFromIr(opts: RunGenFromIrOptions): Promise<RunGenFro
     correctors: appCorrectors,
     logSinks: opts.logSinks,
     firedBy: opts.firedBy,
+    // RED-353: pass the resolved engineDir so runGen doesn't re-detect
+    // from entry.source and miss the cwd fallback we just applied.
+    engineDir: engineDir ?? undefined,
+    // RED-330: pass the same runId we emitted on stderr so the artifact
+    // path the operator saw is the path that gets written.
+    runId,
   });
 
   // RED-287: engine-mode run artifacts go under <engineDir>/runs/ so
