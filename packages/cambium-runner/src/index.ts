@@ -9,7 +9,7 @@
 // Engine mode (RED-220) will pass a sibling `schemas.ts` instead.
 
 export { runGen } from './runner.js';
-export type { RunGenOptions, RunGenResult } from './runner.js';
+export type { IR, RunGenOptions, RunGenResult } from './runner.js';
 
 // RED-306: CLI-equivalent in-process entry point. Wraps schema
 // discovery + runGen + artifact writes. The `cambium` CLI imports this

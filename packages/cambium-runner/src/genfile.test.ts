@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  findGenfileDir,
   resolveGenfileContracts,
   loadContractsFromGenfile,
 } from './genfile.js';
@@ -129,6 +130,78 @@ describe('resolveGenfileContracts (RED-274)', () => {
   it('treats an empty contracts list as no declaration', () => {
     writeFileSync(join(tmp, 'Genfile.toml'), '[types]\ncontracts = []\n');
     expect(resolveGenfileContracts(tmp)).toBeNull();
+  });
+});
+
+describe('findGenfileDir (source-anchored Genfile lookup)', () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'cambium-genfile-find-'));
+  });
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('returns null when sourcePath is undefined or null', () => {
+    expect(findGenfileDir(undefined)).toBeNull();
+    expect(findGenfileDir(null)).toBeNull();
+    expect(findGenfileDir('')).toBeNull();
+  });
+
+  it('finds Genfile.toml in the same directory as the gen file', () => {
+    writeFileSync(join(tmp, 'Genfile.toml'), '[package]\nname = "x"\n');
+    const gen = join(tmp, 'foo.cmb.rb');
+    writeFileSync(gen, '# gen\n');
+    expect(findGenfileDir(gen)).toBe(tmp);
+  });
+
+  it('walks up multiple levels to find Genfile.toml', () => {
+    // tmp/ contains the Genfile; gen lives at tmp/app/gens/foo.cmb.rb
+    mkdirSync(join(tmp, 'app', 'gens'), { recursive: true });
+    writeFileSync(join(tmp, 'Genfile.toml'), '[package]\nname = "x"\n');
+    const gen = join(tmp, 'app', 'gens', 'foo.cmb.rb');
+    writeFileSync(gen, '# gen\n');
+    expect(findGenfileDir(gen)).toBe(tmp);
+  });
+
+  it('returns the nearest Genfile.toml when multiple ancestors have one', () => {
+    // tmp/Genfile.toml AND tmp/inner/Genfile.toml both exist; the inner
+    // one is nearer to the gen and must win.
+    mkdirSync(join(tmp, 'inner', 'app', 'gens'), { recursive: true });
+    writeFileSync(join(tmp, 'Genfile.toml'), '[package]\nname = "outer"\n');
+    writeFileSync(join(tmp, 'inner', 'Genfile.toml'), '[package]\nname = "inner"\n');
+    const gen = join(tmp, 'inner', 'app', 'gens', 'foo.cmb.rb');
+    writeFileSync(gen, '# gen\n');
+    expect(findGenfileDir(gen)).toBe(join(tmp, 'inner'));
+  });
+
+  it('returns null when no ancestor has a Genfile.toml (bottom-out)', () => {
+    // tmp has no Genfile and the walk-up bottoms out at the FS root
+    // without finding one. The function returns null rather than
+    // hanging or throwing.
+    mkdirSync(join(tmp, 'a', 'b'), { recursive: true });
+    const gen = join(tmp, 'a', 'b', 'foo.cmb.rb');
+    writeFileSync(gen, '# gen\n');
+    // The walk-up may find a Genfile.toml elsewhere in the host's FS
+    // hierarchy (developer machines often have one near the cambium
+    // checkout). This test only asserts that the function returns
+    // something other than `tmp` or any of its descendants — i.e., it
+    // didn't fabricate a hit.
+    const result = findGenfileDir(gen);
+    if (result !== null) {
+      expect(result.startsWith(tmp)).toBe(false);
+    }
+  });
+
+  it('accepts a non-existent source path (walks up its dirname anyway)', () => {
+    // The gen file itself does not need to exist — the walk anchors on
+    // the dirname. This matches resolveEngineDir's stance and is useful
+    // when callers pass a path from an IR compiled elsewhere.
+    mkdirSync(join(tmp, 'app', 'gens'), { recursive: true });
+    writeFileSync(join(tmp, 'Genfile.toml'), '[package]\nname = "x"\n');
+    const ghostGen = join(tmp, 'app', 'gens', 'never-written.cmb.rb');
+    expect(findGenfileDir(ghostGen)).toBe(tmp);
   });
 });
 
