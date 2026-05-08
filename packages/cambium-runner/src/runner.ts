@@ -45,7 +45,7 @@ import {
   invokeRetroAgent,
   applyRetroWrites,
 } from './memory/retro-agent.js';
-import { resolveGenfileContracts, loadContractsFromGenfile } from './genfile.js';
+import { findGenfileDir, resolveGenfileContracts, loadContractsFromGenfile } from './genfile.js';
 import { loadAppCorrectors } from './correctors/app-loader.js';
 import { builtinCorrectors, _getLegacyAppCorrectors } from './correctors/index.js';
 import type { CorrectorFn } from './correctors/types.js';
@@ -653,10 +653,11 @@ export interface RunGenOptions {
   ir: IR;
   /** Schemas keyed by `$id` — must contain `ir.returnSchemaId`. App-mode
    *  callers: the CLI resolves this from the app's Genfile.toml
-   *  `[types].contracts` list (RED-274), or falls back to
-   *  `packages/cambium/src/contracts.ts` relative to cwd when no
-   *  Genfile.toml is present. Engine-mode callers pass their sibling
-   *  `schemas.ts` module directly. */
+   *  `[types].contracts` list (RED-274) — searching first by walking up
+   *  from `ir.entry.source` for the nearest `Genfile.toml`, then falling
+   *  back to cwd, then to `packages/cambium/src/contracts.ts` relative
+   *  to cwd. Engine-mode callers pass their sibling `schemas.ts` module
+   *  directly. */
   schemas: Record<string, any>;
   /** Force the deterministic mock generator instead of a live LLM.
    *
@@ -1929,7 +1930,14 @@ export async function runGenFromIr(opts: RunGenFromIrOptions): Promise<RunGenFro
   // engine gen always sources its own schemas, even if cwd happens
   // to contain a Genfile.
   const engineDir = resolveEngineDir(opts.ir.entry?.source);
-  const genfile = resolveGenfileContracts(cwd);
+  // Source-anchored Genfile lookup: walk up from `ir.entry.source` first,
+  // fall back to cwd. The cwd-only path resolves the wrong workspace's
+  // contracts when a Cambium app runs against another Cambium project
+  // (host running a downstream tool against another project; container
+  // with a mismatched cwd). The engine-mode lookup right above already
+  // anchors on `entry.source`; this matches that stance.
+  const genfileDir = findGenfileDir(opts.ir.entry?.source) ?? cwd;
+  const genfile = resolveGenfileContracts(genfileDir);
   let appCorrectors: Record<string, CorrectorFn> | undefined;
   if (engineDir) {
     const schemasFile = join(engineDir, 'schemas.ts');
