@@ -46,8 +46,13 @@ export function validateScheduleId(id: string, source: string): void {
  *  segment. Enforces both the character set (blocking path traversal,
  *  whitespace, NULs) and a max length so pathological inputs can't blow up
  *  OS path limits with a confusing error.
+ *
+ *  Exported (RED-330 follow-up): `runId` from RunGenOptions reuses this
+ *  guard since the value joins into `runs/<runId>/...` for the eager
+ *  mkdir + stderr emit. The auto-generated form (`run_<UTC>_<rand>`)
+ *  trivially passes the pattern, so legitimate callers are unaffected.
  */
-function validateSafeSegment(name: string, value: string, source: string): void {
+export function validateSafeSegment(name: string, value: string, source: string): void {
   if (value.length > MAX_VALUE_LEN) {
     throw new Error(
       `${source} ${name}=<value> exceeds ${MAX_VALUE_LEN} characters (got ${value.length}). ` +

@@ -204,4 +204,60 @@ describe('engine mode — end-to-end (RED-287)', () => {
     expect(correctorsRan).toContain('e2e_corr');
   }, 30_000);
 
+  // ── RED-353: cross-env fallback ─────────────────────────────────────
+  it('discovers the engine via cwd-fallback when ir.entry.source is unreachable', async () => {
+    // Simulates the Docker / CI / peer-machine case: an IR was compiled
+    // on a host whose absolute path doesn't exist on the executing
+    // machine. The runner falls back to walking up from cwd to find
+    // the engine sentinel, so the engine schemas + tools + correctors
+    // still resolve. Operator contract: cwd at run time is the engine
+    // dir or an ancestor of it.
+    const engineDir = join(scratch, 'cross_env_engine');
+    setupEngine(engineDir);
+
+    // setupEngine doesn't write the fixture — write it before compile
+    // so Ruby's `File.read(arg_path)` doesn't fail.
+    writeFileSync(join(engineDir, 'fixture.txt'), 'hello world\n');
+    // Compile via Ruby to get a real IR for this engine, then tamper
+    // entry.source to a path that does NOT exist on disk — the same
+    // shape as a host-absolute path that doesn't resolve in a container.
+    const ruby = spawnSync(
+      'ruby',
+      [
+        join(REPO_ROOT, 'ruby', 'cambium', 'compile.rb'),
+        join(engineDir, 'e2e_gen.cmb.rb'),
+        '--method', 'analyze',
+        '--arg', join(engineDir, 'fixture.txt'),
+      ],
+      { cwd: REPO_ROOT, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 },
+    );
+    expect(ruby.status, `compile failed: ${ruby.stderr}`).toBe(0);
+    const ir = JSON.parse(ruby.stdout);
+
+    // Tamper entry.source — simulate the cross-env case where the
+    // host-absolute path does not exist at run time.
+    ir.entry.source = '/nonexistent/host/path/e2e_gen.cmb.rb';
+
+    // runGenFromIr is the in-process equivalent of `cambium run`. Pass
+    // cwd=engineDir so the cwd-fallback walks up to find the sentinel
+    // immediately. Mock mode skips the live LLM. Import from src/ rather
+    // than the published dist/ so the test reflects current source.
+    const runner = await import('../../cambium-runner/src/index.js');
+    process.env.CAMBIUM_ALLOW_MOCK = '1';
+    try {
+      const result = await runner.runGenFromIr({
+        ir,
+        cwd: engineDir,
+        mock: true,
+      });
+      expect(result.ok, `runGenFromIr failed: ${result.errorMessage}`).toBe(true);
+      // Run artifacts land under <engineDir>/runs/, proving engine mode
+      // was detected via the cwd-fallback (app mode would write under cwd).
+      const runDir = result.runDir;
+      expect(runDir.startsWith(join(engineDir, 'runs'))).toBe(true);
+    } finally {
+      delete process.env.CAMBIUM_ALLOW_MOCK;
+    }
+  }, 30_000);
+
 });

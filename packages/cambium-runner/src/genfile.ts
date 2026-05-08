@@ -15,9 +15,11 @@
 // non-string entries are rejected with a clear error naming the Genfile.
 
 import { readFileSync, existsSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parse as parseToml } from 'smol-toml';
+
+const GENFILE_NAME = 'Genfile.toml';
 
 export interface GenfileResolution {
   /** Absolute path to the directory containing the Genfile.toml. */
@@ -26,6 +28,37 @@ export interface GenfileResolution {
   contractsPaths: string[];
   /** Absolute path to the Genfile.toml itself (for error messages). */
   genfilePath: string;
+}
+
+/**
+ * Walk up from a gen file's directory looking for the nearest `Genfile.toml`.
+ * Returns the directory containing it, or `null` if none is found up to the
+ * filesystem root.
+ *
+ * This anchors contracts resolution to the gen's package rather than to
+ * `process.cwd()`. When a Cambium app runs from a cwd that happens to be a
+ * different Cambium workspace (host running a downstream tool against another
+ * project; container with a mismatched cwd), cwd-based lookup finds the wrong
+ * `Genfile.toml`. The gen file's source path is the source of truth — same
+ * stance as `resolveEngineDir` (RED-287) and `ModelAliases.search_candidates`
+ * (RED-237).
+ *
+ * Path-traversal: only `existsSync` of a fixed-name file is performed at
+ * each level — no user-controlled path segments are interpolated. Mirrors
+ * `resolveEngineDir`'s shape.
+ *
+ * @param sourcePath Absolute or relative path to a gen file (typically
+ *                   `ir.entry.source`).
+ */
+export function findGenfileDir(sourcePath: string | undefined | null): string | null {
+  if (!sourcePath) return null;
+  let dir = dirname(resolve(sourcePath));
+  while (true) {
+    if (existsSync(join(dir, GENFILE_NAME))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null; // filesystem root
+    dir = parent;
+  }
 }
 
 /**
@@ -45,7 +78,7 @@ export interface GenfileResolution {
  *   - a declared contracts file does not exist on disk
  */
 export function resolveGenfileContracts(cwd: string): GenfileResolution | null {
-  const genfilePath = join(cwd, 'Genfile.toml');
+  const genfilePath = join(cwd, GENFILE_NAME);
   if (!existsSync(genfilePath)) return null;
 
   const text = readFileSync(genfilePath, 'utf8');

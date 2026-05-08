@@ -4,6 +4,133 @@ All notable changes to Cambium are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Cambium adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] — 2026-05-07
+
+Patch release. Closes the cross-environment debugging story for downstream
+adopters running Cambium in containers, CI, and across machines. Five
+small, complementary changes: two fixes to path resolution, one
+operator-facing diagnostic, one DX export, and one security guard caught
+during the security review of the diagnostic.
+
+### Fixed
+
+- **`Genfile.toml [types].contracts` is now resolved relative to the
+  gen's package, not the runner's cwd.** Pre-0.3.3, `runGenFromIr`
+  walked up from `process.cwd()` looking for `Genfile.toml`. When a
+  Cambium app ran with cwd inside a *different* Cambium workspace
+  (host running a downstream tool against another project; container
+  with a mismatched cwd), it loaded the wrong workspace's contracts —
+  resolving `returnSchemaId` against unrelated schemas, with confusing
+  "schema not found" errors. The Genfile lookup now walks up from
+  `ir.entry.source` first (the gen file is the source of truth), with
+  cwd as a fallback. Mirrors the engine-mode (RED-287) and
+  ModelAliases (RED-237) stance — the gen's package is authoritative,
+  not the host's cwd. New `findGenfileDir(sourcePath)` in
+  `packages/cambium-runner/src/genfile.ts`.
+- **Engine detection has a cwd-fallback for cross-env IRs (RED-353).**
+  When `ir.entry.source` is an absolute host path that doesn't exist
+  at run time (canonical case: IR compiled on the host with
+  `/Users/Steve/...` baked in by automated tooling, run in a container
+  with a different filesystem layout), `resolveEngineDir(entry.source)`
+  returns null and the runner would silently fall through to app
+  mode — misrouting engine schema loading and producing a confusing
+  "schema not found" error. New `findEngineDirFromCwd(cwd)` in
+  `engine-root.ts` is the fallback: walk up from cwd looking for the
+  same `cambium.engine.json` sentinel. `runGenFromIr` invokes it only
+  when source-based detection fails AND `entry.source` is unreachable
+  on disk — source-anchored detection still wins when the path
+  exists, so the explicit "engine discovery follows source not cwd"
+  property of `engine_mode_e2e` (run-from-anywhere) is preserved
+  verbatim. Operator contract: at run time, cwd is the engine dir or
+  an ancestor of it. Resolved `engineDir` is also passed explicitly
+  to `runGen` so the inner re-detection doesn't undo the cwd
+  resolution.
+
+### Added
+
+- **`[cambium] run <id> dir=<abs> trace=<abs>` emitted to stderr at
+  run start (RED-330).** The runner used to print the trace path
+  *after* the run completed — a run that aborted before completion
+  (early validation failure, OOM, killed mid-call) left the operator
+  with stderr only and no audit trail. `runGenFromIr` now emits the
+  run dir and trace path before any heavy work (memory planning,
+  document extraction, schema validation, LLM calls). Every exit
+  path leaves a discoverable artifact location on stderr; downstream
+  tooling (loop drivers, CI scripts) can grep `[cambium] run` to
+  find traces without scanning the FS. Format is single-line
+  key=value so it stays parseable. Eager mkdir of the run dir; if
+  mkdir fails (FS error, permissions), the line carries a
+  `(not yet created)` suffix.
+- **`IR` type re-exported from `@redwood-labs/cambium-runner` (RED-354).**
+  Consumers can now write `import type { IR } from '@redwood-labs/cambium-runner'`
+  instead of `as any`-casting at every call site. The type is still
+  a loose alias (`type IR = any`) — sharpening to a structured
+  interface is a follow-up; the export gives consumers a stable
+  name to import today.
+- **`runId?` optional field on `RunGenOptions`.** Library callers
+  that want the emitted run dir / trace path to match a value they
+  generated can pin the run id. Auto-generated otherwise.
+
+### Security
+
+- **Path-traversal guard on `opts.runId`.** Caught during security
+  review of RED-330: `opts.runId` joins into `runs/<runId>/...` for
+  the eager mkdir + stderr emit and into per-step trace refs without
+  any validation. `node:path.join` silently normalizes `..`, so a
+  hostile library caller passing `runId: '../../etc/foo'` would
+  resolve outside the intended runs root. The runner now reuses the
+  same `SAFE_VALUE_RE` (`/^[a-zA-Z0-9_\-]+$/`, 128-char max) and
+  `validateSafeSegment` helper as `--memory-key` and
+  `CAMBIUM_SESSION_ID` (RED-215 phase 3). Auto-generated runIds
+  (`run_<UTC>_<rand>`) trivially pass; legitimate library callers
+  are unaffected. `validateSafeSegment` was promoted from
+  module-private to exported so the regex lives in one place.
+
+### Changed
+
+- **`@redwood-labs/cambium`** bumps runner dep pin from `0.3.2` →
+  `0.3.3`. No CLI surface changes.
+- `CLAUDE.md` documents two new invariants in the "Code-gen +
+  path-traversal guards" cluster: the source-anchored Genfile picker
+  vs. the validator, and the engine cwd-fallback contract.
+- `docs/GenDSL Docs/N - App Mode vs Engine Mode (RED-220).md` item 6
+  (engine-mode runtime catch-up) documents the cross-env fallback
+  and the operator contract.
+- `packages/cambium-runner/README.md` options block lists the new
+  `runId` field; type re-export list includes `IR`.
+
+### Closes
+
+- **RED-353** — IR compiler emits absolute paths, breaking
+  cross-environment portability. Fixed at the runner side via the
+  cwd-fallback (deliberate scope: keep the IR shape stable; the
+  in-process "run from anywhere" pattern in engine_mode_e2e
+  required preserving the absolute-path-when-reachable behavior).
+- **RED-330** — Trace path discoverability for early-abort runs.
+- **RED-354** — Runner package doesn't export IR type.
+
+### Upgrade from 0.3.2
+
+```bash
+npm install -g @redwood-labs/cambium@latest
+# or for local project deps:
+npm install @redwood-labs/cambium@latest
+```
+
+No breaking changes for the common case (in-tree gens where cwd is
+the workspace root). Two new invariants worth knowing:
+
+- **Library callers passing `runGen({ runId: '...' })`** must use
+  safe path-segment characters (`/^[a-zA-Z0-9_\-]+$/`, max 128 chars).
+  Auto-generated runIds trivially pass; only callers that synthesize
+  their own runId need to be aware.
+- **Cross-env deployments** (Docker, CI, peer-machine): when running
+  an IR whose `entry.source` doesn't exist on the executing machine,
+  cwd at run time should be the engine dir or workspace root. The
+  cwd-fallback walks up from there to find `cambium.engine.json` or
+  `Genfile.toml`. Same-host runs (cambium run + execute in one
+  process) are unaffected.
+
 ## [0.3.2] — 2026-04-25
 
 Patch release. Six adjacent items bundled together: configurable compound
