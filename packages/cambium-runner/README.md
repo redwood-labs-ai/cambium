@@ -39,6 +39,9 @@ await runGen({
   correctors,        // Record<string, CorrectorFn> — override built-ins or add plugins
   logSinks,          // Record<string, LogSink>   — override built-ins or add plugins
   firedBy,           // 'schedule:<id>[@<iso>]' — when invoked by a cron fire
+  runId,             // optional: pin the run id (host wants the emitted dir/trace path
+                     //           to match a value it generated; auto-generated otherwise).
+                     //           Validated as a safe path segment.
 });
 ```
 
@@ -46,6 +49,7 @@ await runGen({
 
 ```ts
 import type {
+  IR,
   RunGenOptions, RunGenResult,
   CorrectorFn, CorrectorResult, CorrectorIssue,
   ToolContext,

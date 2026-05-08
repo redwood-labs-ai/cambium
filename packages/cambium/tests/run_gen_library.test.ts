@@ -79,6 +79,36 @@ describe('runGen library entry (RED-220 POC follow-up)', () => {
     expect(typed.entry?.class).toBe('LibrarySmokeTest');
   });
 
+  it('rejects a path-traversal runId (RED-330 security guard)', async () => {
+    // opts.runId joins into `runs/<runId>/...` for the eager mkdir +
+    // stderr emit and into per-step trace refs. node:path.join
+    // normalizes `..` silently — a hostile runId like `../../etc/foo`
+    // would resolve outside the intended runs root. The runner reuses
+    // the same SAFE_VALUE_RE guard as --memory-key / CAMBIUM_SESSION_ID
+    // (RED-215 phase 3). Auto-generated runIds trivially pass.
+    await expect(
+      runGen({
+        ir: minimalIr('MockReport') as never,
+        schemas: { MockReport },
+        mock: true,
+        runId: '../../etc/evil',
+      } as RunGenOptions),
+    ).rejects.toThrow(/runId/);
+  });
+
+  it('accepts a normal runId override (auto-generated shape)', async () => {
+    // Belt-and-suspenders: confirm the validator doesn't reject the
+    // auto-generated shape if a caller pins it explicitly.
+    const result = await runGen({
+      ir: minimalIr('MockReport') as never,
+      schemas: { MockReport },
+      mock: true,
+      runId: 'run_20260507_120000_abcdef',
+    } as RunGenOptions);
+    expect(result.ok).toBe(true);
+    expect(result.runId).toBe('run_20260507_120000_abcdef');
+  });
+
   it('runs end-to-end with mock=true and returns a validated RunGenResult', async () => {
     const result = await runGen({
       ir: minimalIr('MockReport') as never,

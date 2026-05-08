@@ -37,7 +37,7 @@ import {
   closeBackends,
   type MemoryPlan,
 } from './memory/runner-integration.js';
-import { parseMemoryKeys, resolveSessionId, validateScheduleId } from './memory/keys.js';
+import { parseMemoryKeys, resolveSessionId, validateScheduleId, validateSafeSegment } from './memory/keys.js';
 import type { SqliteMemoryBackend } from './memory/backend.js';
 import {
   findRetroAgentFile,
@@ -796,6 +796,16 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   const previousMockEnv = process.env.CAMBIUM_ALLOW_MOCK;
   if (mockFlag) process.env.CAMBIUM_ALLOW_MOCK = '1';
 
+  // RED-330 / RED-353 follow-up (security review): a library-caller-supplied
+  // `runId` joins into `runs/<runId>/...` for the eager mkdir + stderr emit
+  // and into per-step trace refs. `node:path.join` normalizes `..` silently,
+  // so a hostile runId like `../../etc/foo` would resolve outside the runs
+  // root. Reuse the same SAFE_VALUE_RE / 128-char guard as `--memory-key`
+  // and `CAMBIUM_SESSION_ID` (RED-215 phase 3). The auto-generated shape
+  // trivially passes; legitimate callers are unaffected.
+  if (optsRunId !== undefined) {
+    validateSafeSegment('runId', optsRunId, 'opts.runId');
+  }
   const runId = optsRunId ?? `run_${nowId()}_${Math.random().toString(16).slice(2, 8)}`;
 
   // ── Parse --fired-by / CAMBIUM_FIRED_BY (RED-305) ───────────────────
