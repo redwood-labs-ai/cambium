@@ -11,7 +11,7 @@
  * be a thrown "Missing --ir" before the test body even runs.
  */
 import { describe, it, expect } from 'vitest';
-import { runGen, type RunGenOptions } from '../../cambium-runner/src/index.js';
+import { runGen, type RunGenOptions, type IR } from '../../cambium-runner/src/index.js';
 import { Type } from '@sinclair/typebox';
 
 const MockReport = Type.Object(
@@ -66,6 +66,17 @@ describe('runGen library entry (RED-220 POC follow-up)', () => {
     // not throw is the actual assertion. This `it` exists so the
     // invariant is named in the test report.
     expect(typeof runGen).toBe('function');
+  });
+
+  it('exports IR as a type (RED-354)', () => {
+    // Use the imported type to confirm it resolves and accepts the
+    // shape the Ruby compiler emits. This is a compile-time check —
+    // the runtime body of the `it` only proves the bound name exists
+    // and the assignment typechecks. If `IR` weren't exported from
+    // the runner, the import at the top of this file would fail to
+    // type-check, and TypeScript would surface that during test build.
+    const typed: IR = minimalIr('MockReport');
+    expect(typed.entry?.class).toBe('LibrarySmokeTest');
   });
 
   it('runs end-to-end with mock=true and returns a validated RunGenResult', async () => {
