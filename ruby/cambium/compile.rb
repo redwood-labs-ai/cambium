@@ -36,10 +36,18 @@ while (a = ARGV.shift)
     usage("Unknown arg: #{a}")
   end
 end
-usage('Missing --method') unless method
-# --arg is optional (RED-244): the engine-mode `cambium compile` flow
-# produces an IR that the runtime caller will inject input into via the
-# typed wrapper. When omitted we pass an empty string to the gen method.
+# RED-360: --method became optional. When omitted, compile.rb enumerates
+# every public user method on the loaded GenModel and emits a JSON map
+# `{ method_name => ir }`. This is the shape `cambium serve` consumes at
+# boot to populate its IR cache (one Ruby invocation per gen vs. N).
+#
+# When --method IS passed: behavior unchanged — emit a single IR. Engine-
+# mode build steps (`cambium compile <file> --method X`) keep working
+# bit-for-bit identically.
+#
+# --arg is still optional (RED-244): when omitted, an empty string is
+# supplied to each gen method (the runtime caller is expected to override
+# ir.context.* fields before execution).
 
 # Allow referencing undeclared constants (like TypeBox schema IDs) by returning a ConstRef.
 orig_module_const_missing = Module.instance_method(:const_missing)
@@ -64,14 +72,41 @@ arg = if arg_path.nil?
         File.read(arg_path)
       end
 
-builder = Cambium::PlanBuilder.new
-Cambium::CompilerState.current_builder = builder
+# Determine which methods to compile. With --method, just that one.
+# Without, enumerate every public user method on the GenModel — the
+# all-methods compile path is what `cambium serve` boot uses.
+methods_to_compile =
+  if method
+    [method]
+  else
+    user_methods = (klass.public_instance_methods(false) - Object.instance_methods).map(&:to_s).sort
+    if user_methods.empty?
+      raise Cambium::CompileError,
+            "No public methods found on #{klass.name} in #{file}. " \
+            "Either define a method or pass --method <name> explicitly."
+    end
+    user_methods
+  end
 
+# Compile each requested method into its own IR. Per-method state is just
+# the PlanBuilder (and the resulting `steps`); per-class state is computed
+# once below.
+per_method_steps = {}
 begin
-  inst = klass.new
-  inst.public_send(method, arg)
+  methods_to_compile.each do |m|
+    builder = Cambium::PlanBuilder.new
+    Cambium::CompilerState.current_builder = builder
+    begin
+      inst = klass.new
+      inst.public_send(m, arg)
+    ensure
+      Cambium::CompilerState.current_builder = nil
+    end
+    per_method_steps[m] = builder.steps
+  end
 ensure
-  Cambium::CompilerState.current_builder = nil
+  # Restore const_missing once, after all methods compile (or on exception).
+  # Per-method ensure blocks above only restore current_builder.
   Module.define_method(:const_missing, orig_module_const_missing)
 end
 
@@ -319,50 +354,66 @@ resolved_memory.each do |m|
   end
 end
 
-ir = {
-  'version' => '0.2',
-  'entry' => {
-    'class' => klass.name,
-    'method' => method,
-    'source' => file
-  },
-  'model' => {
-    'id' => defs[:model],
-    'temperature' => defs[:temperature],
-    'max_tokens' => defs[:max_tokens],
-    # RED-325 Part 3: per-model options (e.g. disable_thinking).
-    # Optional; emitted only when the gen sets at least one option.
-    'options' => (defs[:model_options] && !defs[:model_options].empty? ? defs[:model_options] : nil)
-  }.compact,
-  'system' => system_prompt,
-  'mode' => defs[:mode],
-  'policies' => {
-    'tools_allowed' => (defs[:tools] || []),
-    'correctors' => (defs[:correctors] || []),
-    'constraints' => (defs[:constraints] || {}),
-    'grounding' => defs[:grounding],
-    'security' => Cambium.flatten_slot_state(defs[:security]),
-    'budget'   => Cambium.flatten_slot_state(defs[:budget]),
-    'memory'           => resolved_memory,
-    'memory_pools'     => resolved_pools,
-    'memory_write_via' => defs[:write_memory_via],
-    'log'              => (defs[:log] || []),
-    'log_profiles'     => (defs[:log_profiles] || []),
-    'schedules'        => resolved_schedules
-  },
-  'reads_trace_of' => defs[:reads_trace_of],
-  'returnSchemaId' => defs[:returnSchema],
-  # RED-276: use the `grounded_in :name` source as the context key when
-  # the gen declares grounding, else fall back to 'document' for
-  # back-compat with analyst-style gens. Keeps the grounding validator's
-  # `context[source]` lookup self-consistent with what the gen declared.
-  'context' => {
-    (defs[:grounding]&.fetch('source', nil) || 'document') => arg
-  },
-  'enrichments' => (defs[:enrichments] || []),
-  'signals' => (defs[:signals] || []),
-  'triggers' => (defs[:triggers] || []),
-  'steps' => builder.steps
-}
+# Build an IR per compiled method. Per-class state (model, system,
+# policies, memory, etc.) is shared; per-method state is `entry.method`
+# and `steps` (the PlanBuilder output captured per-method above).
+build_ir = lambda do |method_name, steps|
+  {
+    'version' => '0.2',
+    'entry' => {
+      'class' => klass.name,
+      'method' => method_name,
+      'source' => file
+    },
+    'model' => {
+      'id' => defs[:model],
+      'temperature' => defs[:temperature],
+      'max_tokens' => defs[:max_tokens],
+      # RED-325 Part 3: per-model options (e.g. disable_thinking).
+      # Optional; emitted only when the gen sets at least one option.
+      'options' => (defs[:model_options] && !defs[:model_options].empty? ? defs[:model_options] : nil)
+    }.compact,
+    'system' => system_prompt,
+    'mode' => defs[:mode],
+    'policies' => {
+      'tools_allowed' => (defs[:tools] || []),
+      'correctors' => (defs[:correctors] || []),
+      'constraints' => (defs[:constraints] || {}),
+      'grounding' => defs[:grounding],
+      'security' => Cambium.flatten_slot_state(defs[:security]),
+      'budget'   => Cambium.flatten_slot_state(defs[:budget]),
+      'memory'           => resolved_memory,
+      'memory_pools'     => resolved_pools,
+      'memory_write_via' => defs[:write_memory_via],
+      'log'              => (defs[:log] || []),
+      'log_profiles'     => (defs[:log_profiles] || []),
+      'schedules'        => resolved_schedules
+    },
+    'reads_trace_of' => defs[:reads_trace_of],
+    'returnSchemaId' => defs[:returnSchema],
+    # RED-276: use the `grounded_in :name` source as the context key when
+    # the gen declares grounding, else fall back to 'document' for
+    # back-compat with analyst-style gens. Keeps the grounding validator's
+    # `context[source]` lookup self-consistent with what the gen declared.
+    'context' => {
+      (defs[:grounding]&.fetch('source', nil) || 'document') => arg
+    },
+    'enrichments' => (defs[:enrichments] || []),
+    'signals' => (defs[:signals] || []),
+    'triggers' => (defs[:triggers] || []),
+    'steps' => steps
+  }
+end
 
-puts JSON.pretty_generate(ir)
+# Output shape:
+#   --method passed → single IR (back-compat with `cambium run` and
+#                                engine-mode `cambium compile --method X`).
+#   bare (no --method) → JSON map { method_name => ir, ... } for every
+#                        compiled user method (RED-360 serve-mode boot).
+if method
+  puts JSON.pretty_generate(build_ir.call(method, per_method_steps[method]))
+else
+  irs = {}
+  methods_to_compile.each { |m| irs[m] = build_ir.call(m, per_method_steps[m]) }
+  puts JSON.pretty_generate(irs)
+end
