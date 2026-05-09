@@ -57,7 +57,8 @@ Look at the trace (`runs/<run_id>/trace.json`) and help them tune the agent — 
 
 ```bash
 cambium run <file.cmb.rb> --method <method> --arg <path>   # compile + execute
-cambium compile <file.cmb.rb> --method <method> [-o <ir.json>] # emit IR JSON without executing (engine-mode build step, RED-244)
+cambium compile <file.cmb.rb> [--method <method>] [-o <ir.json>] # emit IR JSON without executing. Without --method, emits a {method → IR} map for every public method (RED-244, RED-360).
+cambium serve --workspace <path> --bind <uri>              # long-lived HTTP server hosting every gen in the workspace (RED-360)
 cambium new engine|agent|tool|action|schema|system|corrector|policy|memory_pool <Name>   # scaffold (deterministic)
 cambium new config models|memory_policy                        # scaffold app/config/<form>.rb (RED-237 / RED-239)
 cambium new engine <Name>                                    # new engine folder under ./cambium/ (RED-246)
