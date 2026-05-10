@@ -16,7 +16,12 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseBind } from './bind.js';
-import { runServe, type RunServeHandle } from './serve.js';
+import {
+  classifyThrownError,
+  runServe,
+  type RunGenFromIrFn,
+  type RunServeHandle,
+} from './serve.js';
 
 // Fixture gen + permissive contracts. The runner imports contracts.ts
 // at run time; we keep it as a plain object literal (no @sinclair/typebox
@@ -232,6 +237,300 @@ TestGen = "app/gens/test_gen.cmb.rb"
     ]);
     expect(runRes.status).toBe(200);
     expect(healthRes.status).toBe(200);
+  });
+});
+
+describe('classifyThrownError (RED-360)', () => {
+  it('classifies a missing-tool error as tool_dispatch_failed', () => {
+    const err = new Error(
+      'Tool "missing_tool" declared in policies.tools_allowed but not found in registry. Available: calculator',
+    );
+    expect(classifyThrownError(err)).toBe('tool_dispatch_failed');
+  });
+
+  it('classifies a missing-action error as tool_dispatch_failed', () => {
+    const err = new Error('Trigger action "ghost" not found in ActionRegistry. Available: [send_email]');
+    expect(classifyThrownError(err)).toBe('tool_dispatch_failed');
+  });
+
+  it('classifies a security-violation error as tool_dispatch_failed', () => {
+    const err = new Error('3 security violation(s). See trace for details.');
+    expect(classifyThrownError(err)).toBe('tool_dispatch_failed');
+  });
+
+  it('falls through to runner_error for anything else', () => {
+    expect(classifyThrownError(new Error('something else exploded'))).toBe('runner_error');
+    expect(classifyThrownError('bare string')).toBe('runner_error');
+    expect(classifyThrownError(undefined)).toBe('runner_error');
+  });
+
+  it('only matches at message start (no false positives mid-string)', () => {
+    const err = new Error(
+      'Some prefix — Tool "foo" declared in policies.tools_allowed but not found in registry',
+    );
+    // The runner emits these messages from the start of the string;
+    // a downstream wrapper that prepends context wouldn't match. That's
+    // intentional — better to fall through to runner_error than to
+    // misclassify.
+    expect(classifyThrownError(err)).toBe('runner_error');
+  });
+});
+
+// Schema that the mock provider's `{summary, metrics, key_facts}` payload
+// won't satisfy (mock has none of these required fields). Used to exercise
+// the validation_failed path end-to-end. We re-use the `AnalysisReport`
+// schema name because compile.rb's compile-time schema check searches
+// for the symbol in the in-tree contracts.ts (cwd-relative fallback),
+// where AnalysisReport exists. The runtime loads our LOCAL strict
+// version via [types].contracts in the tmp Genfile.
+const STRICT_FIXTURE_GEN = `
+class StrictGen < GenModel
+  model "ollama:test"
+  system "test"
+  returns AnalysisReport
+
+  def analyze(doc)
+    generate "do" do
+      with context: doc
+      returns AnalysisReport
+    end
+  end
+end
+`;
+
+const STRICT_FIXTURE_CONTRACTS = `
+export const AnalysisReport = {
+  $id: 'AnalysisReport',
+  type: 'object',
+  required: ['name', 'role'],
+  properties: {
+    name: { type: 'string' },
+    role: { type: 'string' },
+  },
+  additionalProperties: false,
+};
+`;
+
+describe('runServe — validation_failed e2e (RED-360)', () => {
+  let tmp: string;
+  let handle: RunServeHandle;
+  let baseUrl: string;
+  let prevMock: string | undefined;
+
+  beforeAll(() => {
+    prevMock = process.env.CAMBIUM_ALLOW_MOCK;
+    process.env.CAMBIUM_ALLOW_MOCK = '1';
+  });
+  afterAll(() => {
+    if (prevMock === undefined) delete process.env.CAMBIUM_ALLOW_MOCK;
+    else process.env.CAMBIUM_ALLOW_MOCK = prevMock;
+  });
+
+  beforeEach(async () => {
+    tmp = mkdtempSync(join(tmpdir(), 'cambium-serve-validation-'));
+    mkdirSync(join(tmp, 'app/gens'), { recursive: true });
+    mkdirSync(join(tmp, 'src'), { recursive: true });
+    writeFileSync(join(tmp, 'app/gens/strict_gen.cmb.rb'), STRICT_FIXTURE_GEN);
+    writeFileSync(join(tmp, 'src/contracts.ts'), STRICT_FIXTURE_CONTRACTS);
+    writeFileSync(
+      join(tmp, 'Genfile.toml'),
+      `[types]\ncontracts = ["src/contracts.ts"]\n\n[exports.gens]\nStrictGen = "app/gens/strict_gen.cmb.rb"\n`,
+    );
+    handle = runServe({ workspaceDir: tmp, bind: parseBind('tcp://127.0.0.1:0') });
+    const addr = await handle.ready;
+    if (addr.kind !== 'tcp') throw new Error('expected tcp');
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+  });
+  afterEach(async () => {
+    await handle.close();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('returns validation_failed when the model output cannot satisfy the schema', async () => {
+    const res = await fetch(`${baseUrl}/v1/run`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ gen: 'StrictGen', method: 'analyze', input: 'x' }),
+    });
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error.kind).toBe('validation_failed');
+    // Run id is still surfaced even on failure so the operator can find
+    // the trace.
+    expect(typeof body.run_id).toBe('string');
+    expect(body.run_id.length).toBeGreaterThan(0);
+  });
+});
+
+// For the budget / runner-error / tool-dispatch paths we need to
+// fabricate the runner's outcome — those failure modes are awkward to
+// trigger end-to-end with a mock provider. The runGenFromIrFn injection
+// lets us assert the wire mapping without setting up a real budget
+// exhaustion or registry mismatch.
+describe('runServe — error mapping via runGenFromIrFn injection (RED-360)', () => {
+  let tmp: string;
+  // Re-use the in-tree-known schema name `AnalysisReport` so compile.rb's
+  // compile-time schema check finds it; the runner loads the local
+  // permissive version via [types].contracts.
+  const fixtureGen = `
+class TinyGen < GenModel
+  model "ollama:test"
+  system "test"
+  returns AnalysisReport
+
+  def analyze(doc)
+    generate "ok" do
+      with context: doc
+      returns AnalysisReport
+    end
+  end
+end
+`;
+  const fixtureContracts = `
+export const AnalysisReport = { $id: 'AnalysisReport', type: 'object', additionalProperties: true };
+`;
+
+  function setupWorkspace(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'cambium-serve-mapping-'));
+    mkdirSync(join(dir, 'app/gens'), { recursive: true });
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'app/gens/tiny.cmb.rb'), fixtureGen);
+    writeFileSync(join(dir, 'src/contracts.ts'), fixtureContracts);
+    writeFileSync(
+      join(dir, 'Genfile.toml'),
+      `[types]\ncontracts = ["src/contracts.ts"]\n\n[exports.gens]\nTinyGen = "app/gens/tiny.cmb.rb"\n`,
+    );
+    return dir;
+  }
+
+  beforeEach(() => {
+    tmp = setupWorkspace();
+  });
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  async function bootWith(runGenFromIrFn: RunGenFromIrFn): Promise<{
+    handle: RunServeHandle;
+    baseUrl: string;
+  }> {
+    const handle = runServe({
+      workspaceDir: tmp,
+      bind: parseBind('tcp://127.0.0.1:0'),
+      runGenFromIrFn,
+    });
+    const addr = await handle.ready;
+    if (addr.kind !== 'tcp') throw new Error('expected tcp');
+    return { handle, baseUrl: `http://127.0.0.1:${addr.port}` };
+  }
+
+  it('surfaces failureKind=budget as wire kind budget_exhausted', async () => {
+    const fakeRun: RunGenFromIrFn = async () =>
+      ({
+        ok: false,
+        output: null,
+        trace: { steps: [] },
+        runId: 'run_fake_budget',
+        schemaId: 'Anything',
+        ir: {} as any,
+        errorMessage: 'Budget exceeded: per_run.max_tokens (1) exceeded by 250',
+        failureKind: 'budget',
+        tracePath: '/tmp/fake/trace.json',
+        outputPath: '/tmp/fake/output.json',
+        irPath: '/tmp/fake/ir.json',
+        runDir: '/tmp/fake',
+      }) as any;
+    const { handle, baseUrl } = await bootWith(fakeRun);
+    try {
+      const res = await fetch(`${baseUrl}/v1/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gen: 'TinyGen', method: 'analyze', input: 'x' }),
+      });
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(body.ok).toBe(false);
+      expect(body.error.kind).toBe('budget_exhausted');
+      expect(body.error.message).toMatch(/Budget exceeded/);
+      expect(body.run_id).toBe('run_fake_budget');
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('surfaces a thrown missing-tool error as wire kind tool_dispatch_failed (HTTP 400)', async () => {
+    const fakeRun: RunGenFromIrFn = async () => {
+      throw new Error(
+        'Tool "research_x" declared in policies.tools_allowed but not found in registry. Available: calculator',
+      );
+    };
+    const { handle, baseUrl } = await bootWith(fakeRun);
+    try {
+      const res = await fetch(`${baseUrl}/v1/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gen: 'TinyGen', method: 'analyze', input: 'x' }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error.kind).toBe('tool_dispatch_failed');
+      expect(body.error.message).toMatch(/research_x/);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('surfaces an unrelated thrown error as wire kind runner_error (HTTP 500)', async () => {
+    const fakeRun: RunGenFromIrFn = async () => {
+      throw new Error('something unexpected exploded inside the runner');
+    };
+    const { handle, baseUrl } = await bootWith(fakeRun);
+    try {
+      const res = await fetch(`${baseUrl}/v1/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gen: 'TinyGen', method: 'analyze', input: 'x' }),
+      });
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(body.error.kind).toBe('runner_error');
+      expect(body.error.message).toMatch(/something unexpected exploded/);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('falls through to runner_error when ok:false has no failureKind (e.g. document extraction failure)', async () => {
+    const fakeRun: RunGenFromIrFn = async () =>
+      ({
+        ok: false,
+        output: null,
+        trace: { steps: [] },
+        runId: 'run_doc_fail',
+        schemaId: 'Anything',
+        ir: {} as any,
+        errorMessage: 'Document extraction failed: pdfjs out of memory',
+        // failureKind intentionally absent
+        tracePath: '/tmp/fake/trace.json',
+        outputPath: '/tmp/fake/output.json',
+        irPath: '/tmp/fake/ir.json',
+        runDir: '/tmp/fake',
+      }) as any;
+    const { handle, baseUrl } = await bootWith(fakeRun);
+    try {
+      const res = await fetch(`${baseUrl}/v1/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gen: 'TinyGen', method: 'analyze', input: 'x' }),
+      });
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(body.error.kind).toBe('runner_error');
+      expect(body.error.message).toMatch(/Document extraction failed/);
+    } finally {
+      await handle.close();
+    }
   });
 });
 

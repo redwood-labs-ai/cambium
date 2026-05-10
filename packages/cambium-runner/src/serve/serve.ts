@@ -49,10 +49,62 @@ const MAX_BODY_BYTES = 10 * 1024 * 1024;
 const SHUTDOWN_TIMEOUT_MS = 30_000;
 
 /**
+ * Closed v1 enum (RFC § wire format). Adding a new kind is a v2 break;
+ * additive response fields are not. Clients ignore unknown fields.
+ */
+export type ErrorKind =
+  | 'unknown_gen'
+  | 'unknown_method'
+  | 'input_invalid'
+  | 'validation_failed'
+  | 'budget_exhausted'
+  | 'tool_dispatch_failed'
+  | 'runner_error'
+  | 'timeout'
+  | 'overloaded'
+  | 'booting'
+  | 'not_found';
+
+/**
+ * Classify an error thrown synchronously out of `runGenFromIr`.
+ *
+ * The runner's pre-flight checks throw plain `Error` instances with
+ * stable message prefixes when a gen declares capabilities the runtime
+ * can't provide:
+ *   - tool registry mismatch  (runner.ts ~line 1020)
+ *   - action registry mismatch (runner.ts ~line 1027)
+ *   - security violations      (runner.ts ~line 1047)
+ *
+ * Each of these is a configuration failure rather than a runtime mishap,
+ * so we surface them as `tool_dispatch_failed` rather than `runner_error`
+ * — clients can distinguish a misconfigured gen from a model/runtime
+ * blow-up. Anything else falls through to `runner_error`.
+ *
+ * Coupled to the runner's exact error wording. If those strings change,
+ * the integration tests catch it via the e2e suite + serve.test.ts.
+ */
+export function classifyThrownError(err: unknown): ErrorKind {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/^Tool ".+" declared in policies\.tools_allowed but not found in registry/.test(msg)) {
+    return 'tool_dispatch_failed';
+  }
+  if (/^Trigger action ".+" not found in ActionRegistry/.test(msg)) {
+    return 'tool_dispatch_failed';
+  }
+  if (/security violation\(s\)/.test(msg)) {
+    return 'tool_dispatch_failed';
+  }
+  return 'runner_error';
+}
+
+/**
  * Compile a `.cmb.rb` in bare mode and return its method → IR map.
  * Defaults to spawning the in-tree `ruby compile.rb`. Override for tests.
  */
 export type CompileBareFn = (genFilePath: string) => Promise<Record<string, IR>>;
+
+/** Dispatch fn matching `runGenFromIr`'s signature. Injectable for tests. */
+export type RunGenFromIrFn = typeof runGenFromIr;
 
 export interface RunServeOptions {
   /** Path to the workspace containing `Genfile.toml`. */
@@ -61,6 +113,8 @@ export interface RunServeOptions {
   bind: BindTarget;
   /** Override the compile fn (default spawns ruby compile.rb in bare mode). */
   compileBare?: CompileBareFn;
+  /** Override the dispatch fn (default is the imported runGenFromIr). For tests. */
+  runGenFromIrFn?: RunGenFromIrFn;
   /** Override the runtime cwd passed to runGenFromIr. Defaults to workspaceDir. */
   runCwd?: string;
 }
@@ -79,6 +133,7 @@ export interface RunServeHandle {
 
 export function runServe(opts: RunServeOptions): RunServeHandle {
   const compileBare = opts.compileBare ?? defaultCompileBare;
+  const runGenFromIrImpl = opts.runGenFromIrFn ?? runGenFromIr;
   const runCwd = opts.runCwd ?? opts.workspaceDir;
 
   // Per-(gen, method) IR cache populated at boot. Map<gen, Map<method, IR>>.
@@ -226,7 +281,7 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
 
     let result;
     try {
-      result = await runGenFromIr({
+      result = await runGenFromIrImpl({
         ir,
         cwd: runCwd,
         memoryKeys: Array.isArray(body.memory_keys)
@@ -235,9 +290,14 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
         firedBy: typeof body.fired_by === 'string' ? body.fired_by : undefined,
       });
     } catch (err) {
-      await sendJson(res, 500, {
+      // Errors that escape runGenFromIr are pre-flight or unrecoverable.
+      // The runner throws synchronously for unknown tools, missing
+      // actions, and security violations — those map to
+      // `tool_dispatch_failed`. Anything else is a generic runner_error.
+      const kind = classifyThrownError(err);
+      await sendJson(res, kind === 'tool_dispatch_failed' ? 400 : 500, {
         ok: false,
-        error: { kind: 'runner_error', message: errorMessage(err) },
+        error: { kind, message: errorMessage(err) },
       });
       return;
     }
@@ -248,8 +308,18 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
       run_id: result.runId ?? null,
       output: result.output ?? null,
     };
-    if (!result.ok && result.errorMessage) {
-      responseBody.error = { kind: 'runner_error', message: result.errorMessage };
+    if (!result.ok) {
+      // Map runGen's typed `failureKind` (RED-360) to the wire enum.
+      // Other ok:false paths (document extraction, etc.) fall through
+      // as runner_error.
+      const kind: ErrorKind =
+        result.failureKind === 'validation' ? 'validation_failed' :
+        result.failureKind === 'budget'     ? 'budget_exhausted' :
+        'runner_error';
+      responseBody.error = {
+        kind,
+        message: result.errorMessage ?? 'run failed without an explanation',
+      };
     }
     if (includeTrace && result.tracePath) {
       // Trace inline opt-in — read from disk rather than holding the
