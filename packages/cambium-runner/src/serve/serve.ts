@@ -117,6 +117,13 @@ export interface RunServeOptions {
   runGenFromIrFn?: RunGenFromIrFn;
   /** Override the runtime cwd passed to runGenFromIr. Defaults to workspaceDir. */
   runCwd?: string;
+  /**
+   * Cap on concurrent /v1/run dispatches. When the in-flight set is at
+   * the cap, additional /v1/run requests get a 503 + `error.kind=overloaded`
+   * envelope so callers know to back off. Defaults to unlimited. /v1/healthz
+   * is never gated. RED-360 wave 2.
+   */
+  maxInflight?: number;
 }
 
 export type RunServeAddress =
@@ -135,6 +142,12 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
   const compileBare = opts.compileBare ?? defaultCompileBare;
   const runGenFromIrImpl = opts.runGenFromIrFn ?? runGenFromIr;
   const runCwd = opts.runCwd ?? opts.workspaceDir;
+  // 0 or negative would lock the server out entirely — treat those as
+  // "unlimited" rather than "block everything." `Infinity` is the sentinel.
+  const maxInflight =
+    typeof opts.maxInflight === 'number' && opts.maxInflight > 0
+      ? opts.maxInflight
+      : Infinity;
 
   // Per-(gen, method) IR cache populated at boot. Map<gen, Map<method, IR>>.
   const cache = new Map<string, Map<string, IR>>();
@@ -193,6 +206,20 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
     }
 
     if (method === 'POST' && url === `/${SERVE_VERSION}/run`) {
+      // Backpressure: refuse new dispatches once the in-flight cap is
+      // hit. /v1/healthz is intentionally never gated — orchestrators
+      // need to be able to probe a saturated server.
+      if (inflight.size >= maxInflight) {
+        sendJson(res, 503, {
+          ok: false,
+          error: {
+            kind: 'overloaded' as ErrorKind,
+            message: `server is at the in-flight cap (${maxInflight}); retry later`,
+            details: { inflight: inflight.size, max_inflight: maxInflight },
+          },
+        }).catch(() => {});
+        return;
+      }
       const p = handleRun(req, res).catch((err) => {
         // Last-resort guard: any error not caught downstream becomes a
         // generic runner_error envelope. The richer error.kind matrix

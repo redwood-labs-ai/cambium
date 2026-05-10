@@ -23,6 +23,9 @@ Flags:
   --allow-remote       Allow non-loopback tcp:// binds. The runner is
                        unauthenticated in v1; only pass this when the
                        bind address is isolated by the orchestrator.
+  --max-inflight <n>   Cap concurrent /v1/run dispatches. Over-cap
+                       requests get HTTP 503 + error.kind=overloaded.
+                       Defaults to unlimited.
   --help, -h           Show this help.
 
 Examples:
@@ -36,12 +39,21 @@ export async function runServeCli(args) {
   let workspace = '.';
   let bindUri = null;
   let allowRemote = false;
+  let maxInflight; // undefined → unlimited
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === '--workspace') workspace = args[++i];
     else if (a === '--bind') bindUri = args[++i];
     else if (a === '--allow-remote') allowRemote = true;
+    else if (a === '--max-inflight') {
+      const raw = args[++i];
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n <= 0) {
+        usage(`--max-inflight must be a positive integer (got '${raw}').`);
+      }
+      maxInflight = n;
+    }
     else if (a === '--help' || a === '-h') usage();
     else usage(`Unknown flag: ${a}`);
   }
@@ -63,6 +75,7 @@ export async function runServeCli(args) {
   const handle = runServe({
     workspaceDir: resolve(workspace),
     bind,
+    maxInflight,
   });
 
   try {
