@@ -722,6 +722,183 @@ export const AnalysisReport = { $id: 'AnalysisReport', type: 'object', additiona
   });
 });
 
+describe('runServe — runTimeoutMs + timeout error kind (RED-360)', () => {
+  let tmp: string;
+  const fixtureGen = `
+class TinyGen < GenModel
+  model "ollama:test"
+  system "test"
+  returns AnalysisReport
+
+  def analyze(doc)
+    generate "ok" do
+      with context: doc
+      returns AnalysisReport
+    end
+  end
+end
+`;
+  const fixtureContracts = `
+export const AnalysisReport = { $id: 'AnalysisReport', type: 'object', additionalProperties: true };
+`;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'cambium-serve-timeout-'));
+    mkdirSync(join(tmp, 'app/gens'), { recursive: true });
+    mkdirSync(join(tmp, 'src'), { recursive: true });
+    writeFileSync(join(tmp, 'app/gens/tiny.cmb.rb'), fixtureGen);
+    writeFileSync(join(tmp, 'src/contracts.ts'), fixtureContracts);
+    writeFileSync(
+      join(tmp, 'Genfile.toml'),
+      `[types]\ncontracts = ["src/contracts.ts"]\n\n[exports.gens]\nTinyGen = "app/gens/tiny.cmb.rb"\n`,
+    );
+  });
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('returns 504 + timeout when the run exceeds the deadline', async () => {
+    let release!: () => void;
+    const blocker = new Promise<void>((res) => { release = res; });
+    const slowRun: RunGenFromIrFn = async () => {
+      await blocker;
+      return { ok: true, output: {}, trace: { steps: [] }, runId: 'r', schemaId: 'X', ir: {} as any,
+        tracePath: '/x', outputPath: '/x', irPath: '/x', runDir: '/x' } as any;
+    };
+
+    const handle = runServe({
+      workspaceDir: tmp,
+      bind: parseBind('tcp://127.0.0.1:0'),
+      runGenFromIrFn: slowRun,
+      runTimeoutMs: 100,
+    });
+    const addr = await handle.ready;
+    if (addr.kind !== 'tcp') throw new Error('expected tcp');
+    const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    try {
+      const res = await fetch(`${baseUrl}/v1/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gen: 'TinyGen', method: 'analyze', input: 'x' }),
+      });
+      expect(res.status).toBe(504);
+      const body = await res.json();
+      expect(body.ok).toBe(false);
+      expect(body.error.kind).toBe('timeout');
+      expect(body.error.details.run_timeout_ms).toBe(100);
+    } finally {
+      release(); // let the leaked runGen call resolve so vitest doesn't complain
+      await handle.close();
+    }
+  });
+
+  it('lets a run complete normally when it beats the deadline', async () => {
+    const fastRun: RunGenFromIrFn = async () =>
+      ({
+        ok: true, output: { hello: 'world' }, trace: { steps: [] },
+        runId: 'r_fast', schemaId: 'X', ir: {} as any,
+        tracePath: '/x', outputPath: '/x', irPath: '/x', runDir: '/x',
+      }) as any;
+
+    const handle = runServe({
+      workspaceDir: tmp,
+      bind: parseBind('tcp://127.0.0.1:0'),
+      runGenFromIrFn: fastRun,
+      runTimeoutMs: 5000,
+    });
+    const addr = await handle.ready;
+    if (addr.kind !== 'tcp') throw new Error('expected tcp');
+    try {
+      const res = await fetch(`http://127.0.0.1:${addr.port}/v1/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gen: 'TinyGen', method: 'analyze', input: 'x' }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+      expect(body.output).toEqual({ hello: 'world' });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('frees the inflight slot at timeout (a second request can land while the first is still leaking)', async () => {
+    // maxInflight=1 + runTimeoutMs=100 + one slow run. After timeout the
+    // slot frees, so a second request gets through (rather than 503'ing
+    // forever waiting on the leaked runGen call).
+    let release!: () => void;
+    const blocker = new Promise<void>((res) => { release = res; });
+    const slowRun: RunGenFromIrFn = async () => {
+      await blocker;
+      return { ok: true, output: {}, trace: { steps: [] }, runId: 'r', schemaId: 'X', ir: {} as any,
+        tracePath: '/x', outputPath: '/x', irPath: '/x', runDir: '/x' } as any;
+    };
+
+    const handle = runServe({
+      workspaceDir: tmp,
+      bind: parseBind('tcp://127.0.0.1:0'),
+      runGenFromIrFn: slowRun,
+      maxInflight: 1,
+      runTimeoutMs: 100,
+    });
+    const addr = await handle.ready;
+    if (addr.kind !== 'tcp') throw new Error('expected tcp');
+    const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    try {
+      // First request times out at 100ms.
+      const first = await fetch(`${baseUrl}/v1/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gen: 'TinyGen', method: 'analyze', input: 'x' }),
+      });
+      expect(first.status).toBe(504);
+
+      // Slot freed → second request proceeds (also will time out, but
+      // proves the cap doesn't permanently block).
+      const second = await fetch(`${baseUrl}/v1/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gen: 'TinyGen', method: 'analyze', input: 'x' }),
+      });
+      expect(second.status).toBe(504);
+    } finally {
+      release();
+      await handle.close();
+    }
+  });
+
+  it('treats runTimeoutMs=0 (or negative/missing) as unlimited', async () => {
+    const fastRun: RunGenFromIrFn = async () =>
+      ({
+        ok: true, output: {}, trace: { steps: [] },
+        runId: 'r', schemaId: 'X', ir: {} as any,
+        tracePath: '/x', outputPath: '/x', irPath: '/x', runDir: '/x',
+      }) as any;
+
+    const handle = runServe({
+      workspaceDir: tmp,
+      bind: parseBind('tcp://127.0.0.1:0'),
+      runGenFromIrFn: fastRun,
+      runTimeoutMs: 0,
+    });
+    const addr = await handle.ready;
+    if (addr.kind !== 'tcp') throw new Error('expected tcp');
+    try {
+      const res = await fetch(`http://127.0.0.1:${addr.port}/v1/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gen: 'TinyGen', method: 'analyze', input: 'x' }),
+      });
+      expect(res.status).toBe(200);
+    } finally {
+      await handle.close();
+    }
+  });
+});
+
 describe('runServe — boot failure (RED-360)', () => {
   let tmp: string;
   let prevMock: string | undefined;

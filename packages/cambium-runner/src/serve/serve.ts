@@ -124,6 +124,20 @@ export interface RunServeOptions {
    * is never gated. RED-360 wave 2.
    */
   maxInflight?: number;
+  /**
+   * Per-call deadline. When set, /v1/run races runGenFromIr against this
+   * deadline; the loser returns HTTP 504 + `error.kind=timeout`.
+   *
+   * Honest semantic for v1: the deadline frees the in-flight *slot* and
+   * tells the client to stop waiting, but does NOT cancel the underlying
+   * runGen call (the runner has no cooperative cancellation in v1). The
+   * still-running call eventually resolves and its result is dropped.
+   * Document this for operators — a misbehaving long-running gen still
+   * burns model spend even after the timeout fires.
+   *
+   * Defaults to unlimited. RED-360 wave 3.
+   */
+  runTimeoutMs?: number;
 }
 
 export type RunServeAddress =
@@ -147,6 +161,10 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
   const maxInflight =
     typeof opts.maxInflight === 'number' && opts.maxInflight > 0
       ? opts.maxInflight
+      : Infinity;
+  const runTimeoutMs =
+    typeof opts.runTimeoutMs === 'number' && opts.runTimeoutMs > 0
+      ? opts.runTimeoutMs
       : Infinity;
 
   // Per-(gen, method) IR cache populated at boot. Map<gen, Map<method, IR>>.
@@ -308,7 +326,7 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
 
     let result;
     try {
-      result = await runGenFromIrImpl({
+      const runP = runGenFromIrImpl({
         ir,
         cwd: runCwd,
         memoryKeys: Array.isArray(body.memory_keys)
@@ -316,6 +334,36 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
           : memoryKeysFromObject(body.memory_keys),
         firedBy: typeof body.fired_by === 'string' ? body.fired_by : undefined,
       });
+
+      if (runTimeoutMs === Infinity) {
+        result = await runP;
+      } else {
+        // Race the dispatch against the deadline. The runP path attaches
+        // a no-op .catch BEFORE the race so a post-timeout rejection
+        // doesn't surface as an unhandled promise rejection.
+        runP.catch(() => {});
+        let timer: NodeJS.Timeout | undefined;
+        const winner = await Promise.race([
+          runP.then((r) => ({ kind: 'result' as const, result: r })),
+          new Promise<{ kind: 'timeout' }>((res) => {
+            timer = setTimeout(() => res({ kind: 'timeout' }), runTimeoutMs);
+          }),
+        ]);
+        if (timer) clearTimeout(timer);
+
+        if (winner.kind === 'timeout') {
+          await sendJson(res, 504, {
+            ok: false,
+            error: {
+              kind: 'timeout' as ErrorKind,
+              message: `run did not complete within ${runTimeoutMs} ms`,
+              details: { run_timeout_ms: runTimeoutMs },
+            },
+          });
+          return;
+        }
+        result = winner.result;
+      }
     } catch (err) {
       // Errors that escape runGenFromIr are pre-flight or unrecoverable.
       // The runner throws synchronously for unknown tools, missing

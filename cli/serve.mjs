@@ -26,6 +26,11 @@ Flags:
   --max-inflight <n>   Cap concurrent /v1/run dispatches. Over-cap
                        requests get HTTP 503 + error.kind=overloaded.
                        Defaults to unlimited.
+  --run-timeout <s>    Per-call deadline in seconds. /v1/run that doesn't
+                       finish in time returns HTTP 504 + error.kind=timeout.
+                       v1 semantic: frees the inflight slot but does not
+                       cancel the underlying run (the runner has no
+                       cooperative cancellation). Defaults to unlimited.
   --help, -h           Show this help.
 
 Examples:
@@ -40,6 +45,7 @@ export async function runServeCli(args) {
   let bindUri = null;
   let allowRemote = false;
   let maxInflight; // undefined → unlimited
+  let runTimeoutMs; // undefined → unlimited
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -53,6 +59,14 @@ export async function runServeCli(args) {
         usage(`--max-inflight must be a positive integer (got '${raw}').`);
       }
       maxInflight = n;
+    }
+    else if (a === '--run-timeout') {
+      const raw = args[++i];
+      const seconds = Number(raw);
+      if (!Number.isFinite(seconds) || seconds <= 0) {
+        usage(`--run-timeout must be a positive number of seconds (got '${raw}').`);
+      }
+      runTimeoutMs = Math.round(seconds * 1000);
     }
     else if (a === '--help' || a === '-h') usage();
     else usage(`Unknown flag: ${a}`);
@@ -76,6 +90,7 @@ export async function runServeCli(args) {
     workspaceDir: resolve(workspace),
     bind,
     maxInflight,
+    runTimeoutMs,
   });
 
   try {
