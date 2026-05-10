@@ -46,7 +46,7 @@ const DEFAULT_COMPILE_RB = pathResolve(__dirname, '../../../..', 'ruby/cambium/c
 
 const SERVE_VERSION = 'v1';
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
-const SHUTDOWN_TIMEOUT_MS = 30_000;
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
 
 /**
  * Closed v1 enum (RFC § wire format). Adding a new kind is a v2 break;
@@ -138,6 +138,14 @@ export interface RunServeOptions {
    * Defaults to unlimited. RED-360 wave 3.
    */
   runTimeoutMs?: number;
+  /**
+   * Bound on how long `close()` waits for in-flight runs to drain
+   * before force-closing remaining HTTP connections. After this
+   * deadline, `server.closeAllConnections()` fires so the close
+   * promise actually resolves promptly. Defaults to 30 s. RED-360
+   * wave 4.
+   */
+  shutdownTimeoutMs?: number;
 }
 
 export type RunServeAddress =
@@ -166,6 +174,10 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
     typeof opts.runTimeoutMs === 'number' && opts.runTimeoutMs > 0
       ? opts.runTimeoutMs
       : Infinity;
+  const shutdownTimeoutMs =
+    typeof opts.shutdownTimeoutMs === 'number' && opts.shutdownTimeoutMs > 0
+      ? opts.shutdownTimeoutMs
+      : DEFAULT_SHUTDOWN_TIMEOUT_MS;
 
   // Per-(gen, method) IR cache populated at boot. Map<gen, Map<method, IR>>.
   const cache = new Map<string, Map<string, IR>>();
@@ -410,25 +422,63 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
     await sendJson(res, result.ok ? 200 : 500, responseBody);
   }
 
+  // Cache the close promise so a second close() awaits the same drain
+  // rather than racing in parallel or returning early.
+  let closeP: Promise<void> | null = null;
   async function close(): Promise<void> {
-    if (closing) return;
+    if (closeP) return closeP;
     closing = true;
 
     if (!server) {
-      return;
+      closeP = Promise.resolve();
+      return closeP;
     }
 
-    // Stop accepting new connections. server.close() finishes when all
-    // connections are closed.
-    const closed = new Promise<void>((res, rej) => {
-      server!.close((err) => (err ? rej(err) : res()));
-    });
+    closeP = (async () => {
+      // server.close stops accepting new connections; the callback
+      // fires once all open connections are also closed. We wait on
+      // both the inflight handlers AND server.close, with a deadline.
+      const closed = new Promise<void>((res, rej) => {
+        server!.close((err) => (err ? rej(err) : res()));
+      });
+      // Pre-attach a no-op .catch on closed — if we time out before
+      // it resolves, the rejection still surfaces somewhere harmless.
+      closed.catch(() => {});
 
-    // Drain in-flight handlers up to the timeout.
-    const drain = Promise.allSettled(Array.from(inflight));
-    const timeout = new Promise<void>((res) => setTimeout(res, SHUTDOWN_TIMEOUT_MS));
-    await Promise.race([drain, timeout]);
-    await closed.catch(() => {});
+      const drain = Promise.allSettled(Array.from(inflight));
+
+      // .unref() so a fast-draining shutdown isn't held open by the
+      // timer for the remainder of the deadline.
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<'timeout'>((res) => {
+        timer = setTimeout(() => res('timeout'), shutdownTimeoutMs);
+        timer.unref?.();
+      });
+
+      const winner = await Promise.race([
+        Promise.all([drain, closed]).then(() => 'drained' as const),
+        timeout,
+      ]);
+      if (timer) clearTimeout(timer);
+
+      if (winner === 'timeout') {
+        // Force-close any sockets the runtime is still hanging onto so
+        // the close promise actually resolves on a deterministic
+        // schedule. closeAllConnections is Node 18.2+.
+        server!.closeAllConnections?.();
+        // Give server.close a brief moment to finish after the force-
+        // close, but don't wait forever.
+        await Promise.race([
+          closed.catch(() => {}),
+          new Promise<void>((res) => {
+            const t = setTimeout(res, 100);
+            t.unref?.();
+          }),
+        ]);
+      }
+    })();
+
+    return closeP;
   }
 
   return { ready, close };

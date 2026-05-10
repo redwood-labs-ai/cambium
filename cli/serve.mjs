@@ -31,6 +31,10 @@ Flags:
                        v1 semantic: frees the inflight slot but does not
                        cancel the underlying run (the runner has no
                        cooperative cancellation). Defaults to unlimited.
+  --shutdown-timeout <s>
+                       SIGTERM/SIGINT drain deadline in seconds. After this,
+                       lingering HTTP connections are force-closed and the
+                       process exits. Defaults to 30s.
   --help, -h           Show this help.
 
 Examples:
@@ -46,6 +50,7 @@ export async function runServeCli(args) {
   let allowRemote = false;
   let maxInflight; // undefined → unlimited
   let runTimeoutMs; // undefined → unlimited
+  let shutdownTimeoutMs; // undefined → server default (30s)
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -67,6 +72,14 @@ export async function runServeCli(args) {
         usage(`--run-timeout must be a positive number of seconds (got '${raw}').`);
       }
       runTimeoutMs = Math.round(seconds * 1000);
+    }
+    else if (a === '--shutdown-timeout') {
+      const raw = args[++i];
+      const seconds = Number(raw);
+      if (!Number.isFinite(seconds) || seconds <= 0) {
+        usage(`--shutdown-timeout must be a positive number of seconds (got '${raw}').`);
+      }
+      shutdownTimeoutMs = Math.round(seconds * 1000);
     }
     else if (a === '--help' || a === '-h') usage();
     else usage(`Unknown flag: ${a}`);
@@ -91,6 +104,7 @@ export async function runServeCli(args) {
     bind,
     maxInflight,
     runTimeoutMs,
+    shutdownTimeoutMs,
   });
 
   try {

@@ -899,6 +899,132 @@ export const AnalysisReport = { $id: 'AnalysisReport', type: 'object', additiona
   });
 });
 
+describe('runServe — shutdownTimeoutMs (RED-360)', () => {
+  let tmp: string;
+  const fixtureGen = `
+class TinyGen < GenModel
+  model "ollama:test"
+  system "test"
+  returns AnalysisReport
+
+  def analyze(doc)
+    generate "ok" do
+      with context: doc
+      returns AnalysisReport
+    end
+  end
+end
+`;
+  const fixtureContracts = `
+export const AnalysisReport = { $id: 'AnalysisReport', type: 'object', additionalProperties: true };
+`;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'cambium-serve-shutdown-'));
+    mkdirSync(join(tmp, 'app/gens'), { recursive: true });
+    mkdirSync(join(tmp, 'src'), { recursive: true });
+    writeFileSync(join(tmp, 'app/gens/tiny.cmb.rb'), fixtureGen);
+    writeFileSync(join(tmp, 'src/contracts.ts'), fixtureContracts);
+    writeFileSync(
+      join(tmp, 'Genfile.toml'),
+      `[types]\ncontracts = ["src/contracts.ts"]\n\n[exports.gens]\nTinyGen = "app/gens/tiny.cmb.rb"\n`,
+    );
+  });
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('close() resolves promptly when nothing is in flight', async () => {
+    const fastRun: RunGenFromIrFn = async () =>
+      ({
+        ok: true, output: {}, trace: { steps: [] },
+        runId: 'r', schemaId: 'X', ir: {} as any,
+        tracePath: '/x', outputPath: '/x', irPath: '/x', runDir: '/x',
+      }) as any;
+    const handle = runServe({
+      workspaceDir: tmp,
+      bind: parseBind('tcp://127.0.0.1:0'),
+      runGenFromIrFn: fastRun,
+    });
+    await handle.ready;
+
+    const start = Date.now();
+    await handle.close();
+    expect(Date.now() - start).toBeLessThan(500);
+  });
+
+  it('close() force-closes lingering connections after shutdownTimeoutMs', async () => {
+    // Pin a slow run, then call close() before it completes. The drain
+    // would normally wait on the leaked promise; the deadline forces
+    // close() to resolve once shutdownTimeoutMs elapses.
+    let release!: () => void;
+    const blocker = new Promise<void>((res) => { release = res; });
+    const slowRun: RunGenFromIrFn = async () => {
+      await blocker;
+      return { ok: true, output: {}, trace: { steps: [] }, runId: 'r', schemaId: 'X', ir: {} as any,
+        tracePath: '/x', outputPath: '/x', irPath: '/x', runDir: '/x' } as any;
+    };
+
+    const handle = runServe({
+      workspaceDir: tmp,
+      bind: parseBind('tcp://127.0.0.1:0'),
+      runGenFromIrFn: slowRun,
+      shutdownTimeoutMs: 200,
+    });
+    const addr = await handle.ready;
+    if (addr.kind !== 'tcp') throw new Error('expected tcp');
+    const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    try {
+      // Pin a request inflight (don't await its response — we want it
+      // hanging when close() fires).
+      const pinned = fetch(`${baseUrl}/v1/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gen: 'TinyGen', method: 'analyze', input: 'x' }),
+      });
+      // Let the server register the inflight handler.
+      await new Promise((r) => setTimeout(r, 50));
+
+      const start = Date.now();
+      await handle.close();
+      const elapsed = Date.now() - start;
+      // Should have force-closed within shutdownTimeoutMs + slack
+      // (NOT waited on the leaked runGen promise to resolve).
+      expect(elapsed).toBeGreaterThanOrEqual(150);
+      expect(elapsed).toBeLessThan(1500);
+
+      // The pinned request errors out because the server force-closed
+      // its connection. We don't assert exactly *how* it errors — just
+      // that the request settled (vitest would otherwise hang on the
+      // unawaited promise).
+      await pinned.catch(() => {});
+    } finally {
+      release();
+    }
+  });
+
+  it('close() is idempotent (second call awaits the first drain)', async () => {
+    const fastRun: RunGenFromIrFn = async () =>
+      ({
+        ok: true, output: {}, trace: { steps: [] },
+        runId: 'r', schemaId: 'X', ir: {} as any,
+        tracePath: '/x', outputPath: '/x', irPath: '/x', runDir: '/x',
+      }) as any;
+    const handle = runServe({
+      workspaceDir: tmp,
+      bind: parseBind('tcp://127.0.0.1:0'),
+      runGenFromIrFn: fastRun,
+    });
+    await handle.ready;
+
+    const a = handle.close();
+    const b = handle.close();
+    // Both should resolve to the same shutdown completion.
+    await Promise.all([a, b]);
+  });
+});
+
 describe('runServe — boot failure (RED-360)', () => {
   let tmp: string;
   let prevMock: string | undefined;
