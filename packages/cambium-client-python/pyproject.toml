@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cambium-client"
+description = "Python client for Cambium serve mode (RED-360). Speaks the v1 wire format over HTTP."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Stephen Keider", email = "hello@redwoodlabs.ai" },
+]
+keywords = [
+    "llm",
+    "ai",
+    "agent",
+    "cambium",
+    "client",
+    "http",
+    "fastapi",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+requires-python = ">=3.10"
+dynamic = ["version"]
+# httpx 0.27.0 had a UDS-async regression fixed in 0.27.2 — pin the floor
+# above it. Upper bound is conservative for httpx's still-pre-1.0 surface;
+# revisit when 1.0 lands or when a 0.28 release is needed.
+dependencies = [
+    "httpx>=0.27.2,<1.0",
+]
+
+[project.urls]
+Homepage = "https://redwoodlabs.ai"
+Repository = "https://github.com/redwood-labs-ai/cambium"
+Issues = "https://github.com/redwood-labs-ai/cambium/issues"
+Documentation = "https://github.com/redwood-labs-ai/cambium/blob/main/docs/GenDSL%20Docs/C%20-%20Serve%20Mode.md"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "mypy>=1.10",
+    "build>=1.2",
+    "twine>=5.0",
+]
+
+[tool.hatch.version]
+path = "src/cambium_client/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cambium_client"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
