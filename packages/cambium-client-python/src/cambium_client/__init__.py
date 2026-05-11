@@ -21,6 +21,7 @@ Public surface (this commit ships the typed-error layer; the runtime
 """
 
 from ._version import __version__
+from .client import CambiumClient
 from .errors import (
     BootingError,
     BudgetExhaustedError,
@@ -51,6 +52,8 @@ from .wire import (
 __all__ = [
     # Version
     "__version__",
+    # Client (slice 4 ships sync; slice 5 adds async parity)
+    "CambiumClient",
     # Wire-format constants + dataclasses
     "WIRE_VERSION",
     "RunRequest",
