@@ -22,6 +22,6 @@ def test_version_string_is_semver_shaped() -> None:
     )
 
 
-def test_all_only_exports_version() -> None:
-    """Slice 1 ships only `__version__`; subsequent slices grow `__all__`."""
-    assert cambium_client.__all__ == ["__version__"]
+def test_version_is_in_all() -> None:
+    """`__version__` is part of the public surface."""
+    assert "__version__" in cambium_client.__all__
