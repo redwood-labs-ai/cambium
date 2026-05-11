@@ -109,12 +109,28 @@ class CambiumClient:
         self.close()
 
     def close(self) -> None:
-        """Close the underlying httpx Client pool.
+        """Close the sync httpx Client pool.
 
         Idempotent. If you used both sync and async paths from the same
         instance, also call `aclose()` from an async context (or use
         the async context manager).
         """
+        self._sync.close()
+
+    async def __aenter__(self) -> "CambiumClient":
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Close the async httpx Client pool. Idempotent.
+
+        Closes both sync + async pools so an `async with` block cleans
+        up everything (matches what most callers expect from a single
+        context-managed lifetime).
+        """
+        await self._async.aclose()
         self._sync.close()
 
     # ── public methods ──────────────────────────────────────────────
@@ -178,10 +194,58 @@ class CambiumClient:
                 f"could not reach Cambium server at {self._url}: {e}",
                 kind="connection_error",
             ) from e
+        return self._dispatch_healthz_response(response)
+
+    async def run_async(
+        self,
+        gen: str,
+        method: str,
+        input: Any,
+        *,
+        memory_keys: Mapping[str, str] | None = None,
+        fired_by: str | None = None,
+        include_trace: bool = False,
+    ) -> Any:
+        """Async sibling of `run`. Same semantics, same exception tree.
+
+        Shares the dispatch + failure-envelope helpers with the sync
+        path — those operate on `httpx.Response`, which is the same
+        type sync and async return.
+        """
+        body = RunRequest(
+            gen=gen,
+            method=method,
+            input=_normalize_input(input),
+            memory_keys=dict(memory_keys) if memory_keys else None,
+            fired_by=fired_by,
+            include_trace=include_trace,
+        ).to_dict()
+        try:
+            response = await self._async.post("/v1/run", json=body)
+        except _CONNECT_ERRORS as e:
+            raise CambiumConnectionError(
+                f"could not reach Cambium server at {self._url}: {e}",
+                kind="connection_error",
+            ) from e
+        return self._dispatch_run_response(response)
+
+    async def healthz_async(self) -> Healthz:
+        """Async sibling of `healthz`. Same return / raise contract."""
+        try:
+            response = await self._async.get("/v1/healthz")
+        except _CONNECT_ERRORS as e:
+            raise CambiumConnectionError(
+                f"could not reach Cambium server at {self._url}: {e}",
+                kind="connection_error",
+            ) from e
+        return self._dispatch_healthz_response(response)
+
+    def _dispatch_healthz_response(self, response: httpx.Response) -> Healthz:
+        """Shared healthz response parsing (sync + async)."""
         if response.status_code == 200:
             return Healthz.from_dict(response.json())
-        # Non-200: usually 503 booting. Route through the failure-envelope
-        # parser so the right exception subclass surfaces.
+        # Non-200: usually 503 booting. Route through the failure-
+        # envelope parser so the right exception subclass surfaces.
         self._raise_from_failure_envelope(response, default_kind="runner_error")
         # Unreachable — _raise_from_failure_envelope always raises on
         # a non-success body. If somehow it didn't, surface the status.
