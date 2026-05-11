@@ -86,7 +86,7 @@ cat runs/<run_id>/trace.json | jq .
 - **Budget tracking** — Token limits, tool call caps, time limits. Exceeded budgets fail safely.
 - **Scheduled runs** — `cron :daily, at: "9:00"` declares the schedule; `cambium schedule compile` emits deploy manifests for your platform (k8s CronJob, crontab, systemd, GitHub Actions, Render Cron).
 - **Observability** — `log :datadog` ships run + step events with a framework-owned severity mapping so monitors key off real run state.
-- **Serve mode** — `cambium serve --workspace <path> --bind tcp://127.0.0.1:9000` hosts every gen in a workspace as a long-lived HTTP server (RED-360). Locked v1 wire format (`POST /v1/run` + `GET /v1/healthz`); `--max-inflight`, `--run-timeout`, and `--shutdown-timeout` for ops. The transport for non-Node hosts (FastAPI, Django, Go, Elixir) — anything that speaks HTTP + JSON.
+- **Serve mode** — `cambium serve --workspace <path> --bind tcp://127.0.0.1:9000` hosts every gen in a workspace as a long-lived HTTP server (RED-360). Locked v1 wire format (`POST /v1/run` + `GET /v1/healthz`); `--max-inflight`, `--run-timeout`, and `--shutdown-timeout` for ops. The transport for non-Node hosts (FastAPI, Django, Go, Elixir) — anything that speaks HTTP + JSON. First-party Python client: `pip install cambium-client` (RED-361; sync + async, one exception per `error.kind`).
 
 ## How it works
 
