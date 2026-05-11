@@ -25,9 +25,12 @@ Architecture:
 from __future__ import annotations
 
 import os
+import random
 import re
 import shutil
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -135,7 +138,7 @@ def serve_workspace(tmp_path: Path) -> Path:
 
 
 _LISTENING_RE = re.compile(
-    r"\[cambium serve\]\s+listening on\s+(tcp://(?:\[[^\]]+\]|[^:\s]+):\d+)"
+    r"\[cambium serve\]\s+listening on\s+(\S+)"
 )
 
 
@@ -239,3 +242,91 @@ def serve_url(runner_bin: str, serve_workspace: Path) -> Iterator[str]:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=2.0)
+
+
+# ── UDS fixture (slice 7) ────────────────────────────────────────────
+
+
+def _short_uds_path() -> Path:
+    """Pick a Unix-socket path under `tempfile.gettempdir()` directly.
+
+    macOS's `sun_path` is 104 bytes. pytest's `tmp_path` lives under
+    `/var/folders/.../pytest-of-.../...` which can easily exceed that
+    even before we append a filename. The system tempdir (usually
+    `/tmp` or a short equivalent) is the safe choice.
+    """
+    # PID + monotonic + random — avoids collisions across parallel test
+    # runs and stale sockets from earlier process crashes.
+    name = f"cm-{os.getpid()}-{int(time.monotonic_ns())}-{random.randint(0, 9999)}.sock"
+    return Path(tempfile.gettempdir()) / name
+
+
+@pytest.fixture
+def serve_url_uds(runner_bin: str, serve_workspace: Path) -> Iterator[str]:
+    """Boot `cambium serve --bind unix:///tmp/cm-*.sock` for one test."""
+    if sys.platform == "win32":
+        pytest.skip("UDS not supported on Windows in v1 (use pipe:// in v1.1)")
+
+    sock_path = _short_uds_path()
+    bind_uri = f"unix://{sock_path}"
+
+    env = {**os.environ, "CAMBIUM_ALLOW_MOCK": "1"}
+    proc = subprocess.Popen(
+        [
+            "node", runner_bin,
+            "serve",
+            "--bind", bind_uri,
+            "--workspace", str(serve_workspace),
+        ],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        # Wait for the "listening on" line — the URL form will match
+        # what we asked for (`unix:///tmp/...`).
+        listened_url = _await_ready(proc, timeout=15.0)
+        # Sanity: confirm the server actually echoed back our socket
+        # path. If it ever diverges, the test surfaces the mismatch
+        # rather than silently connecting somewhere else.
+        assert listened_url == bind_uri, (
+            f"server logged unexpected bind URL: got {listened_url}, "
+            f"asked for {bind_uri}"
+        )
+        # Probe healthz via CambiumClient (which knows how to UDS).
+        # Imported locally to avoid coupling slice 6's fixture file to
+        # the package import order — the package is `pip install -e`'d
+        # by the test harness.
+        from cambium_client import CambiumClient as _Client
+
+        deadline = time.monotonic() + 5.0
+        last_err: Exception | None = None
+        while time.monotonic() < deadline:
+            try:
+                with _Client(url=bind_uri, timeout=2.0) as c:
+                    c.healthz()
+                break
+            except Exception as e:  # noqa: BLE001 — probe is best-effort
+                last_err = e
+                time.sleep(0.1)
+        else:
+            raise RuntimeError(
+                f"UDS server logged 'listening' at {bind_uri} but healthz "
+                f"never responded. Last error: {last_err}"
+            )
+        yield bind_uri
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2.0)
+        # Best-effort socket cleanup. The server SHOULD remove the
+        # socket on shutdown; if it didn't (process killed), nuke it
+        # so the next test run doesn't trip over a stale file.
+        try:
+            sock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
