@@ -195,6 +195,13 @@ def _await_ready(proc: subprocess.Popen[str], *, timeout: float) -> str:
 @pytest.fixture
 def serve_url(runner_bin: str, serve_workspace: Path) -> Iterator[str]:
     """Boot `cambium serve` for the duration of a single test."""
+    # Forward the full parent environment to the spawned server so
+    # PATH, NODE_PATH, etc. work. `CAMBIUM_ALLOW_MOCK=1` short-circuits
+    # the model dispatch, so any real API keys (CAMBIUM_OMLX_API_KEY,
+    # ANTHROPIC_API_KEY) the developer has set are present in the
+    # subprocess env but never used. CI environments shouldn't have
+    # real keys to begin with; flag this for any future fixture that
+    # captures stderr — don't accidentally log env contents.
     env = {**os.environ, "CAMBIUM_ALLOW_MOCK": "1"}
     proc = subprocess.Popen(
         [
@@ -247,6 +254,12 @@ def serve_url(runner_bin: str, serve_workspace: Path) -> Iterator[str]:
 # ── UDS fixture (slice 7) ────────────────────────────────────────────
 
 
+# macOS `sun_path` limit: 104 bytes. Linux: 108. Pick the smaller as
+# the safe ceiling. The OS would fail bind() with EINVAL/ENAMETOOLONG
+# on overrun; checking here surfaces a clearer error.
+_SUN_PATH_MAX = 104
+
+
 def _short_uds_path() -> Path:
     """Pick a Unix-socket path under `tempfile.gettempdir()` directly.
 
@@ -254,11 +267,23 @@ def _short_uds_path() -> Path:
     `/var/folders/.../pytest-of-.../...` which can easily exceed that
     even before we append a filename. The system tempdir (usually
     `/tmp` or a short equivalent) is the safe choice.
+
+    Defensive: if `TMPDIR` is set to an unusually long path on a
+    developer's machine, even `tempfile.gettempdir() + cm-PID-…`
+    could overrun the limit. Check explicitly and raise with a clear
+    message rather than letting bind() fail with an obscure OSError.
     """
     # PID + monotonic + random — avoids collisions across parallel test
     # runs and stale sockets from earlier process crashes.
     name = f"cm-{os.getpid()}-{int(time.monotonic_ns())}-{random.randint(0, 9999)}.sock"
-    return Path(tempfile.gettempdir()) / name
+    path = Path(tempfile.gettempdir()) / name
+    encoded_len = len(os.fsencode(str(path)))
+    if encoded_len > _SUN_PATH_MAX:
+        raise RuntimeError(
+            f"UDS socket path is {encoded_len} bytes, exceeds {_SUN_PATH_MAX} "
+            f"(macOS sun_path limit). Set TMPDIR to a shorter path. Got: {path}"
+        )
+    return path
 
 
 @pytest.fixture
@@ -270,6 +295,13 @@ def serve_url_uds(runner_bin: str, serve_workspace: Path) -> Iterator[str]:
     sock_path = _short_uds_path()
     bind_uri = f"unix://{sock_path}"
 
+    # Forward the full parent environment to the spawned server so
+    # PATH, NODE_PATH, etc. work. `CAMBIUM_ALLOW_MOCK=1` short-circuits
+    # the model dispatch, so any real API keys (CAMBIUM_OMLX_API_KEY,
+    # ANTHROPIC_API_KEY) the developer has set are present in the
+    # subprocess env but never used. CI environments shouldn't have
+    # real keys to begin with; flag this for any future fixture that
+    # captures stderr — don't accidentally log env contents.
     env = {**os.environ, "CAMBIUM_ALLOW_MOCK": "1"}
     proc = subprocess.Popen(
         [

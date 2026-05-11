@@ -93,6 +93,17 @@ def test_run_success_with_inline_trace() -> None:
     assert s.trace == {"steps": []}
 
 
+def test_run_success_run_id_null_does_not_become_literal_None() -> None:
+    """Regression guard: `str(None) == "None"` would silently corrupt
+    a null `run_id` into the literal string `"None"`. The server's
+    response construction `run_id: result.runId ?? null` leaves the
+    null path open even on success, so the parser must handle it.
+    """
+    s = RunSuccess.from_dict({"run_id": None, "output": {"x": 1}})
+    assert s.run_id is None
+    assert s.output == {"x": 1}
+
+
 # ── RunFailure.from_dict ─────────────────────────────────────────────
 
 

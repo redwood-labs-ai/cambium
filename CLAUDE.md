@@ -107,6 +107,10 @@ packages/cambium-runner/   # @redwood-labs/cambium-runner — TS runtime (RED-24
     compound.ts       # Review + consensus engines
     enrich.ts         # Sub-agent enrichment
     schema-describe.ts # Auto-generated schema descriptions
+packages/cambium-client-python/   # cambium-client — Python client for cambium serve (RED-361, pip install cambium-client)
+  src/cambium_client/   # CambiumClient (sync + async), wire dataclasses, error.kind subclasses
+  tests/                # pytest; conftest.py spawns real `cambium serve` for integration coverage
+  scripts/              # pre_publish_check.py — wheel build + venv install + smoke-import gate
 ruby/cambium/
   runtime.rb        # GenModel DSL primitives
   compile.rb        # Ruby → JSON IR compiler

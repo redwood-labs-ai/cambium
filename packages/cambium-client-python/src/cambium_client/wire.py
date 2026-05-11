@@ -68,16 +68,25 @@ class RunRequest:
 
 @dataclass(frozen=True)
 class RunSuccess:
-    """200 response from `POST /v1/run`."""
+    """200 response from `POST /v1/run`.
 
-    run_id: str
+    `run_id` is typed `str | None` because the server's response body
+    construction (`run_id: result.runId ?? null` in serve.ts) leaves a
+    null path open. In practice `runGenFromIr` always assigns a runId
+    on the success path, but the wire contract allows null — silent
+    `str(None) == "None"` corruption would surface only when a client
+    tried to correlate against the on-disk trace and found nothing.
+    """
+
+    run_id: str | None
     output: Any
     trace: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> RunSuccess:
+        raw_id = d.get("run_id")
         return cls(
-            run_id=str(d["run_id"]),
+            run_id=None if raw_id is None else str(raw_id),
             output=d.get("output"),
             trace=d.get("trace"),
         )

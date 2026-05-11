@@ -351,6 +351,13 @@ def _normalize_input(input_value: Any) -> Any:
     null, or anything else (which it JSON.stringifies). On the Python
     side we only need to handle `bytes` specially — JSON can't carry
     raw bytes, so decode to UTF-8. Everything else passes through.
+
+    Note on `memoryview`: a memoryview over non-UTF-8 binary data
+    (e.g. an `int32` array) raises `UnicodeDecodeError` at decode
+    time. That's the correct exception class — surface it to the
+    caller rather than wrapping it as a Cambium error, because the
+    fault is the input shape, not the server. Document this in the
+    `run()` docstring if a real user trips over it.
     """
     if isinstance(input_value, (bytes, bytearray, memoryview)):
         # Per the ticket: "bytes for pre-serialised payloads". Decode
