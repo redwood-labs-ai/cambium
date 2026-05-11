@@ -37,6 +37,7 @@ import { spawnSync } from 'node:child_process';
 import { dirname, resolve as pathResolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runGenFromIr, type IR } from '../runner.js';
+import { parseMemoryKeys } from '../memory/keys.js';
 import { loadGenCatalog, type GenCatalog } from './gen-catalog.js';
 import type { BindTarget } from './bind.js';
 
@@ -220,6 +221,7 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
     if (!booted) {
       sendJson(res, 503, {
         ok: false,
+        run_id: null,
         error: { kind: 'booting', message: 'cambium serve is still loading gens' },
       });
       return;
@@ -242,6 +244,7 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
       if (inflight.size >= maxInflight) {
         sendJson(res, 503, {
           ok: false,
+          run_id: null,
           error: {
             kind: 'overloaded' as ErrorKind,
             message: `server is at the in-flight cap (${maxInflight}); retry later`,
@@ -252,10 +255,11 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
       }
       const p = handleRun(req, res).catch((err) => {
         // Last-resort guard: any error not caught downstream becomes a
-        // generic runner_error envelope. The richer error.kind matrix
-        // lands in the next slice.
+        // generic runner_error envelope. No run_id is available here —
+        // the dispatch never reached runGen.
         sendJson(res, 500, {
           ok: false,
+          run_id: null,
           error: { kind: 'runner_error', message: errorMessage(err) },
         }).catch(() => {});
       });
@@ -273,6 +277,7 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
 
     sendJson(res, 404, {
       ok: false,
+      run_id: null,
       error: { kind: 'not_found', message: `no route for ${method} ${url}` },
     });
   }
@@ -284,6 +289,7 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
     } catch (err) {
       await sendJson(res, 400, {
         ok: false,
+        run_id: null,
         error: { kind: 'input_invalid', message: errorMessage(err) },
       });
       return;
@@ -293,6 +299,7 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
     if (typeof gen !== 'string' || gen.length === 0) {
       await sendJson(res, 400, {
         ok: false,
+        run_id: null,
         error: { kind: 'input_invalid', message: 'body.gen must be a non-empty string' },
       });
       return;
@@ -300,6 +307,7 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
     if (typeof method !== 'string' || method.length === 0) {
       await sendJson(res, 400, {
         ok: false,
+        run_id: null,
         error: { kind: 'input_invalid', message: 'body.method must be a non-empty string' },
       });
       return;
@@ -309,6 +317,7 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
     if (!methodMap) {
       await sendJson(res, 400, {
         ok: false,
+        run_id: null,
         error: {
           kind: 'unknown_gen',
           message: `gen '${gen}' is not in this server's catalog`,
@@ -321,11 +330,32 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
     if (!cachedIr) {
       await sendJson(res, 400, {
         ok: false,
+        run_id: null,
         error: {
           kind: 'unknown_method',
           message: `gen '${gen}' has no method '${method}'`,
           details: { available: Array.from(methodMap.keys()) },
         },
+      });
+      return;
+    }
+
+    // Validate memory_keys at the wire boundary. The same guard fires
+    // again inside runGen via parseMemoryKeys → validateSafeSegment, but
+    // running it here keeps the invariant visible at the surface (and
+    // any future refactor of the runGen → runGenFromIr call path can't
+    // silently drop it). cambium-security review (RED-360) flagged the
+    // deep-only validation as a defense-in-depth gap.
+    const memoryKeys: string[] = Array.isArray(body.memory_keys)
+      ? body.memory_keys
+      : memoryKeysFromObject(body.memory_keys) ?? [];
+    try {
+      parseMemoryKeys(memoryKeys);
+    } catch (err) {
+      await sendJson(res, 400, {
+        ok: false,
+        run_id: null,
+        error: { kind: 'input_invalid', message: errorMessage(err) },
       });
       return;
     }
@@ -341,9 +371,7 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
       const runP = runGenFromIrImpl({
         ir,
         cwd: runCwd,
-        memoryKeys: Array.isArray(body.memory_keys)
-          ? body.memory_keys
-          : memoryKeysFromObject(body.memory_keys),
+        memoryKeys,
         firedBy: typeof body.fired_by === 'string' ? body.fired_by : undefined,
       });
 
@@ -366,6 +394,11 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
         if (winner.kind === 'timeout') {
           await sendJson(res, 504, {
             ok: false,
+            // Timeout fires before the runner returns a runId, so there
+            // isn't one to surface here. The leaked run continues in the
+            // background; its trace lands at runs/<id>/ but the id is
+            // unavailable to the caller.
+            run_id: null,
             error: {
               kind: 'timeout' as ErrorKind,
               message: `run did not complete within ${runTimeoutMs} ms`,
@@ -381,9 +414,12 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
       // The runner throws synchronously for unknown tools, missing
       // actions, and security violations — those map to
       // `tool_dispatch_failed`. Anything else is a generic runner_error.
+      // No runId is produced for these (the runner aborts before
+      // assigning one).
       const kind = classifyThrownError(err);
       await sendJson(res, kind === 'tool_dispatch_failed' ? 400 : 500, {
         ok: false,
+        run_id: null,
         error: { kind, message: errorMessage(err) },
       });
       return;

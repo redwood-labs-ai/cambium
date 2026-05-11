@@ -224,6 +224,82 @@ TestGen = "app/gens/test_gen.cmb.rb"
     expect(body.error.kind).toBe('not_found');
   });
 
+  it('every error envelope carries run_id (null on pre-dispatch errors)', async () => {
+    // Wire-format consistency (cambium-docs review): the C-doc claims
+    // run_id is always present on failure responses. Pre-dispatch errors
+    // (input_invalid, unknown_gen, unknown_method, not_found) emit
+    // `run_id: null` so a client doing `body.run_id` never gets undefined.
+    const cases: Array<{ name: string; req: () => Promise<Response> }> = [
+      {
+        name: 'input_invalid (malformed JSON)',
+        req: () =>
+          fetch(`${baseUrl}/v1/run`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: '{not json',
+          }),
+      },
+      {
+        name: 'input_invalid (missing method)',
+        req: () =>
+          fetch(`${baseUrl}/v1/run`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ gen: 'TestGen' }),
+          }),
+      },
+      {
+        name: 'unknown_gen',
+        req: () =>
+          fetch(`${baseUrl}/v1/run`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ gen: 'Ghost', method: 'analyze', input: 'x' }),
+          }),
+      },
+      {
+        name: 'unknown_method',
+        req: () =>
+          fetch(`${baseUrl}/v1/run`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ gen: 'TestGen', method: 'ghost', input: 'x' }),
+          }),
+      },
+      {
+        name: 'not_found',
+        req: () => fetch(`${baseUrl}/v2/run`),
+      },
+    ];
+    for (const c of cases) {
+      const res = await c.req();
+      const body = await res.json();
+      expect(body.ok, c.name).toBe(false);
+      expect(body, c.name).toHaveProperty('run_id');
+      expect(body.run_id, c.name).toBeNull();
+    }
+  });
+
+  it('returns input_invalid when memory_keys produces traversable directory segments', async () => {
+    // cambium-security review (RED-360): memory_keys is now validated at
+    // the wire boundary via parseMemoryKeys, not just deep in runGen.
+    // A traversal-shaped value should bounce at the HTTP layer.
+    const res = await fetch(`${baseUrl}/v1/run`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        gen: 'TestGen',
+        method: 'analyze',
+        input: 'x',
+        memory_keys: { user_id: '../escape' },
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.kind).toBe('input_invalid');
+    expect(body.error.message).toMatch(/must match/);
+  });
+
   it('healthz works on the same server while runs are in flight', async () => {
     // Fire a run + a healthz concurrently. The server should service
     // both; healthz must not block on inflight runs.

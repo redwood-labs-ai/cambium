@@ -131,6 +131,27 @@ describe('parseBind — unix', () => {
     expect(() => parseBind('unix:///tmp/foo\0bar'))
       .toThrow(/NUL byte in unix path/);
   });
+
+  it('rejects `..` segments in path (defensive against silent Node normalisation)', () => {
+    // Node's server.listen would resolve /tmp/../etc/foo to /etc/foo before
+    // binding. Reject explicitly so a wrapper script constructing --bind
+    // URIs from user input can't surprise the operator.
+    expect(() => parseBind('unix:///tmp/../etc/shadow'))
+      .toThrow(/'\.\.' segments not allowed/);
+    expect(() => parseBind('unix:///foo/..'))
+      .toThrow(/'\.\.' segments not allowed/);
+    expect(() => parseBind('unix:///..'))
+      .toThrow(/'\.\.' segments not allowed/);
+    expect(() => parseBind('unix:///a/../b/../c'))
+      .toThrow(/'\.\.' segments not allowed/);
+  });
+
+  it('accepts paths with `..` as a literal substring inside a name', () => {
+    // `..foo` and `foo..bar` are NOT path-traversal segments — only `..`
+    // bounded by `/` (or as the entire trailing segment) is.
+    expect(parseBind('unix:///tmp/..foo')).toEqual({ kind: 'unix', path: '/tmp/..foo' });
+    expect(parseBind('unix:///tmp/foo..bar')).toEqual({ kind: 'unix', path: '/tmp/foo..bar' });
+  });
 });
 
 describe('parseBind — pipe', () => {

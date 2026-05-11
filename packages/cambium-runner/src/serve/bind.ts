@@ -148,6 +148,17 @@ function parseUnix(uri: string, rest: string): BindTarget {
   if (rest.includes('\0')) {
     throw new Error(`Invalid --bind URI '${uri}': NUL byte in unix path.`);
   }
+  // Reject `..` segments. Node would silently normalise `/tmp/../etc/foo`
+  // to `/etc/foo` when binding, surprising operators (and any wrapper
+  // script that constructs --bind URIs from user data). Same defensive
+  // stance the rest of Cambium takes everywhere user-supplied path
+  // segments interpolate into filesystem APIs.
+  if (rest === '/..' || rest.includes('/../') || rest.endsWith('/..')) {
+    throw new Error(
+      `Invalid --bind URI '${uri}': '..' segments not allowed in unix path. ` +
+        'Pass the canonical absolute path (Node would otherwise normalise it silently before bind).',
+    );
+  }
   return { kind: 'unix', path: rest };
 }
 
