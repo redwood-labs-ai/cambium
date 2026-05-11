@@ -58,9 +58,6 @@ Success response (200):
   "ok": true,
   "run_id": "run_20260510_...",
   "output": { "...": "..." },
-  "warnings": [
-    { "kind": "CorrectAcceptedWithErrors", "corrector": "regex_x", "issues": [...] }
-  ],
   "trace": null
 }
 ```
@@ -79,7 +76,9 @@ Failure response:
 }
 ```
 
-`run_id` is surfaced even on failure so callers can correlate with the on-disk trace at `<workspace>/runs/<run_id>/trace.json`. `include_trace: true` additionally returns the trace JSON inline.
+`run_id` is always present on the response — a real id when the runner produced one (success, validation_failed, budget_exhausted), `null` for pre-dispatch errors (`input_invalid`, `unknown_gen`, `unknown_method`, `tool_dispatch_failed`, `timeout`, `overloaded`, `booting`, `not_found`). Clients can always read `body.run_id`; correlate with the on-disk trace at `<workspace>/runs/<run_id>/trace.json` when non-null. `include_trace: true` additionally returns the trace JSON inline.
+
+**Corrector warnings** (`CorrectAcceptedWithErrors`, etc.) live in the trace, not in the response body. Use `include_trace: true` or fetch `runs/<run_id>/trace.json` from disk if your client needs to surface them. A typed top-level `warnings` field on the response is a candidate for a future minor version.
 
 `GET /v1/healthz`:
 

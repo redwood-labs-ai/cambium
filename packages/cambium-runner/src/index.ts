@@ -35,7 +35,7 @@ export type { ToolContext } from './tools/tool-context.js';
 // RED-360 serve mode: long-lived runner over HTTP. Exposed so the CLI
 // (`cambium serve`) and engine-mode hosts that want to embed the server
 // have the same entry point. Wire format is locked at v1 — see
-// `docs/GenDSL Docs/RFC - Serve Mode [DRAFT].md`.
+// `docs/GenDSL Docs/C - Serve Mode.md`.
 export { runServe } from './serve/serve.js';
 export type {
   RunServeOptions,

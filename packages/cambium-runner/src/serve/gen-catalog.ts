@@ -7,24 +7,14 @@
  * export name, every path resolves inside the workspace. This catches
  * Genfile errors before the server starts accepting requests.
  *
- * Deviation from the RFC (worth flagging): the RFC says "compile + cache
- * IR for each entry at boot." Compile.rb requires a `--method` argument,
- * and Cambium GenModels can declare multiple public methods. Without a
- * Ruby-side `--list-methods` mode (out of scope for this slice), the
- * boot loader can't enumerate every (gen, method) pair to pre-compile.
- *
- * The pragmatic v1 split:
- *   - Boot:    parse Genfile, validate shape, validate paths exist on
- *              disk. NO Ruby compilation. Server is ready quickly.
- *   - Per-call: serve.ts compiles each (gen, method) on first request
- *               and caches by composite key. Compile cost (~50–100 ms)
- *               is paid once per pair, then amortized across all later
- *               calls — meaningfully cheaper than the per-request Node
- *               cold-start that drove this work in the first place.
- *
- * Pre-compile-at-boot can be added later by introducing a Ruby
- * `--list-methods` mode and walking (gen × methods) at boot. The cache
- * shape stays the same, so it's a transparent upgrade.
+ * This module does **path-and-shape validation only** — no Ruby
+ * compilation. The actual per-gen compile happens in `serve.ts`'s boot
+ * loop, which calls `compileBare(entry.genFilePath)` for each catalog
+ * entry. `compile.rb`'s bare mode (no `--method`) emits a full
+ * `{method → IR}` map per gen in one Ruby invocation, so boot-time
+ * pre-compile across all methods is one Ruby spawn per gen rather than
+ * one per (gen, method) pair. Boot failure on any gen fails the server
+ * startup (no half-loaded state).
  *
  * Path-traversal stance mirrors RED-274 (resolveGenfileContracts):
  * absolute entries rejected, `..` escapes rejected, NUL bytes rejected,

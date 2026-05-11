@@ -100,6 +100,8 @@ packages/cambium-runner/   # @redwood-labs/cambium-runner — TS runtime (RED-24
     tools/            # Tool framework infrastructure (registry, ToolContext,
                       # network-guard, permissions — NOT handlers)
     correctors/       # Built-in correctors (math, dates, currency, citations)
+    serve/            # HTTP server for `cambium serve` (RED-360): bind URI
+                      # parser, Genfile catalog loader, runServe HTTP core
     signals.ts        # Signal extraction engine
     triggers.ts       # Trigger evaluation engine
     compound.ts       # Review + consensus engines

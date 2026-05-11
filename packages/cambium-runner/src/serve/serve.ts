@@ -4,7 +4,7 @@
  * Long-lived runner over HTTP. Boots once, dispatches many requests
  * against pre-compiled IRs cached in memory. The transport layer for
  * non-Node hosts (FastAPI, Django, Go, Elixir, ...) — wire format is
- * locked at v1, see `docs/GenDSL Docs/RFC - Serve Mode [DRAFT].md`.
+ * locked at v1, see `docs/GenDSL Docs/C - Serve Mode.md`.
  *
  * Boot:
  *   1. Load the gen catalog (Genfile.toml [exports.gens] → file paths).
