@@ -45,19 +45,19 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@sinclair/typebox": "^0.34.40",
-    "ajv": "^8.17.1",
-    "pdfjs-dist": "^5.6.205",
-    "undici": "^8.1.0"
+    "@sinclair/typebox": "0.34.49",
+    "ajv": "8.18.0",
+    "pdfjs-dist": "5.6.205",
+    "undici": "8.1.0"
   },
   "optionalDependencies": {
-    "better-sqlite3": "~12.9.0",
-    "quickjs-emscripten": "^0.32.0",
-    "sqlite-vec": "~0.1.6"
+    "better-sqlite3": "12.9.0",
+    "quickjs-emscripten": "0.32.0",
+    "sqlite-vec": "0.1.9"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^22.0.0",
-    "typescript": "^5.8.3"
+    "@types/better-sqlite3": "7.6.13",
+    "@types/node": "22.19.17",
+    "typescript": "5.9.3"
   }
 }

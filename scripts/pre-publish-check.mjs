@@ -59,6 +59,24 @@ const packDir = mkdtempSync(join(tmpdir(), 'cambium-prepublish-pack-'));
 const consumerDir = mkdtempSync(join(tmpdir(), 'cambium-prepublish-consumer-'));
 
 try {
+  // ── Supply-chain age gate — every locked dep must meet the policy ────
+  console.log('\n[0/6] Auditing dependency ages (supply-chain defense)');
+  try {
+    sh('node scripts/check-dep-ages.mjs', { cwd: ROOT, stdio: ['pipe', 'inherit', 'inherit'] });
+    assert(true, 'all locked dependencies meet the minimum-age policy');
+  } catch (err) {
+    assert(false, `dependency age audit FAILED (see output above): ${err.message ?? err}`);
+  }
+
+  // ── Ruby surface — must be stdlib-only ───────────────────────────────
+  console.log('\n[0.5/6] Auditing Ruby requires (stdlib-only policy)');
+  try {
+    sh('node scripts/check-ruby-deps.mjs', { cwd: ROOT, stdio: ['pipe', 'inherit', 'inherit'] });
+    assert(true, 'Ruby surface uses only stdlib (no third-party gems)');
+  } catch (err) {
+    assert(false, `Ruby stdlib-only audit FAILED (see output above): ${err.message ?? err}`);
+  }
+
   // ── Pack both packages — real pack, so prepack/postpack fire ─────────
   console.log('\n[1/6] Packing both tarballs (real pack — prepack/postpack fire)');
   sh(`npm pack --pack-destination "${packDir}"`, { cwd: ROOT });
