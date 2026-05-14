@@ -21,7 +21,7 @@ import { extractSignals } from './signals.js';
 import { evaluateTriggers } from './triggers.js';
 import { ActionRegistry } from './actions/registry.js';
 import { runReview, runConsensus } from './compound.js';
-import { runEnrichment } from './enrich.js';
+import { resolveEnrichmentInput, runEnrichment } from './enrich.js';
 import { parseBudget, trackBudgetFromTraceStep } from './budget.js';
 import type { Budget } from './budget.js';
 import {
@@ -760,6 +760,10 @@ export interface RunGenResult {
   ir: IR;
   /** Human-readable failure reason (budget exceeded, validation failed). */
   errorMessage?: string;
+  /** Typed failure category when `ok` is false (RED-360). Lets callers
+   *  branch on the *kind* of failure without string-matching errorMessage.
+   *  Other ok:false paths (document extraction, etc.) leave it undefined. */
+  failureKind?: 'validation' | 'budget';
 }
 
 class BudgetExceededError extends Error {
@@ -1232,10 +1236,23 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
       continue;
     }
 
+    // RED-327: route base64_pdf envelopes through the extracted-text
+    // path (populated above by extractDocuments) and skip base64_image
+    // envelopes with a clear reason. Plain values pass through.
+    const resolved = resolveEnrichmentInput(contextValue, enrichDef.field, groundingTextByKey);
+    if (resolved.kind === 'skip') {
+      trace.steps.push({
+        type: 'EnrichSkipped',
+        ok: false,
+        meta: { field: enrichDef.field, reason: resolved.reason },
+      });
+      continue;
+    }
+
     trace.steps.push({ type: 'Enrich', id: `enrich_${enrichDef.field}`, meta: { field: enrichDef.field, agent: enrichDef.agent } });
 
     const enrichResult = await runEnrichment(
-      enrichDef, contextValue, ir, contractsMod, generateText, extractJsonObject,
+      enrichDef, resolved.value, ir, contractsMod, generateText, extractJsonObject,
     );
 
     // Add sub-agent trace steps under the enrichment
@@ -1852,6 +1869,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     schemaId: schema.$id,
     ir,
     errorMessage: finalOk ? undefined : 'Validation failed after repair attempts',
+    failureKind: finalOk ? undefined : 'validation',
   };
 
   } catch (e) {
@@ -1885,6 +1903,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
         schemaId: schema.$id,
         ir,
         errorMessage: e.message,
+        failureKind: 'budget',
       };
     }
     throw e;

@@ -4,12 +4,69 @@ import { join } from 'node:path';
 import Ajv from 'ajv';
 import type { GenerateTextFn, ExtractJsonFn, TokenUsage } from './step-handlers.js';
 import { handleGenerate, handleValidate, handleRepair } from './step-handlers.js';
+import { isDocumentEntry } from './documents.js';
 
 export type EnrichmentDef = {
   field: string;   // context field to enrich (e.g., "datadog_logs")
   agent: string;   // agent class name (e.g., "LogSummarizer")
   method?: string; // method to call (default: "summarize")
 };
+
+/**
+ * RED-327: resolve the input value the sub-agent should receive given
+ * a context field. Plain values pass through unchanged. `base64_pdf`
+ * envelopes route through the extracted-text path (the runner's
+ * `extractDocuments` populates `groundingTextByKey` upstream).
+ * `base64_image` envelopes have no extractable text in v1 — return a
+ * skip with a clear reason rather than passing the raw envelope to a
+ * sub-agent that won't know what to do with it.
+ *
+ * Pure helper — caller pushes the trace step.
+ */
+export type EnrichmentInput =
+  | { kind: 'use'; value: any }
+  | { kind: 'skip'; reason: string };
+
+export function resolveEnrichmentInput(
+  contextValue: any,
+  field: string,
+  groundingTextByKey: Record<string, string>,
+): EnrichmentInput {
+  // Plain string / object / list — pass through (the sub-agent JSON-
+  // stringifies non-strings on the Ruby side per existing behavior).
+  // A malformed envelope (right `kind` but wrong `data` type) also
+  // falls through to "use" rather than silently triggering the
+  // extracted-text path — the strict isDocumentEntry guard catches
+  // that case the same way the documents loader does.
+  if (!isDocumentEntry(contextValue)) {
+    return { kind: 'use', value: contextValue };
+  }
+
+  if (contextValue.kind === 'base64_pdf') {
+    const extracted = groundingTextByKey[field];
+    if (typeof extracted === 'string') {
+      return { kind: 'use', value: extracted };
+    }
+    // PDF envelope present but extractDocuments produced no text for
+    // it. Either extraction failed silently or the entry was an
+    // image-only PDF — skip with a clear pointer to OCR.
+    return {
+      kind: 'skip',
+      reason:
+        `base64_pdf envelope for "${field}" produced no extractable text. ` +
+        `OCR upstream and pass the text as a plain string if the PDF is image-only.`,
+    };
+  }
+
+  // base64_image — no text path in v1.
+  return {
+    kind: 'skip',
+    reason:
+      `Cannot enrich a base64_image envelope for "${field}" — no extractable text. ` +
+      `Image enrichment via vision-model sub-agents is a future follow-up; ` +
+      `for now, OCR upstream and pass the text as a plain string.`,
+  };
+}
 
 export type EnrichmentResult = {
   field: string;

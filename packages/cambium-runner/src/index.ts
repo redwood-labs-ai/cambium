@@ -31,3 +31,17 @@ export type {
 // `app/tools/<name>.tool.ts` and import ToolContext for the ctx.fetch
 // SSRF guard + permissions plumbing.
 export type { ToolContext } from './tools/tool-context.js';
+
+// RED-360 serve mode: long-lived runner over HTTP. Exposed so the CLI
+// (`cambium serve`) and engine-mode hosts that want to embed the server
+// have the same entry point. Wire format is locked at v1 — see
+// `docs/GenDSL Docs/C - Serve Mode.md`.
+export { runServe } from './serve/serve.js';
+export type {
+  RunServeOptions,
+  RunServeHandle,
+  RunServeAddress,
+  CompileBareFn,
+} from './serve/serve.js';
+export { parseBind, isLoopback } from './serve/bind.js';
+export type { BindTarget, ParseBindOptions } from './serve/bind.js';

@@ -224,6 +224,54 @@ memory :facts, strategy: :semantic, top_k: 5, embed: :embedding  # also resolves
 
 **Coordinates with RED-238:** semantic query source overrides — orthogonal to alias resolution but touches the same memory decl surface.
 
+## Profile-driven model selection (RED-326)
+
+Static aliases swap a name for one literal. **Profiles** swap the same name for *different* literals depending on environment — dev runs on local Qwen, prod runs on hosted Anthropic, no Ruby conditionals required.
+
+```ruby
+# app/config/models.rb
+
+# Globals — available in every profile, useful for aliases that don't
+# change between dev and prod (e.g. a code-review model where you want
+# the same quality everywhere).
+codereview "anthropic:claude-opus-4-7"
+
+profile :dev do
+  default   "omlx:Qwen3.5-27B-4bit"
+  fast      "omlx:gemma-4-31b-it-8bit"
+  embedding "omlx:bge-small-en"
+end
+
+profile :prod do
+  default   "anthropic:claude-sonnet-4-6"
+  fast      "anthropic:claude-haiku-4-5-20251001"
+  embedding "omlx:bge-small-en"  # embeddings can pin a provider regardless of chat profile
+end
+```
+
+**Active profile selection** at compile time:
+
+| Priority | Source | Behavior |
+| -- | -- | -- |
+| 1 | `--profile <name>` CLI flag | Wins over env. CLI sets `CAMBIUM_PROFILE` for the Ruby subprocess. |
+| 2 | `CAMBIUM_PROFILE` env var | Used when no `--profile` was passed. Useful for deployment manifests. |
+| 3 | A profile literally named `:dev` | Implicit default if declared. |
+| 4 | First declared profile | Used when there's no `:dev` and the operator hasn't picked one. |
+
+Profile-scoped aliases shadow globals of the same name. Both `:dev` and `:prod` can declare `default`; the active profile's value wins, and `codereview` (global) is the same in either profile.
+
+**Back-compat (RED-237):** a workspace with NO `profile` blocks behaves exactly as it did pre-RED-326 — only the top-level aliases are visible, no profile resolution happens, the IR is identical.
+
+**Error behavior:**
+
+- `CAMBIUM_PROFILE=staging` when `models.rb` only declares `:dev` and `:prod` → `CompileError` naming the available profiles.
+- A gen references `:default` but the active profile doesn't define it (and there's no global `default`) → existing "unknown model alias" error, now annotated with the active profile name and the list of declared profiles so the operator can see which scope they're in.
+
+**Non-goals (today, may file follow-ups):**
+
+- Per-gen profile override (`model :default, profile: :prod` to let one gen run prod-quality while sibling gens stay on dev).
+- Profile-driven non-model config (memory pools, policy packs). Possibly the natural extension if profiles prove useful in practice.
+
 ## See also
 - [[P - GenModel]]
 - [[P - Memory]]

@@ -29,6 +29,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[C - Repair Loop]]
 - [[C - Signals, State, and Triggers]]
 - [[C - Schema Description (auto-generated)]]
+- [[C - Serve Mode]] — long-lived HTTP server hosting every gen in a workspace (RED-360); locked v1 wire format, closed `error.kind` enum, `--max-inflight` / `--run-timeout` / `--shutdown-timeout`
 
 ## Data + integrations
 - [[D - Schemas (JSON Schema)]]
