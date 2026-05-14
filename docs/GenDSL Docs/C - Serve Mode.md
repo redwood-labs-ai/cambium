@@ -165,6 +165,22 @@ Ruby `compile.rb` accepts a no-`--method` form that emits a JSON map of every pu
 
 Single-method gens still get a 1-entry map (always-map shape, never bare IR). With `--method X`, behavior is unchanged: emit a single IR. Existing engine-mode build steps that already pass `--method` keep working bit-for-bit.
 
+### Locating `compile.rb`
+
+The Ruby compiler ships in the `@redwood-labs/cambium` CLI package alongside `cli/`. When `cambium serve` is invoked through the CLI bin, the path is computed relative to `cli/serve.mjs` — `node_modules/@redwood-labs/cambium/ruby/cambium/compile.rb` — so it resolves regardless of where npm hoists the package. Library callers of `runServe` who skip the CLI can pass the path explicitly:
+
+```ts
+import { runServe } from '@redwood-labs/cambium-runner';
+
+runServe({
+  workspaceDir,
+  bind,
+  compileRb: '/path/to/ruby/cambium/compile.rb',  // option, highest precedence
+});
+```
+
+Precedence chain: `opts.compileRb` → `process.env.CAMBIUM_COMPILE_RB` → a monorepo-relative fallback used for in-tree tests. The env var is a deployment-time escape hatch for operators who unpack the CLI and the runner in non-standard layouts; production callers should prefer the explicit option (RED-376).
+
 ## Boot fail-fast
 
 If ANY `[exports.gens]` entry fails to compile (Ruby syntax error, missing referenced schema, etc.), the server fails to start with a clear error. Half-loaded servers — where some gens work and others fail at first request — are NOT a state the runtime allows. Operators see compile errors at boot, not as 500s in production traffic.

@@ -316,6 +316,73 @@ TestGen = "app/gens/test_gen.cmb.rb"
   });
 });
 
+describe('runServe — compileRb precedence (RED-376)', () => {
+  let tmp: string;
+  let handle: RunServeHandle | undefined;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'cambium-serve-compilerb-'));
+    mkdirSync(join(tmp, 'app/gens'), { recursive: true });
+    mkdirSync(join(tmp, 'src'), { recursive: true });
+    writeFileSync(join(tmp, 'app/gens/test_gen.cmb.rb'), FIXTURE_GEN);
+    writeFileSync(join(tmp, 'src/contracts.ts'), FIXTURE_CONTRACTS);
+    writeFileSync(
+      join(tmp, 'Genfile.toml'),
+      `[package]
+name = "compilerb-precedence"
+
+[types]
+contracts = ["src/contracts.ts"]
+
+[exports.gens]
+TestGen = "app/gens/test_gen.cmb.rb"
+`,
+    );
+  });
+
+  afterEach(async () => {
+    if (handle) {
+      await handle.close().catch(() => {});
+      handle = undefined;
+    }
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('uses opts.compileRb when passed (over env + default)', async () => {
+    const bogus = '/nonexistent/compile.rb.option';
+    const prevEnv = process.env.CAMBIUM_COMPILE_RB;
+    process.env.CAMBIUM_COMPILE_RB = '/nonexistent/compile.rb.env';
+    try {
+      handle = runServe({
+        workspaceDir: tmp,
+        bind: parseBind('tcp://127.0.0.1:0'),
+        compileRb: bogus,
+      });
+      // Boot fails inside gen-catalog hydration → handle.ready rejects.
+      // The error must reference the option path, proving precedence.
+      await expect(handle.ready).rejects.toThrow(/compile\.rb\.option/);
+    } finally {
+      if (prevEnv === undefined) delete process.env.CAMBIUM_COMPILE_RB;
+      else process.env.CAMBIUM_COMPILE_RB = prevEnv;
+    }
+  });
+
+  it('falls back to CAMBIUM_COMPILE_RB when opts.compileRb is unset', async () => {
+    const prevEnv = process.env.CAMBIUM_COMPILE_RB;
+    process.env.CAMBIUM_COMPILE_RB = '/nonexistent/compile.rb.env';
+    try {
+      handle = runServe({
+        workspaceDir: tmp,
+        bind: parseBind('tcp://127.0.0.1:0'),
+      });
+      await expect(handle.ready).rejects.toThrow(/compile\.rb\.env/);
+    } finally {
+      if (prevEnv === undefined) delete process.env.CAMBIUM_COMPILE_RB;
+      else process.env.CAMBIUM_COMPILE_RB = prevEnv;
+    }
+  });
+});
+
 describe('classifyThrownError (RED-360)', () => {
   it('classifies a missing-tool error as tool_dispatch_failed', () => {
     const err = new Error(

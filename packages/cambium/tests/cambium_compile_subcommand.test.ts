@@ -38,9 +38,16 @@ function runCli(args: string[]) {
 }
 
 function writeMinimalGen(): string {
-  // Reference an in-tree schema so the post-compile schema-existence
-  // check doesn't trip; the engine-mode flow uses a sibling schemas.ts,
-  // but the current Ruby validator only knows about packages/cambium/src/contracts.ts.
+  // Scaffold an engine-mode sentinel + sibling schemas.ts so the RED-287
+  // source-anchored schema validator has a contracts surface to discover.
+  // Pre-RED-373 the cwd-relative `packages/cambium/src/contracts.ts`
+  // fallback covered this; that fallback was removed and tests now
+  // declare their own contracts surface.
+  writeFileSync(join(scratch, 'cambium.engine.json'), '{}');
+  writeFileSync(join(scratch, 'schemas.ts'), `
+import { Type } from '@sinclair/typebox';
+export const AnalysisReport = Type.Object({ summary: Type.String() }, { additionalProperties: false, $id: 'AnalysisReport' });
+`.trim());
   const gen = join(scratch, 'foo.cmb.rb');
   writeFileSync(gen, `
 class CompileSubcommandTest < GenModel
@@ -113,8 +120,15 @@ describe('cambium compile (RED-244)', () => {
   });
 
   it('propagates compile errors with non-zero exit and the Ruby diagnostic', () => {
-    // Reference a schema that doesn't exist — RED-210's compile-time
-    // validator should reject it.
+    // Same engine-sentinel scaffold as writeMinimalGen() so the
+    // validator has a contracts surface to compare against. The
+    // sibling schemas.ts intentionally does NOT export
+    // SchemaThatDoesNotExist — that's the typo we want rejected.
+    writeFileSync(join(scratch, 'cambium.engine.json'), '{}');
+    writeFileSync(join(scratch, 'schemas.ts'), `
+import { Type } from '@sinclair/typebox';
+export const AnalysisReport = Type.Object({ summary: Type.String() }, { additionalProperties: false, $id: 'AnalysisReport' });
+`.trim());
     const gen = join(scratch, 'broken.cmb.rb');
     writeFileSync(gen, `
 class BrokenCompileTest < GenModel
@@ -134,7 +148,7 @@ end
     const result = runCli(['compile', gen, '--method', 'analyze']);
     expect(result.status).not.toBe(0);
     expect((result.stderr ?? '') + (result.stdout ?? ''))
-      .toMatch(/Schema.*not.*found|SchemaThatDoesNotExist/i);
+      .toMatch(/Schema.*not.*found|SchemaThatDoesNotExist|Unknown schema/i);
     // No output file should have been written when compile fails.
     expect(existsSync(join(scratch, 'broken.ir.json'))).toBe(false);
   });
