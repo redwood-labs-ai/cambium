@@ -304,11 +304,13 @@ module Cambium
   class ModelAliases
     NAME_RE = /\A[a-z][a-z0-9_]*\z/
 
-    attr_reader :aliases, :source_file
+    attr_reader :aliases, :source_file, :active_profile, :declared_profiles
 
-    def initialize(aliases, source_file)
+    def initialize(aliases, source_file, active_profile: nil, declared_profiles: [])
       @aliases = aliases
       @source_file = source_file
+      @active_profile = active_profile        # nil when no profiles declared OR no profile selected
+      @declared_profiles = declared_profiles  # ordered list of all profile names (for error messages)
     end
 
     def lookup(name)
@@ -349,6 +351,23 @@ module Cambium
     # Load the workspace's model aliases. Returns an empty ModelAliases
     # if no file is present — not an error; a workspace using only
     # literals doesn't need the file.
+    #
+    # RED-326: `profile :name do ... end` blocks let a workspace pivot
+    # by environment (dev vs prod, typically). The active profile is
+    # selected here at load time:
+    #
+    #   1. CAMBIUM_PROFILE env var, if set and matches a declared profile.
+    #      (The CLI's `--profile <name>` flag overwrites this env var for
+    #      the Ruby subprocess before invoking compile.rb, so the flag
+    #      always wins over an inherited env value.)
+    #   2. A profile literally named `:dev` if one was declared.
+    #   3. The first declared profile.
+    #
+    # Aliases declared outside any profile block are "global" — they
+    # apply across all profiles. Profile-scoped aliases shadow globals
+    # of the same name. When NO profile is selected (no profiles
+    # declared, or the workspace pre-dates this feature), behavior is
+    # exactly as RED-237: only the global aliases are visible.
     def self.load
       src = Cambium::CompilerState.current_source_file
       file = search_candidates(src).find { |f| File.exist?(f) }
@@ -363,7 +382,32 @@ module Cambium
         raise CompileError,
               "Failed to load model aliases from #{file}: #{e.class}: #{e.message}"
       end
-      new(builder.aliases, file)
+
+      active = resolve_active_profile(builder, file)
+      effective = builder.aliases.dup  # globals first
+      if active
+        effective.merge!(builder.profiles[active] || {})  # profile shadows globals
+      end
+      new(effective, file, active_profile: active, declared_profiles: builder.profile_order.dup)
+    end
+
+    # Pick the active profile from CAMBIUM_PROFILE / :dev / first
+    # declared. nil when no profiles are declared in this file.
+    def self.resolve_active_profile(builder, file)
+      return nil if builder.profile_order.empty?
+
+      env_profile = ENV['CAMBIUM_PROFILE']&.strip
+      if env_profile && !env_profile.empty?
+        unless builder.profiles.key?(env_profile)
+          raise CompileError,
+                "CAMBIUM_PROFILE='#{env_profile}' but no such profile in #{file}. " \
+                "Available: [#{builder.profile_order.join(', ')}]"
+        end
+        return env_profile
+      end
+
+      return 'dev' if builder.profiles.key?('dev')
+      builder.profile_order.first
     end
 
     # Resolve a user-supplied model reference into a literal string.
@@ -395,10 +439,18 @@ module Cambium
 
       avail = @aliases.keys.sort
       hint = avail.empty? ? " (no aliases defined — create app/config/models.rb)" : ""
+      profile_hint =
+        if @active_profile
+          " (active profile: :#{@active_profile}; declared profiles: " \
+            "[#{@declared_profiles.join(', ')}])"
+        else
+          ''
+        end
       raise CompileError,
             "#{context}: unknown model alias :#{name}. " \
             "Available: [#{avail.join(', ')}]#{hint}" \
-            "#{@source_file ? " (from #{@source_file})" : ''}"
+            "#{@source_file ? " (from #{@source_file})" : ''}" \
+            "#{profile_hint}"
     end
   end
 
@@ -409,10 +461,39 @@ module Cambium
   # the identifier-shape regex so a Symbol ref can't interpolate into
   # anything surprising.
   class ModelAliasesBuilder
-    attr_reader :aliases
+    attr_reader :aliases, :profiles, :profile_order
 
     def initialize
-      @aliases = {}
+      @aliases = {}        # globals — aliases declared outside any profile block
+      @profiles = {}       # name => { alias_name => literal }
+      @profile_order = []  # declaration order; default-selection prefers `:dev` else first
+      @current_profile = nil  # set inside a `profile :name do ... end` block
+    end
+
+    # RED-326: declare a named profile. Aliases inside the block scope
+    # to that profile and shadow globals of the same name when the
+    # profile is active.
+    def profile(name, &block)
+      raise CompileError, 'profile requires a block' unless block_given?
+      raise CompileError, 'profile blocks cannot nest' if @current_profile
+
+      name_str = name.is_a?(Symbol) || name.is_a?(String) ? name.to_s : nil
+      unless name_str && name_str =~ ModelAliases::NAME_RE
+        raise CompileError,
+              "profile name must match #{ModelAliases::NAME_RE.inspect} (got #{name.inspect})"
+      end
+      if @profiles.key?(name_str)
+        raise CompileError, "duplicate profile :#{name_str} in models.rb"
+      end
+
+      @profiles[name_str] = {}
+      @profile_order << name_str
+      @current_profile = name_str
+      begin
+        instance_eval(&block)
+      ensure
+        @current_profile = nil
+      end
     end
 
     def method_missing(name, *args, **kwargs)
@@ -430,10 +511,12 @@ module Cambium
         raise CompileError,
               "model alias name :#{name} must match #{ModelAliases::NAME_RE.inspect}"
       end
-      if @aliases.key?(name_str)
-        raise CompileError, "duplicate model alias :#{name_str} in models.rb"
+      target = @current_profile ? @profiles[@current_profile] : @aliases
+      scope_label = @current_profile ? "profile :#{@current_profile}" : 'models.rb'
+      if target.key?(name_str)
+        raise CompileError, "duplicate model alias :#{name_str} in #{scope_label}"
       end
-      @aliases[name_str] = literal
+      target[name_str] = literal
     end
 
     def respond_to_missing?(_name, _include_private = false)
