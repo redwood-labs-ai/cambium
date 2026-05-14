@@ -120,14 +120,23 @@ defs = klass._cambium_defaults
 # RED-287: engine-mode gens source schemas from `<engineDir>/schemas.ts`
 # (a sibling of the gen) rather than `<pkg>/src/contracts.ts`. The
 # engine candidate is prepended so a single walk covers both shapes.
+#
+# RED-373: walk up TWO levels from gen_dir (app/gens) to the workspace
+# root where src/contracts.ts lives. Earlier versions had two issues
+# stacked: the workspace dir was one level too shallow (just `app/`), and
+# a cwd-relative `packages/cambium/src/contracts.ts` fallback could match
+# the WRONG workspace's contracts when the operator ran from a Cambium
+# repo cwd pointed at an external workspace via `--workspace`. The
+# fallback is gone now; post-0.3.3 (RED-353) the TS runtime walks up
+# from `ir.entry.source` for contracts, so compile-time validation can
+# rely on the same source-anchored discovery.
 if (schema_name = defs[:returnSchema])
   gen_dir = File.dirname(File.expand_path(file))
-  pkg_dir = File.dirname(gen_dir)  # up from app/gens/
+  workspace_dir = File.dirname(File.dirname(gen_dir))  # up TWO from app/gens/
   engine_sibling = File.join(gen_dir, 'schemas.ts')
   contracts_candidates = [
     engine_sibling,
-    File.join(pkg_dir, 'src', 'contracts.ts'),
-    File.join('packages', 'cambium', 'src', 'contracts.ts'),
+    File.join(workspace_dir, 'src', 'contracts.ts'),
   ].uniq.select { |p| File.exist?(p) }
 
   # If no contracts file is discoverable, skip — the runner will still
