@@ -394,6 +394,21 @@ async function generateWithTools(opts: {
     );
   }
 
+  // RED-375: Force-mock path. The non-agentic `generateText` gates on
+  // CAMBIUM_ALLOW_MOCK before any provider fetch (see line 184); this
+  // function used to skip the gate entirely, so `mode :agentic` gens
+  // under `--mock` silently hit the real provider. Return a single
+  // turn of mock text with no tool_calls so the agentic loop terminates
+  // immediately with the mock content as the final answer — same
+  // semantic as the non-agentic mock path.
+  if (process.env.CAMBIUM_ALLOW_MOCK === '1') {
+    const lastUser = [...opts.messages].reverse().find(m => m.role === 'user');
+    const promptText = typeof lastUser?.content === 'string' ? lastUser.content : '';
+    return {
+      message: { content: mockGenerate(promptText), tool_calls: [] },
+    };
+  }
+
   if (provider === 'ollama') {
     // RED-208: Ollama's /api/chat accepts OpenAI-format tools and returns
     // tool_calls in message.tool_calls. Request/response shaping lives in
