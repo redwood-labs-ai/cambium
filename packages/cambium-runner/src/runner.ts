@@ -760,6 +760,10 @@ export interface RunGenResult {
   ir: IR;
   /** Human-readable failure reason (budget exceeded, validation failed). */
   errorMessage?: string;
+  /** Typed failure category when `ok` is false (RED-360). Lets callers
+   *  branch on the *kind* of failure without string-matching errorMessage.
+   *  Other ok:false paths (document extraction, etc.) leave it undefined. */
+  failureKind?: 'validation' | 'budget';
 }
 
 class BudgetExceededError extends Error {
@@ -1852,6 +1856,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     schemaId: schema.$id,
     ir,
     errorMessage: finalOk ? undefined : 'Validation failed after repair attempts',
+    failureKind: finalOk ? undefined : 'validation',
   };
 
   } catch (e) {
@@ -1885,6 +1890,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
         schemaId: schema.$id,
         ir,
         errorMessage: e.message,
+        failureKind: 'budget',
       };
     }
     throw e;

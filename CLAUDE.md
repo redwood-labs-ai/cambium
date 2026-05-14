@@ -57,7 +57,8 @@ Look at the trace (`runs/<run_id>/trace.json`) and help them tune the agent — 
 
 ```bash
 cambium run <file.cmb.rb> --method <method> --arg <path>   # compile + execute
-cambium compile <file.cmb.rb> --method <method> [-o <ir.json>] # emit IR JSON without executing (engine-mode build step, RED-244)
+cambium compile <file.cmb.rb> [--method <method>] [-o <ir.json>] # emit IR JSON without executing. Without --method, emits a {method → IR} map for every public method (RED-244, RED-360).
+cambium serve --workspace <path> --bind <uri>              # long-lived HTTP server hosting every gen in the workspace (RED-360)
 cambium new engine|agent|tool|action|schema|system|corrector|policy|memory_pool <Name>   # scaffold (deterministic)
 cambium new config models|memory_policy                        # scaffold app/config/<form>.rb (RED-237 / RED-239)
 cambium new engine <Name>                                    # new engine folder under ./cambium/ (RED-246)
@@ -99,11 +100,17 @@ packages/cambium-runner/   # @redwood-labs/cambium-runner — TS runtime (RED-24
     tools/            # Tool framework infrastructure (registry, ToolContext,
                       # network-guard, permissions — NOT handlers)
     correctors/       # Built-in correctors (math, dates, currency, citations)
+    serve/            # HTTP server for `cambium serve` (RED-360): bind URI
+                      # parser, Genfile catalog loader, runServe HTTP core
     signals.ts        # Signal extraction engine
     triggers.ts       # Trigger evaluation engine
     compound.ts       # Review + consensus engines
     enrich.ts         # Sub-agent enrichment
     schema-describe.ts # Auto-generated schema descriptions
+packages/cambium-client-python/   # cambium-client — Python client for cambium serve (RED-361, pip install cambium-client)
+  src/cambium_client/   # CambiumClient (sync + async), wire dataclasses, error.kind subclasses
+  tests/                # pytest; conftest.py spawns real `cambium serve` for integration coverage
+  scripts/              # pre_publish_check.py — wheel build + venv install + smoke-import gate
 ruby/cambium/
   runtime.rb        # GenModel DSL primitives
   compile.rb        # Ruby → JSON IR compiler

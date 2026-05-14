@@ -48,7 +48,8 @@ Usage:
   cambium init [name]
   cambium new <type> <Name>
   cambium run <file.cmb.rb> --method <method> --arg <path>|- [--trace <path>] [--out <path>] [--mock] [--memory-key <name>=<value> ...] [--session-id <id>]
-  cambium compile <file.cmb.rb> --method <method> [--arg <path>|-] [-o <output>]
+  cambium compile <file.cmb.rb> [--method <method>] [--arg <path>|-] [-o <output>]
+  cambium serve --workspace <path> --bind <uri> [--allow-remote]
   cambium doctor
   cambium test
   cambium lint
@@ -57,7 +58,9 @@ Commands:
   init      Initialize a new Cambium workspace
   new       Scaffold a new engine, agent, tool, action, schema, system, corrector, policy, memory_pool, or config
   run       Compile and execute a GenModel
-  compile   Compile a GenModel to IR JSON (no execution; engine-mode build step)
+  compile   Compile a GenModel to IR JSON (no execution; engine-mode build step).
+            Without --method, emits a {method → IR} map for every public method.
+  serve     Start a long-lived HTTP server hosting every gen in this workspace.
   doctor    Check environment setup and dependencies
   test      Run the test suite
   lint      Validate package structure and declarations
@@ -153,6 +156,14 @@ if (cmd === 'compile') {
 if (cmd === 'schedule') {
   const { runSchedule } = await import('./schedule.mjs');
   await runSchedule(args);
+  process.exit(0);
+}
+
+// ── cambium serve (RED-360) ────────────────────────────────────────
+if (cmd === 'serve') {
+  const { runServeCli } = await import('./serve.mjs');
+  await runServeCli(args);
+  // runServeCli runs until a signal arrives; if it returns, exit cleanly.
   process.exit(0);
 }
 
