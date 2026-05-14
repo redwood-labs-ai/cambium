@@ -4,6 +4,20 @@ All notable changes to Cambium are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Cambium adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-05-13
+
+Patch release. Three urgent fixes for downstream users on npm-installed Cambium + modern Ruby, surfaced an hour after 0.4.0 shipped:
+
+### Fixed
+
+- **`cambium serve` can now locate `compile.rb` when installed from npm (RED-376).** The default compile-script path was computed as 4-levels-up from `packages/cambium-runner/{src,dist}/serve/serve.{ts,js}` — the workspace root in the monorepo, but `node_modules/` once installed. First `/v1/run` request blew up with ENOENT on `node_modules/ruby/cambium/compile.rb`. Fix layered three ways (highest precedence first): new `compileRb` option on `RunServeOptions`, `CAMBIUM_COMPILE_RB` env-var escape hatch, monorepo-relative fallback for in-tree tests. `cli/serve.mjs` computes the path relative to `import.meta.url` and threads it through. The CLI package definitionally ships its own `ruby/` directory next to `cli/`, so the resolution works regardless of where npm hoists. Mirrors `cli/cambium.mjs`'s pattern; see [`C - Serve Mode.md`](docs/GenDSL%20Docs/C%20-%20Serve%20Mode.md) § "Locating `compile.rb`".
+- **`generate` DSL works on Ruby 3.0+ (RED-377).** `ruby/cambium/runtime.rb` used `Proc.new` (no explicit block arg) to capture the calling block — implicit-block-capture was Ruby-2.7-deprecated and Ruby-3.0-removed. Alpine ships Ruby 3.4; any `cambium serve` running in a modern container hit `ArgumentError: tried to create Proc object without a block` on the first gen using block-form `generate`. Switched to the standard `&block` parameter pattern already used by `enrich` and `on` in the same file. No behavior change on Ruby 2.x; restores compilation on Ruby 3.x. Local-dev Ruby 2.6.10 masked the bug; CI doesn't yet exercise Ruby 3.x (filed as follow-up).
+- **`--mock` now honors `mode :agentic` (RED-375).** The single-shot text path (`generateText`) gated on `CAMBIUM_ALLOW_MOCK` before any provider fetch; the agentic tool-calling path (`generateWithTools`) had no such gate and went straight to the provider, so `cambium run --mock` on any `mode :agentic` gen either hit a real LLM (Ollama/oMLX if reachable) or hard-errored on missing `ANTHROPIC_API_KEY`. `--mock` was a lie there. Added the same gate at the top of `generateWithTools`: return one turn of `mockGenerate(...)` with an empty `tool_calls` array, which terminates the agentic loop after one turn with the mock content as the final answer. Same semantic as the non-agentic mock path. `runner_mock_smoke.test.ts` now covers `data_analyst` (the first in-tree `mode :agentic` gen) under `--mock`. Extends the parallel-gap note in [`N - App Mode vs Engine Mode (RED-220)`](docs/GenDSL%20Docs/N%20-%20App%20Mode%20vs%20Engine%20Mode%20%28RED-220%29.md) item 4.
+
+### Changed
+
+- **`@redwood-labs/cambium`** and **`@redwood-labs/cambium-runner`** bump to `0.4.1`. No CLI surface changes; new `compileRb` option on `RunServeOptions` is additive.
+
 ## [0.4.0] — 2026-05-13
 
 Minor release. Headline: **serve mode + first-party Python client**. Cambium can now run as a long-lived HTTP server (`cambium serve`) hosting every gen in a workspace, and a `pip install cambium-client` Python package talks to it natively with one sync+async `CambiumClient` API. The migration target — a FastAPI service swapping its subprocess wrapper for the client with one import change and calling warm Cambium on the request path — is now real.
