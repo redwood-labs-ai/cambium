@@ -10,7 +10,17 @@ import { tmpdir } from 'node:os'
  */
 describe('compile-time schema validation (RED-210)', () => {
   it('rejects an unknown schema name with a helpful error', () => {
+    // Scaffold an engine-mode sentinel + sibling schemas.ts so the
+    // RED-287 source-anchored validator has something to discover.
+    // Pre-RED-373 this test relied on a cwd-relative
+    // `packages/cambium/src/contracts.ts` fallback that has since been
+    // removed; tests now have to declare their own contracts surface.
     const dir = mkdtempSync(join(tmpdir(), 'cambium-red210-'))
+    writeFileSync(join(dir, 'cambium.engine.json'), '{}')
+    writeFileSync(join(dir, 'schemas.ts'), `
+import { Type } from '@sinclair/typebox';
+export const AnalysisReport = Type.Object({ summary: Type.String() }, { additionalProperties: false, $id: 'AnalysisReport' });
+`.trim())
     const gen = join(dir, 'typo.cmb.rb')
     writeFileSync(gen, `
 class TypoGen < GenModel

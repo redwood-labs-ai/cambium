@@ -1754,7 +1754,7 @@ module Cambium
       end
     end
 
-    def generate(prompt)
+    def generate(prompt, &block)
       builder = Cambium::CompilerState.current_builder
       raise Cambium::CompileError, 'generate called outside compilation context' unless builder
 
@@ -1768,7 +1768,7 @@ module Cambium
       }
 
       dsl = GenerateDSL.new(g)
-      dsl.instance_eval(&Proc.new) if block_given?
+      dsl.instance_eval(&block) if block
 
       builder.add(g)
       g

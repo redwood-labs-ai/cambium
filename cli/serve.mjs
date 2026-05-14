@@ -5,7 +5,17 @@
 // shutdown. The runner package owns the actual HTTP/dispatch logic;
 // this module is just argv glue and signal handling.
 
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// `cli/serve.mjs` lives next to `cli/cambium.mjs` and `ruby/` in the
+// `@redwood-labs/cambium` package, both in the monorepo and in any
+// npm install. Computing the compile.rb path relative to *this* file
+// means it resolves correctly regardless of where node_modules sits —
+// see RED-376 for the bug this fixes. Mirrors `cli/cambium.mjs:40`'s
+// `RUBY_COMPILE_SCRIPT` resolution.
+const CLI_DIR = dirname(fileURLToPath(import.meta.url));
+const COMPILE_RB = resolve(CLI_DIR, '..', 'ruby', 'cambium', 'compile.rb');
 
 function usage(msg) {
   if (msg) console.error(`\n${msg}`);
@@ -102,6 +112,7 @@ export async function runServeCli(args) {
   const handle = runServe({
     workspaceDir: resolve(workspace),
     bind,
+    compileRb: COMPILE_RB,
     maxInflight,
     runTimeoutMs,
     shutdownTimeoutMs,
