@@ -1,6 +1,6 @@
 /**
  * RED-223: end-to-end smoke of `cambium run --mock` for every
- * non-agentic in-tree gen.
+ * in-tree gen, agentic and non-agentic.
  *
  * The two bugs fixed on RED-221 (a missing optional chain and an
  * un-awaited Promise, both in runner.ts's main() orchestration) lived
@@ -9,9 +9,11 @@
  * completes cleanly — direct-call tests can't catch errors in the
  * orchestration layer above the module boundary.
  *
- * Agentic gens (gaia_solver, web_researcher, data_analyst) are skipped
- * here because `generateWithTools` has no mock fallback today; adding
- * one is a separate concern.
+ * RED-375: agentic gens (`mode :agentic`) used to silently hit the
+ * real provider under --mock because `generateWithTools` had no
+ * CAMBIUM_ALLOW_MOCK gate. Now they're in the matrix below — they must
+ * complete offline with the mock generator returning one turn of text
+ * and zero tool_calls (terminates the agentic loop after one turn).
  */
 import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
@@ -61,6 +63,19 @@ const CASES: Case[] = [
     // is that the orchestration (compile + run + validate + repair +
     // grounding + signals + triggers + trace-write) completes without
     // crashing, not that the mock output is semantically correct.
+  },
+  {
+    // RED-375: agentic gen under --mock must terminate offline (no
+    // provider). Pre-fix, generateWithTools had no mock gate and this
+    // call hit the real Ollama server (or hard-errored on missing
+    // ANTHROPIC_API_KEY). data_analyst returns AnalysisReport which
+    // matches mockGenerate's analyst stub, so the output shape can
+    // also be asserted.
+    name: 'data_analyst (mode :agentic — RED-375 mock gate)',
+    gen: 'packages/cambium/app/gens/data_analyst.cmb.rb',
+    method: 'analyze',
+    fixture: 'packages/cambium/examples/fixtures/incident.txt',
+    requiredOutputKeys: ['summary'],
   },
 ];
 

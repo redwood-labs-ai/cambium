@@ -42,8 +42,14 @@ import { loadGenCatalog, type GenCatalog } from './gen-catalog.js';
 import type { BindTarget } from './bind.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// packages/cambium-runner/src/serve/serve.ts → workspace root (up 4 levels).
-const DEFAULT_COMPILE_RB = pathResolve(__dirname, '../../../..', 'ruby/cambium/compile.rb');
+// Monorepo-only fallback: from `packages/cambium-runner/{src,dist}/serve/serve.{ts,js}`,
+// up 4 levels is the workspace root, where `ruby/cambium/compile.rb` lives.
+// This is correct ONLY for in-tree dev/tests — when `@redwood-labs/cambium-runner`
+// is installed via npm, the layout is `node_modules/@redwood-labs/cambium-runner/dist/`
+// and up-4 lands in `node_modules/`, which has no `ruby/`. Callers should pass
+// `compileRb` (or set `CAMBIUM_COMPILE_RB`) for production use; the CLI does so
+// via `cli/serve.mjs`. See RED-376.
+const MONOREPO_FALLBACK_COMPILE_RB = pathResolve(__dirname, '../../../..', 'ruby/cambium/compile.rb');
 
 const SERVE_VERSION = 'v1';
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
@@ -114,6 +120,11 @@ export interface RunServeOptions {
   bind: BindTarget;
   /** Override the compile fn (default spawns ruby compile.rb in bare mode). */
   compileBare?: CompileBareFn;
+  /** Path to `ruby/cambium/compile.rb`. When omitted, falls back in this order:
+   *  `process.env.CAMBIUM_COMPILE_RB`, then the monorepo-relative path (works in
+   *  the cambium repo and tests, never in `node_modules`). The CLI passes this
+   *  explicitly so npm-installed `cambium serve` works. RED-376. */
+  compileRb?: string;
   /** Override the dispatch fn (default is the imported runGenFromIr). For tests. */
   runGenFromIrFn?: RunGenFromIrFn;
   /** Override the runtime cwd passed to runGenFromIr. Defaults to workspaceDir. */
@@ -162,7 +173,9 @@ export interface RunServeHandle {
 }
 
 export function runServe(opts: RunServeOptions): RunServeHandle {
-  const compileBare = opts.compileBare ?? defaultCompileBare;
+  const compileRb =
+    opts.compileRb ?? process.env.CAMBIUM_COMPILE_RB ?? MONOREPO_FALLBACK_COMPILE_RB;
+  const compileBare = opts.compileBare ?? makeDefaultCompileBare(compileRb);
   const runGenFromIrImpl = opts.runGenFromIrFn ?? runGenFromIr;
   const runCwd = opts.runCwd ?? opts.workspaceDir;
   // 0 or negative would lock the server out entirely — treat those as
@@ -632,24 +645,25 @@ function errorMessage(err: unknown): string {
 
 // ── default Ruby compile-bare ─────────────────────────────────────
 
-function defaultCompileBare(genFilePath: string): Promise<Record<string, IR>> {
-  return Promise.resolve().then(() => {
-    const result = spawnSync('ruby', [DEFAULT_COMPILE_RB, genFilePath], {
-      encoding: 'utf8',
-      maxBuffer: 50 * 1024 * 1024,
+function makeDefaultCompileBare(compileRbPath: string): CompileBareFn {
+  return (genFilePath: string) =>
+    Promise.resolve().then(() => {
+      const result = spawnSync('ruby', [compileRbPath, genFilePath], {
+        encoding: 'utf8',
+        maxBuffer: 50 * 1024 * 1024,
+      });
+      if (result.status !== 0) {
+        throw new Error(
+          `ruby compile.rb ${genFilePath} failed (exit ${result.status}):\n` +
+            (result.stderr ?? ''),
+        );
+      }
+      try {
+        return JSON.parse(result.stdout) as Record<string, IR>;
+      } catch (e: any) {
+        throw new Error(
+          `failed to parse compile.rb output for ${genFilePath}: ${e?.message ?? String(e)}`,
+        );
+      }
     });
-    if (result.status !== 0) {
-      throw new Error(
-        `ruby compile.rb ${genFilePath} failed (exit ${result.status}):\n` +
-          (result.stderr ?? ''),
-      );
-    }
-    try {
-      return JSON.parse(result.stdout) as Record<string, IR>;
-    } catch (e: any) {
-      throw new Error(
-        `failed to parse compile.rb output for ${genFilePath}: ${e?.message ?? String(e)}`,
-      );
-    }
-  });
 }
