@@ -12,3 +12,12 @@ packages/*/dist/
 # Ruby
 *.gem
 .bundle/
+
+# Python (cambium-client-python, RED-361)
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/

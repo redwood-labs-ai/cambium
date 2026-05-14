@@ -74,10 +74,50 @@ end
 ## Token economics
 Enrichment trades sub-agent tokens for parent efficiency. 50k tokens of raw logs → 500 tokens of typed LogSummary. The parent agent gets better signal at lower cost.
 
+## Document envelopes (RED-327)
+
+When `ir.context[<field>]` is a `base64_pdf` envelope (RED-323), the runner routes the PDF's extracted text to the sub-agent instead of the raw envelope. Same plumbing `grounded_in` uses: `extractDocuments` populates a per-key text map upstream of the enrichment loop, and the sub-agent receives a plain string `ctx.input` it can summarise the same way it would any other text body.
+
+```ruby
+class PdfSummarizer < GenModel
+  model "anthropic:claude-haiku-4-5-20251001"
+  returns PdfDigest
+
+  def summarize(text)
+    generate "one-paragraph abstract" do
+      with context: text
+      returns PdfDigest
+    end
+  end
+end
+
+class IncidentExtractor < GenModel
+  model "anthropic:claude-sonnet-4-6"
+  returns IncidentReport
+
+  enrich :report do
+    agent :PdfSummarizer, method: :summarize
+  end
+
+  # ir.context.report is a base64_pdf envelope provided by the caller.
+  # The sub-agent gets the extracted text; `report_enriched` lands as
+  # the PdfDigest output for the primary gen to reference.
+  def analyze(report)
+    generate "extract incident timeline" do
+      with context: report
+      returns IncidentReport
+    end
+  end
+end
+```
+
+`base64_image` envelopes have no text-extraction path in v1 — they surface as an `EnrichSkipped` step with a clear reason. Vision-model sub-agents (forward the image envelope rather than extracted text) are a documented follow-up.
+
 ## Failure modes
 - Sub-agent file not found → EnrichError in trace, parent continues with raw context
 - Sub-agent schema validation fails after max repairs → EnrichFailed, parent continues
 - Context field not found → EnrichSkipped
+- Context field is a `base64_image` envelope, OR a `base64_pdf` with no extractable text (image-only PDF) → EnrichSkipped with an OCR-upstream pointer in `meta.reason`
 
 ## See also
 - [[N - Agentic Transactions]]

@@ -47,8 +47,9 @@ Cambium — Rails for generation engineering
 Usage:
   cambium init [name]
   cambium new <type> <Name>
-  cambium run <file.cmb.rb> --method <method> --arg <path>|- [--trace <path>] [--out <path>] [--mock] [--memory-key <name>=<value> ...] [--session-id <id>]
-  cambium compile <file.cmb.rb> --method <method> [--arg <path>|-] [-o <output>]
+  cambium run <file.cmb.rb> --method <method> --arg <path>|- [--trace <path>] [--out <path>] [--mock] [--memory-key <name>=<value> ...] [--session-id <id>] [--profile <name>]
+  cambium compile <file.cmb.rb> [--method <method>] [--arg <path>|-] [-o <output>]
+  cambium serve --workspace <path> --bind <uri> [--allow-remote]
   cambium doctor
   cambium test
   cambium lint
@@ -57,7 +58,9 @@ Commands:
   init      Initialize a new Cambium workspace
   new       Scaffold a new engine, agent, tool, action, schema, system, corrector, policy, memory_pool, or config
   run       Compile and execute a GenModel
-  compile   Compile a GenModel to IR JSON (no execution; engine-mode build step)
+  compile   Compile a GenModel to IR JSON (no execution; engine-mode build step).
+            Without --method, emits a {method → IR} map for every public method.
+  serve     Start a long-lived HTTP server hosting every gen in this workspace.
   doctor    Check environment setup and dependencies
   test      Run the test suite
   lint      Validate package structure and declarations
@@ -71,6 +74,8 @@ Run flags:
                             unless CAMBIUM_SESSION_ID is set.
   --session-id <id>         Explicit session id for memory :session scope. Must match
                             /^[a-zA-Z0-9_\-]+$/ and be 1-128 chars. Wins over CAMBIUM_SESSION_ID.
+  --profile <name>          Pick the active profile from app/config/models.rb (RED-326).
+                            Must match /^[a-z][a-z0-9_]*$/. Wins over CAMBIUM_PROFILE.
 
 Compile flags:
   -o <path>                 Write IR JSON to <path> (default: <basename>.ir.json next to the input)
@@ -156,6 +161,14 @@ if (cmd === 'schedule') {
   process.exit(0);
 }
 
+// ── cambium serve (RED-360) ────────────────────────────────────────
+if (cmd === 'serve') {
+  const { runServeCli } = await import('./serve.mjs');
+  await runServeCli(args);
+  // runServeCli runs until a signal arrives; if it returns, exit cleanly.
+  process.exit(0);
+}
+
 // ── cambium run ───────────────────────────────────────────────────────
 if (cmd !== 'run') usage(`Unknown command: ${cmd}`);
 
@@ -173,6 +186,7 @@ let mock = false;
 let sessionId = null;
 const memoryKeys = [];
 let firedBy = null;
+let profile = null;
 for (let i = 1; i < args.length; i++) {
   const a = args[i];
   if (a === '--method') method = args[++i];
@@ -183,11 +197,25 @@ for (let i = 1; i < args.length; i++) {
   else if (a === '--memory-key') memoryKeys.push(args[++i]);
   else if (a === '--session-id') sessionId = args[++i];
   else if (a === '--fired-by') firedBy = args[++i];
+  else if (a === '--profile') profile = args[++i];
   else if (a === '--help' || a === '-h') usage();
   else usage(`Unknown flag: ${a}\nRun 'cambium run --help' for usage.`);
 }
 if (!method) usage('Missing --method\nRun "cambium run --help" for usage.');
 if (!arg) usage('Missing --arg\nRun "cambium run --help" for usage.');
+
+// RED-326: validate --profile against the same regex Ruby's
+// ModelAliases::NAME_RE enforces. Failing here is nicer than failing
+// inside the Ruby subprocess.
+if (profile !== null) {
+  if (!/^[a-z][a-z0-9_]*$/.test(profile)) {
+    console.error(
+      `Invalid --profile "${profile}". Must match /^[a-z][a-z0-9_]*$/ ` +
+        `(lowercase snake_case).`,
+    );
+    process.exit(2);
+  }
+}
 
 // RED-284: validate --session-id against the same regex the runner
 // enforces on CAMBIUM_SESSION_ID (keys.ts#validateSafeSegment). Failing
@@ -236,6 +264,10 @@ if (mock) compileEnv.CAMBIUM_ALLOW_MOCK = '1';
 // --session-id wins over an inherited CAMBIUM_SESSION_ID so the flag is
 // the source of truth when the user is explicit. (RED-284)
 if (sessionId !== null) compileEnv.CAMBIUM_SESSION_ID = sessionId;
+// RED-326: --profile wins over an inherited CAMBIUM_PROFILE — the flag
+// is the explicit override. The Ruby ModelAliases.load reads
+// CAMBIUM_PROFILE to pick the active profile.
+if (profile !== null) compileEnv.CAMBIUM_PROFILE = profile;
 const compile = spawnSync('ruby', [RUBY_COMPILE_SCRIPT, file, '--method', method, '--arg', arg], {
   encoding: 'utf8',
   maxBuffer: 50 * 1024 * 1024,

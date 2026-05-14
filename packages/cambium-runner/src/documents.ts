@@ -63,7 +63,13 @@ function maxBytesPerRun(): number {
 const VALID_PDF_MEDIA_TYPES = new Set(['application/pdf']);
 const VALID_IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
-function isDocumentEntry(v: any): v is { kind: string; data: string; media_type?: string } {
+/** Recognise a `base64_pdf` / `base64_image` document envelope in
+ *  `ir.context.<key>`. Exported (RED-327) so the enrichment dispatch
+ *  in runner.ts can check whether a context field needs the
+ *  extracted-text path before passing it to a sub-agent. */
+export function isDocumentEntry(
+  v: any,
+): v is { kind: 'base64_pdf' | 'base64_image'; data: string; media_type?: string } {
   return (
     v != null
     && typeof v === 'object'
