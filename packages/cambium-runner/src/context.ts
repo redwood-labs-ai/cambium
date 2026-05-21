@@ -1,4 +1,4 @@
-// ── Context resolution (RED-276, RED-323) ─────────────────────────────
+// ── Context resolution (RED-276, RED-323, RED-382) ────────────────────
 //
 // A gen that declares `grounded_in :linear_issue` expects the context
 // document to live under `ir.context.linear_issue` — not the hardcoded
@@ -16,16 +16,49 @@
 // native document block (Anthropic), and Cambium verifies cited
 // quotes against the extracted text.
 //
+// RED-382: when the primary doc is a non-string value (e.g., a pipeline
+// step binds an upstream sub-gen's structured output into `document`
+// via `with: { document: bind(:axes) }`), JSON-serialize it so the
+// downstream prompt actually sees the data. Pre-fix, the type guard
+// `typeof ctx[source] === 'string'` returned '' for objects, and the
+// sub-gen's prompt got an empty DOCUMENT: section — silent data loss.
+// Citation grounding still works against the JSON-stringified form
+// (the model is expected to cite that representation).
+//
 // Fallback order:
 //   1. groundingTextByKey[source]  (RED-323: extracted PDF text)
-//   2. ir.context[source]          (plain-string context, RED-276)
+//   2. ir.context[source]          (RED-276 grounding source key)
 //   3. ir.context.document         (legacy fallback)
 //   4. empty string
-// The legacy fallback preserves back-compat for any IR produced by a
-// compiler that hasn't been updated (shouldn't happen in-tree, but
-// defensive for third-party compilers or old trace replays).
 
 type IR = any;
+
+function coerceDocumentValue(v: unknown): string | null {
+  if (typeof v === 'string') return v;
+  if (v === null || v === undefined) return null;
+  // RED-323: typed document envelopes ({ kind: 'base64_pdf' | 'base64_image' })
+  // are NOT serialized here — the runner handles them via the
+  // documents/groundingTextByKey path (Anthropic gets a native doc
+  // block; non-Anthropic providers fail fast). Serializing the
+  // envelope would dump the base64 data into the prompt. Return null
+  // so the existing extract-then-override flow keeps working.
+  if (
+    typeof v === 'object' &&
+    'kind' in (v as any) &&
+    ((v as any).kind === 'base64_pdf' || (v as any).kind === 'base64_image')
+  ) {
+    return null;
+  }
+  // RED-382: every other non-string structured value (pipeline-injected
+  // bind() target, hand-rolled IR with a JSON-typed context, etc.)
+  // gets JSON.stringify'd so the downstream prompt actually sees the
+  // shape. Mirrors the `_enriched` key path that already stringified.
+  try {
+    return JSON.stringify(v, null, 2);
+  } catch {
+    return null;
+  }
+}
 
 export function getGroundingDocument(ir: IR, groundingTextByKey?: Record<string, string>): string {
   const source = ir?.policies?.grounding?.source;
@@ -33,7 +66,11 @@ export function getGroundingDocument(ir: IR, groundingTextByKey?: Record<string,
   if (source && groundingTextByKey && typeof groundingTextByKey[source] === 'string') {
     return groundingTextByKey[source];
   }
-  if (source && typeof ctx[source] === 'string') return ctx[source];
-  if (typeof ctx.document === 'string') return ctx.document;
+  if (source) {
+    const v = coerceDocumentValue(ctx[source]);
+    if (v !== null) return v;
+  }
+  const docVal = coerceDocumentValue(ctx.document);
+  if (docVal !== null) return docVal;
   return '';
 }

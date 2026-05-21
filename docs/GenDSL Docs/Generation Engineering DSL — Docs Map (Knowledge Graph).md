@@ -21,6 +21,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[P - Memory]] — `memory` / `write_memory_via` / `reads_trace_of` / `mode :retro` (RED-215)
 - [[P - log]] — trace-fan-out to external observability platforms (Datadog, stdout, http_json, app plugins); framework-owned dot-notation event names; profile pattern (RED-282 / RED-302)
 - [[P - cron (schedule)]] — scheduled-fire declaration + `--fired-by` runtime semantics; compile-to-artifact for k8s CronJob / crontab / systemd / GH Actions / Render (RED-273 / RED-305)
+- [[N - Orchestration Layer]] — `Pipeline` primitive: multi-gen composition (sequential `step`, parallel `fan_out`, deterministic `branch_on :signal`) with rollup IR / trace / budget (RED-374 design, RED-381 impl). Pipeline-shared `:pipeline_run` memory scope, cron/log/serve integration on pipelines, scaffolder + lint + LSP parity.
 
 ## Runtime + compilation
 - [[C - IR (Intermediate Representation)]]
@@ -56,6 +57,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[N - Log Primitive (RED-282)]] — shipped (RED-302): `log :datadog` / `log :app_default` for trace-fan-out to external observability platforms; framework-owned dot-notation event vocabulary, profile-based config, plugin pattern for app-specific backends
 - [[N - Scheduled Gens (RED-273)]] — shipped (RED-305): `cron :daily` declaration + `--fired-by` runtime semantics + compile-to-artifact (k8s CronJob / crontab / systemd / GH Actions / Render) for scheduled runs; framework owns semantics, operator owns lifecycle
 - [[N - Prior-Run State Accessors (RED-241)]] — settled as "no new primitive": existing memory + retro agents + `scope: :schedule` cover every forcing case; note documents the patterns and closes the ticket
+- [[N - Orchestration Layer]] — design note (RED-374): `Pipeline` primitive for multi-gen composition (sequential `step`, parallel `fan_out`, deterministic `branch_on :signal`) with rollup IR / trace / budget; load-bearing invariant is zero inference at the orchestration layer
 
 ---
 

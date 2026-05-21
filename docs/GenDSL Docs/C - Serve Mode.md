@@ -130,23 +130,38 @@ Port `0` is allowed and means "OS picks a free port" — useful for tests; the a
 
 ```
 boot:
-  1. Load Genfile.toml → validate [exports.gens] shape (PascalCase keys,
-     relative-and-inside-workspace paths, files exist on disk).
-  2. For each gen, spawn `ruby compile.rb <path>` in bare mode. The Ruby
-     compiler emits a {method → IR} map for every public user method on
-     the GenModel; the server caches them all.
+  1. Load Genfile.toml → validate [exports.gens] AND [exports.pipelines]
+     (RED-381 Phase F.3) shape (PascalCase keys, relative-and-inside-
+     workspace paths, files exist on disk, .cmb.rb vs .pipeline.rb
+     extension matches the declaring section). Names MUST be unique
+     across the union; duplicates raise at boot with a clear pointer
+     to both declaring sections.
+  2. For each catalog entry (gen or pipeline), spawn `ruby compile.rb
+     <path>` in bare mode. The Ruby compiler emits a {method → IR} map
+     for every public user method; the server caches them all. Pipeline
+     IRs carry `kind: "Pipeline"`; gen IRs have no kind field.
   3. Bind the HTTP listener (parseBind) and resolve `handle.ready`.
 
 per-request:
   /v1/run:
     a. validate body (`gen`, `method` strings; `input` JSON-coercible).
     b. look up cached IR by (gen, method); 400 with unknown_gen /
-       unknown_method on miss.
-    c. clone IR, inject `body.input` into ir.context.<source>.
-    d. dispatch via runGenFromIr (cwd = workspaceDir, so `runs/`
-       artifacts land under the workspace).
-    e. map result.failureKind → wire error.kind; serialize JSON.
+       unknown_method on miss. The wire format's `gen` field carries
+       the catalog name regardless of kind — gens and pipelines share
+       the same `/v1/run` surface, the server routes by IR kind.
+    c. clone IR, inject `body.input` into ir.context.<source>. For
+       pipeline IRs, the inject path writes the input to
+       ir.context._pipeline_arg (the single context key compile.rb
+       stamps); `parsePipelineInputs` in the pipeline runtime maps it
+       to the declared input slots at dispatch.
+    d. dispatch by IR kind: `kind === "Pipeline"` → `runPipelineFromIr`;
+       otherwise → `runGenFromIr`. Both run with cwd = workspaceDir
+       so `runs/` artifacts land under the workspace.
+    e. map result.failureKind → wire error.kind; serialize JSON. Both
+       paths return RunGenResult-shaped objects, so error envelope
+       construction is shared.
   /v1/healthz: return catalog (or booting if pre-compile still running).
+     The `gens` field contains the union of all gen + pipeline names.
   other: 404 + not_found.
 
 shutdown (SIGTERM/SIGINT):

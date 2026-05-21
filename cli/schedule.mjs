@@ -43,7 +43,14 @@ function compileToIR(genFile, method) {
   return JSON.parse(res.stdout);
 }
 
-// Walk a directory for .cmb.rb files (one level; we trust app/gens/ convention).
+// Walk a directory for .cmb.rb AND .pipeline.rb files (one level; we
+// trust the app/gens/ + app/pipelines/ conventions).
+//
+// RED-381 Phase F.1: pipelines declare `cron :daily` the same way gens
+// do (Phase A.1 added the method to Cambium::Pipeline). compile.rb
+// dispatches by class subtype, so a .pipeline.rb file's schedules[]
+// shows up at the same `policies.schedules` IR location — no special-
+// casing needed downstream of this walk.
 function walkGens(dir) {
   const out = [];
   if (!existsSync(dir)) return out;
@@ -51,7 +58,7 @@ function walkGens(dir) {
     const full = join(dir, name);
     const s = statSync(full);
     if (s.isDirectory()) out.push(...walkGens(full));
-    else if (name.endsWith('.cmb.rb')) out.push(full);
+    else if (name.endsWith('.cmb.rb') || name.endsWith('.pipeline.rb')) out.push(full);
   }
   return out;
 }
@@ -149,7 +156,7 @@ async function cmdList(args) {
   const gensDir = args[0] ?? 'app/gens';
   const gens = walkGens(gensDir);
   if (gens.length === 0) {
-    console.log(`No .cmb.rb files under ${gensDir}.`);
+    console.log(`No .cmb.rb / .pipeline.rb files under ${gensDir}.`);
     return;
   }
   console.log('Declared schedules:\n');
@@ -213,7 +220,7 @@ async function cmdCompile(args) {
 
   const config = { image, region, plan };
   const gens = walkGens(gensDir);
-  if (gens.length === 0) bail(`No .cmb.rb files under ${gensDir}.`);
+  if (gens.length === 0) bail(`No .cmb.rb / .pipeline.rb files under ${gensDir}.`);
 
   const outputs = [];
   for (const genFile of gens) {

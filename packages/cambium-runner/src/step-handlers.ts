@@ -22,6 +22,38 @@ export type StepResult = {
   meta?: Record<string, any>;
 };
 
+// ── Prompt context iteration (RED-382) ─────────────────────────────────
+//
+// Render every key from `ir.context` other than the primary doc and
+// framework-internal bookkeeping keys (anything starting with `_`).
+// Labeling:
+//   - `<key>_enriched` → `<KEY>_ANALYSIS:` (back-compat with the enrich
+//     primitive; keeps prompts already tuned to that label stable)
+//   - everything else → `<KEY>:` (new: pipeline `with: { foo: bind(...) }`
+//     bindings, hand-rolled IR with extra context fields)
+// Non-string values are JSON-pretty-printed; the model sees structured
+// data clearly instead of `[object Object]`.
+
+function appendNonPrimaryContextSections(
+  parts: string[],
+  context: Record<string, any>,
+  groundingSource: string | undefined,
+): void {
+  const primaryKey = groundingSource ?? 'document';
+  for (const key of Object.keys(context)) {
+    if (key === primaryKey) continue;
+    if (key.startsWith('_')) continue; // framework-internal (_pipeline_arg etc.)
+    const raw = context[key];
+    if (raw === null || raw === undefined) continue;
+    if (typeof raw === 'string' && raw.length === 0) continue;
+    const value = typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
+    const label = key.endsWith('_enriched')
+      ? key.replace(/_enriched$/, '').toUpperCase() + '_ANALYSIS'
+      : key.toUpperCase();
+    parts.push('', `${label}:`, value);
+  }
+}
+
 // ── Generate ──────────────────────────────────────────────────────────
 export type TokenUsage = { prompt_tokens: number; completion_tokens: number; total_tokens: number };
 export type GenerateTextResult = { text: string; usage?: TokenUsage };
@@ -112,15 +144,14 @@ export async function handleGenerate(
     String(doc ?? ''),
   ];
 
-  // Include enriched context fields (added by the enrich primitive)
-  const context = ir.context ?? {};
-  for (const key of Object.keys(context)) {
-    if (key.endsWith('_enriched')) {
-      const label = key.replace(/_enriched$/, '').toUpperCase() + '_ANALYSIS';
-      const value = typeof context[key] === 'string' ? context[key] : JSON.stringify(context[key], null, 2);
-      promptParts.push('', `${label}:`, value);
-    }
-  }
+  // Include additional context fields (enrich primitive + Pipeline
+  // bind() injections). RED-382: pre-fix this iteration only handled
+  // `*_enriched` keys (the enrich primitive's convention), which meant
+  // pipeline `with: { foo: bind(:upstream) }` bindings landed in
+  // `ir.context.foo` but never reached the LLM. Now every non-framework
+  // key gets a labeled prompt section.
+  const groundingSource = ir.policies?.grounding?.source;
+  appendNonPrimaryContextSections(promptParts, ir.context ?? {}, groundingSource);
 
   promptParts.push(
     '',
@@ -560,16 +591,10 @@ export async function handleAgenticGenerate(
     );
   }
 
-  // Build context prompt parts
+  // Build context prompt parts. See handleGenerate for the rationale —
+  // RED-382 made this iterate all context keys, not only `*_enriched`.
   const contextParts = [step.prompt, '', 'DOCUMENT:', String(doc ?? '')];
-  const context = ir.context ?? {};
-  for (const key of Object.keys(context)) {
-    if (key.endsWith('_enriched')) {
-      const label = key.replace(/_enriched$/, '').toUpperCase() + '_ANALYSIS';
-      const value = typeof context[key] === 'string' ? context[key] : JSON.stringify(context[key], null, 2);
-      contextParts.push('', `${label}:`, value);
-    }
-  }
+  appendNonPrimaryContextSections(contextParts, ir.context ?? {}, grounding?.source);
 
   const messages: Message[] = [
     { role: 'system', content: systemParts.join('\n') },

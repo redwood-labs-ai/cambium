@@ -116,6 +116,122 @@ TestGen = "app/gens/test_gen.cmb.rb"
     expect(body.version).toBe('v1');
   });
 
+  // RED-381 Phase F.3: pipeline endpoints share the wire format.
+  describe('Pipeline endpoints (RED-381 Phase F.3)', () => {
+    let pipeTmp: string;
+    let pipeHandle: RunServeHandle;
+    let pipeBaseUrl: string;
+
+    beforeEach(async () => {
+      pipeTmp = mkdtempSync(join(tmpdir(), 'cambium-serve-pipe-e2e-'));
+      mkdirSync(join(pipeTmp, 'app/gens'), { recursive: true });
+      mkdirSync(join(pipeTmp, 'app/pipelines'), { recursive: true });
+      mkdirSync(join(pipeTmp, 'src'), { recursive: true });
+      writeFileSync(join(pipeTmp, 'app/gens/test_gen.cmb.rb'), FIXTURE_GEN);
+      writeFileSync(join(pipeTmp, 'src/contracts.ts'), FIXTURE_CONTRACTS);
+      writeFileSync(
+        join(pipeTmp, 'app/pipelines/test_pipeline.pipeline.rb'),
+        `
+class TestPipeline < Pipeline
+  input :doc, schema: AnalysisReport
+  step :one, gen: TestGen, method: :analyze,
+    with: { doc: bind(:input).doc }
+  def run(doc); end
+end
+`.trim(),
+      );
+      writeFileSync(
+        join(pipeTmp, 'Genfile.toml'),
+        `[package]
+name = "serve-pipe-e2e"
+
+[types]
+contracts = ["src/contracts.ts"]
+
+[exports.gens]
+TestGen = "app/gens/test_gen.cmb.rb"
+
+[exports.pipelines]
+TestPipeline = "app/pipelines/test_pipeline.pipeline.rb"
+`,
+      );
+
+      pipeHandle = runServe({
+        workspaceDir: pipeTmp,
+        bind: parseBind('tcp://127.0.0.1:0'),
+      });
+      const addr = await pipeHandle.ready;
+      if (addr.kind !== 'tcp') throw new Error('expected tcp bind');
+      pipeBaseUrl = `http://${addr.host === '::' ? '127.0.0.1' : addr.host}:${addr.port}`;
+    });
+
+    afterEach(async () => {
+      await pipeHandle.close();
+      rmSync(pipeTmp, { recursive: true, force: true });
+    });
+
+    it('healthz lists both gens AND pipelines in a single catalog', async () => {
+      const res = await fetch(`${pipeBaseUrl}/v1/healthz`);
+      const body = await res.json();
+      expect(body.status).toBe('ok');
+      // Names are unique across the union; order is insertion order
+      // (gens section first, then pipelines).
+      expect(body.gens.sort()).toEqual(['TestGen', 'TestPipeline']);
+    });
+
+    it('POST /v1/run dispatches a Pipeline IR through runPipelineFromIr', async () => {
+      const res = await fetch(`${pipeBaseUrl}/v1/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          gen: 'TestPipeline',
+          method: 'run',
+          input: 'a document with 42 ms in it',
+        }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+      expect(typeof body.run_id).toBe('string');
+      // Pipeline output (default last_step) = the sub-gen's AnalysisReport.
+      expect(body.output).toMatchObject({ summary: expect.any(String) });
+    });
+
+    it('rejects an unknown pipeline name with available list', async () => {
+      const res = await fetch(`${pipeBaseUrl}/v1/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          gen: 'NoSuchThing',
+          method: 'run',
+          input: '',
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error.kind).toBe('unknown_gen');
+      expect(body.error.details.available.sort()).toEqual(['TestGen', 'TestPipeline']);
+    });
+
+    it('include_trace=true returns the PipelineRun trace inline', async () => {
+      const res = await fetch(`${pipeBaseUrl}/v1/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          gen: 'TestPipeline',
+          method: 'run',
+          input: 'hello',
+          include_trace: true,
+        }),
+      });
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+      expect(body.trace?.type).toBe('PipelineRun');
+      expect(body.trace?.operators).toHaveLength(1);
+      expect(body.trace.operators[0].type).toBe('PipelineStep');
+    });
+  });
+
   it('POST /v1/run round-trips a real gen call (mock provider)', async () => {
     const res = await fetch(`${baseUrl}/v1/run`, {
       method: 'POST',

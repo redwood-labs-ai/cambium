@@ -140,3 +140,4 @@ A retro agent (`DigestMemoryAgent`) writes the previous run's signals to the `:y
 - [[P - log]] — `fired_by:schedule` ddtag integration
 - [[C - IR (Intermediate Representation)]] — `policies.schedules` row
 - [[C - Trace (observability)]] — `trace.fired_by` field
+- [[N - Orchestration Layer]] — pipelines can declare `cron`; pipeline-level scheduled fires follow the same `--fired-by` semantics, and `cambium schedule list / compile` walks `.pipeline.rb` alongside `.cmb.rb` (RED-381 Phase F.1)

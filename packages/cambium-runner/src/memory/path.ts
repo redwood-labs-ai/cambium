@@ -37,6 +37,23 @@ export function resolveBucketPath(decl: MemoryDecl, ctx: MemoryRunContext): stri
       );
     }
     keySeg = ctx.scheduleId;
+  } else if (decl.scope === 'pipeline_run') {
+    // RED-381 Phase E: pipeline-shared bucket keyed by the pipeline's
+    // run id. All sub-gens of the same pipeline run see the same
+    // bucket; sub-gens of different pipeline runs see different
+    // buckets. ctx.pipelineRunId is set by runPipelineFromIr on every
+    // sub-gen invocation. A gen with scope: :pipeline_run invoked
+    // OUTSIDE a pipeline (direct runGen call from a host that didn't
+    // set pipelineRunId) gets a clear error rather than silently
+    // writing to an unkeyed bucket.
+    if (!ctx.pipelineRunId) {
+      throw new Error(
+        `memory '${decl.name}' scope: :pipeline_run requires a pipeline-driven invocation. ` +
+        `Direct runGen callers must pass opts.pipelineRunId; sub-gens dispatched by ` +
+        `runPipelineFromIr get this automatically. See N - Orchestration Layer § Pipeline memory.`,
+      );
+    }
+    keySeg = ctx.pipelineRunId;
   } else {
     const keyName = decl.keyed_by;
     if (!keyName) {

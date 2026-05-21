@@ -168,3 +168,4 @@ A trigger can already fire actions on signals (`on :foo do; action :bar; end`). 
 - [[N - Log Primitive (RED-282)]] — design rationale
 - [[P - Memory]] — note the unrelated `memory :x, strategy: :log` (in-process append-only memory, NOT external shipment)
 - [[N - App Mode vs Engine Mode (RED-220)]] — `RunGenOptions.logSinks` for engine-mode hosts
+- [[N - Orchestration Layer]] — pipelines can declare `log`; per-operator event names extend the existing dot-notation vocabulary (`<pipeline>.<method>.complete` / `.failed` mirror gen-side shapes via `buildRunLogEvent`, RED-381 Phase F.2)

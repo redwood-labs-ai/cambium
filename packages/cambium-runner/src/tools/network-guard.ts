@@ -330,7 +330,29 @@ export async function guardedFetch(
 
   const dispatcher = new UndiciAgent({ connect: pinningConnect });
   try {
-    return (await undiciFetch(url, { ...(init as any), dispatcher })) as unknown as Response;
+    const upstream = await undiciFetch(url, { ...(init as any), dispatcher });
+    // Buffer the body BEFORE closing the dispatcher. The Response body
+    // stream is tied to the dispatcher's connection pool — calling
+    // dispatcher.close() in the finally block before the caller can
+    // consume the body orphans the stream silently. Small responses
+    // (~kilobytes) happen to survive because they're already buffered
+    // in the TCP receive buffer, but multi-MB bodies hit a closed
+    // dispatcher mid-read and return a Promise that NEVER resolves
+    // AND fails to keep the event loop alive — the host process exits
+    // cleanly with `unsettled top-level await`, no stack trace, no
+    // error. Discovered while building PixelWorlds (a Cambium action
+    // downloading a ComfyUI PNG render via ctx.fetch).
+    //
+    // Fix: fully read the body here, rebuild a Response with the
+    // buffered bytes, then close the dispatcher. Callers see a normal
+    // Response and can read .json() / .arrayBuffer() / .text() at
+    // their own pace; the dispatcher is gone by then.
+    const buf = await upstream.arrayBuffer();
+    return new Response(buf, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: upstream.headers,
+    });
   } finally {
     await dispatcher.close().catch(() => { /* ignore */ });
   }

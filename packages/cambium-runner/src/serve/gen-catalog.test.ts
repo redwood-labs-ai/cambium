@@ -42,10 +42,12 @@ CandidateSummary = "app/gens/candidate_summary.cmb.rb"
     expect(catalog.entries.get('ResumeParser')).toEqual({
       name: 'ResumeParser',
       genFilePath: join(tmp, 'app/gens/resume_parser.cmb.rb'),
+      kind: 'gen',
     });
     expect(catalog.entries.get('CandidateSummary')).toEqual({
       name: 'CandidateSummary',
       genFilePath: join(tmp, 'app/gens/candidate_summary.cmb.rb'),
+      kind: 'gen',
     });
   });
 
@@ -69,19 +71,23 @@ Multi_Word_Gen = "app/gens/multi_word.cmb.rb"
     expect(() => loadGenCatalog(tmp)).toThrow(/failed to parse/);
   });
 
-  it('throws when [exports.gens] is missing', () => {
+  it('throws when both [exports.gens] and [exports.pipelines] are missing', () => {
     writeGenfile(`
 [package]
 name = "test-app"
 `);
-    expect(() => loadGenCatalog(tmp)).toThrow(/has no \[exports\.gens\] section/);
+    expect(() => loadGenCatalog(tmp)).toThrow(
+      /neither \[exports\.gens\] nor \[exports\.pipelines\]/,
+    );
   });
 
-  it('throws when [exports.gens] is an empty table', () => {
+  it('throws when both sections exist but are empty', () => {
     writeGenfile(`
 [exports.gens]
+
+[exports.pipelines]
 `);
-    expect(() => loadGenCatalog(tmp)).toThrow(/\[exports\.gens\] is empty/);
+    expect(() => loadGenCatalog(tmp)).toThrow(/declares no entries/);
   });
 
   it('throws when an entry is not a string', () => {

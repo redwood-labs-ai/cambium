@@ -26,6 +26,7 @@ let policyPacks = {};    // name → { path, content }                  -- RED-2
 let memoryPools = {};    // name → { path, content }                  -- RED-215
 let modelAliases = {};   // alias → { path, line, value }             -- RED-237
 let logProfiles = {};    // name → { path, content }                  -- RED-302
+let pipelineDefs = {};   // className → { path, content, basename }   -- RED-381
 
 // RED-286: inline Genfile shape detection. CommonJS LSP can't
 // easily import the .mjs helper in cli/workspace-shape.mjs; ~25 lines
@@ -176,6 +177,7 @@ function scanWorkspace() {
   memoryPools = {};
   modelAliases = {};
   logProfiles = {};
+  pipelineDefs = {};
 
   // App-mode scans gated on appPkgRoot being set. When workspaceRoot
   // is ITSELF an engine folder (e.g. user opened the engine dir
@@ -220,6 +222,24 @@ function scanWorkspace() {
       const fullPath = path.join(poolsDir, f);
       const content = fs.readFileSync(fullPath, 'utf8').trim();
       memoryPools[name] = { path: fullPath, content };
+    }
+  }
+
+  // Scan pipelines (RED-381). Maps PascalCase class name → file info so
+  // `gen:` kwargs on pipeline operators can autocomplete against the
+  // workspace's declared pipeline classes too (alongside gen classes).
+  const pipelinesDir = path.join(appPkgRoot, 'app/pipelines');
+  if (fs.existsSync(pipelinesDir)) {
+    for (const f of fs.readdirSync(pipelinesDir)) {
+      if (!f.endsWith('.pipeline.rb')) continue;
+      const basename = f.replace('.pipeline.rb', '');
+      const fullPath = path.join(pipelinesDir, f);
+      const content = fs.readFileSync(fullPath, 'utf8');
+      // Extract the declared class name (`class Foo < Pipeline`).
+      // Falls back to a PascalCased basename if no class line is found.
+      const m = content.match(/^\s*class\s+([A-Z][A-Za-z0-9_]*)\s*<\s*Pipeline\b/m);
+      const className = m ? m[1] : basename.replace(/(^|_)([a-z])/g, (_, _u, c) => c.toUpperCase());
+      pipelineDefs[className] = { path: fullPath, content: content.trim(), basename };
     }
   }
 
@@ -432,6 +452,41 @@ const PRIMITIVE_DOCS = {
   retain: {
     detail: 'Memory retention policy (RED-239).',
     doc: 'TTL + entry-cap on a memory bucket. Applied at prune time (invoked before every read to keep buckets honest).\n\n```ruby\nmemory :facts, strategy: :semantic, top_k: 5,\n       retain: { ttl: "30d", max_entries: 10_000 }\n```\n\nBoth bounds optional; `ttl` accepts `"30d" / "12h" / "3600s"` / `Integer` seconds. TTL zero and values above 10 years both rejected at compile time. A workspace-level `app/config/memory_policy.rb` can cap `max_ttl` / `default_ttl` / `max_entries` across all decls.',
+  },
+
+  // ── Pipeline operators (RED-381) ─────────────────────────────────────
+
+  Pipeline: {
+    detail: 'Multi-gen orchestration primitive (RED-374 / RED-381).',
+    doc: 'Composes multiple sub-gens via `step` (sequential), `fan_out` (parallel), and `branch_on :signal` (deterministic conditional) operators. Rollup IR / trace / budget owned by the framework. Pipelines are zero-inference at the orchestration layer — the DSL compiles to a deterministic IR DAG; LLM calls happen only inside sub-gens.\n\n```ruby\nclass CiReview < Pipeline\n  input :pr, schema: PullRequest\n  step :recon, gen: SurfaceMapper, method: :map,\n    with: { ctx: bind(:input).pr }\n  fan_out :reviewers, collect_into: :reviews do\n    branch :security, agent: SecurityReviewer, method: :review\n    branch :perf,     agent: PerfReviewer,     method: :review\n  end\n  step :fix, gen: Fixer, method: :patch,\n    with: { reviews: bind(:reviewers) }\n  def review(pr); end\nend\n```\n\n1:1 stance: one class, one method, one chain. File: `app/pipelines/<name>.pipeline.rb`.',
+  },
+  step: {
+    detail: 'Sequential pipeline operator (RED-381).',
+    doc: 'Invokes a sub-gen as one step in a pipeline. `gen:` names the GenModel class; `method:` picks the entry method; `with:` declares bindings from upstream values (pipeline input or prior step outputs).\n\n```ruby\nstep :triage, gen: TriageGen, method: :assess,\n  with: { document: bind(:input).pr }\nstep :remediate, gen: RemediateGen, method: :plan,\n  with: { context: bind(:triage).summary }\n```\n\nStep results are stored under the step\'s id; downstream operators reference them via `bind(:step_id).field`. Forward references inside operator `with:` are compile errors.',
+  },
+  fan_out: {
+    detail: 'Parallel pipeline operator — N sub-gens against same upstream context (RED-381).',
+    doc: 'Dispatches N branches concurrently, collects their outputs as a typed array, applies threshold + failure-mode rules. Each branch is a full sub-gen sub-transaction with its own contract / trace.\n\n```ruby\nfan_out :reviewers, collect_into: :reviews do\n  branch :security,      agent: SecurityReviewer,      method: :review\n  branch :architectural, agent: ArchitecturalReviewer, method: :review\n  concurrency 2\n  on_branch_failure :continue   # :continue (default) | :fail_fast\n  require :all                  # :all (default) | :at_least, N\n  pass_context :surface_map     # fields from prior step routed to every branch\nend\n```\n\nDownstream `bind(:reviewers)` returns the typed array. Homogeneous-fan-out sugar (`agent X, method: :m; over [...], as: :slot`) expands to one branch per `over` value.',
+  },
+  branch_on: {
+    detail: 'Deterministic conditional pipeline operator (RED-381).',
+    doc: 'Routes execution based on an extracted signal value. Must be exhaustive — every reachable path is either an `on :literal do ... end` clause or covered by a `default do ... end` block. Missing default is a compile error in v1 (TypeBox enum-coverage introspection lands later).\n\n```ruby\nbranch_on bind(:triage).severity do\n  on :critical do\n    step :page_oncall, gen: PageOncall, method: :notify\n    step :remediate,   gen: RemediateGen, method: :plan\n  end\n  on :high do\n    step :remediate, gen: RemediateGen, method: :plan\n  end\n  default do\n    # explicit no-op for :low / :info\n  end\nend\n```\n\nNested step / fan_out / branch_on inside `on` and `default` bodies work — same dispatch as the top-level pipeline.',
+  },
+  input: {
+    detail: 'Pipeline typed input slot (RED-381).',
+    doc: 'Declares a typed input the pipeline accepts. Steps reference it via `bind(:input).<slot_name>`.\n\n```ruby\nclass CiReview < Pipeline\n  input :pr, schema: PullRequest\n  step :triage, gen: TriageGen, method: :assess,\n    with: { document: bind(:input).pr }\n  def review(pr); end\nend\n```\n\nMulti-input pipelines are supported (the CLI `--arg` must be a JSON object keying slots). The Ruby compiler validates the schema against `src/contracts.ts` like gen-side `returns` does.',
+  },
+  output: {
+    detail: 'Pipeline output composition block (RED-381).',
+    doc: 'Optional. When absent, pipeline output is the last step\'s result (typed by that step\'s `returns`). When present, composes a custom output shape from bind references against step results AND pipeline inputs.\n\n```ruby\noutput do\n  severity bind(:triage).severity\n  plan     bind(:remediate).plan\n  pr_url   bind(:input).pr\nend\n```\n\nThe assembled type falls out of the referenced steps\' TypeBox schemas — no extra `returns` declaration needed for the common case.',
+  },
+  bind_defaults: {
+    detail: 'Pipeline binding default mode (RED-381).',
+    doc: 'Sets how step inputs flow between operators when `with:` is omitted.\n\n* `:explicit` (default, Rails-y) — every step\'s inputs must be named at the call site via `with: { ... }`.\n* `:pass_through` — prior step\'s output flows into the next step\'s primary input slot automatically.\n\n```ruby\nbind_defaults :pass_through\n```\n\nThree-level cascade matching `app/config/models.rb` (RED-237) and `app/config/memory_policy.rb` (RED-239): a workspace-level `app/config/pipeline_policy.rb` can set the shop default; pipeline-level `bind_defaults` overrides it; per-step `with:` always wins.',
+  },
+  bind: {
+    detail: 'Typed reference to a value flowing through the pipeline (RED-381).',
+    doc: '`bind(:input)` returns the pipeline\'s declared input (single-slot shortcut) or `bind(:input).<slot>` for multi-input pipelines. `bind(:step_id)` returns a prior step\'s output; chained field access (`.severity`, `.meta.user_id`) drills into the typed result.\n\n```ruby\nbind(:input).pr            # → pipeline input slot\nbind(:triage)              # → prior step\'s full output\nbind(:triage).severity     # → field on prior step\'s output\nbind(:reviewers)           # → typed array from a fan_out\n```\n\nCompile-time validation walks every bind() expression against the resolved schemas — typos in input / step ids fire CompileError before the runner ever sees the IR.',
   },
 };
 

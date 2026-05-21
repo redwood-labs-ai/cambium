@@ -64,8 +64,22 @@
           }
         },
         {
-          "comment": "Keyword arguments for primitives (RED-215 memory, RED-239 retain, RED-248/254/258/259 exec, RED-238 semantic query)",
-          "match": "\\b(to|type|path|strategy|passes|unit|target|operation|store_as|max_attempts|stop_on_no_improvement|network|filesystem|exec|allowlist|allowlist_paths|denylist|block_private|block_metadata|roots|allowed|per_tool|per_run|max_calls|size|top_k|scope|keyed_by|embed|ttl|max_entries|runtime|language|cpu|memory|timeout|query|arg_field|require_keyed_by_for|max_ttl|default_ttl|ban_scope|allowed_pools|require_citations|include|granularity|endpoint|api_key_env|at|tz|id|method):",
+          "comment": "Pipeline operator primitives (RED-381). Match at line start so `step` / `fan_out` / `branch_on` etc. don't false-positive on Ruby method calls elsewhere.",
+          "match": "^\\s*(step|fan_out|branch_on|bind_defaults|input|output|branch|pass_context|on_branch_failure|concurrency|require|agent|over)\\b",
+          "captures": {
+            "1": { "name": "keyword.other.pipeline.cambium support.function.cambium" }
+          }
+        },
+        {
+          "comment": "bind() ref helper inside pipeline `with:` / `branch_on` / `output` blocks (RED-381)",
+          "match": "\\b(bind)\\b(?=\\s*\\()",
+          "captures": {
+            "1": { "name": "support.function.pipeline.cambium" }
+          }
+        },
+        {
+          "comment": "Keyword arguments for primitives (RED-215 memory, RED-239 retain, RED-248/254/258/259 exec, RED-238 semantic query, RED-381 pipeline)",
+          "match": "\\b(to|type|path|strategy|passes|unit|target|operation|store_as|max_attempts|stop_on_no_improvement|network|filesystem|exec|allowlist|allowlist_paths|denylist|block_private|block_metadata|roots|allowed|per_tool|per_run|max_calls|size|top_k|scope|keyed_by|embed|ttl|max_entries|runtime|language|cpu|memory|timeout|query|arg_field|require_keyed_by_for|max_ttl|default_ttl|ban_scope|allowed_pools|require_citations|include|granularity|endpoint|api_key_env|at|tz|id|method|gen|collect_into|on_branch_failure|pass_context|concurrency|over|as|schema|tokens|tool_calls|with):",
           "captures": {
             "1": { "name": "variable.parameter.cambium" }
           }
@@ -112,10 +126,17 @@
           "name": "keyword.control.grounding.cambium"
         },
         {
-          "comment": "on trigger block",
+          "comment": "on trigger block (also used inside pipeline branch_on, RED-381)",
           "match": "^\\s*(on)\\s+",
           "captures": {
             "1": { "name": "keyword.control.trigger.cambium" }
+          }
+        },
+        {
+          "comment": "default block inside pipeline branch_on (RED-381). Matched narrowly with `do` lookahead to avoid colliding with Ruby's `default` in `case/when`.",
+          "match": "^\\s*(default)\\b(?=\\s+do\\b)",
+          "captures": {
+            "1": { "name": "keyword.control.pipeline.cambium" }
           }
         },
         {

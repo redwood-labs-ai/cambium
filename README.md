@@ -85,6 +85,7 @@ cat runs/<run_id>/trace.json | jq .
 - **Signals + triggers** — Extract data from outputs and fire deterministic actions.
 - **Budget tracking** — Token limits, tool call caps, time limits. Exceeded budgets fail safely.
 - **Scheduled runs** — `cron :daily, at: "9:00"` declares the schedule; `cambium schedule compile` emits deploy manifests for your platform (k8s CronJob, crontab, systemd, GitHub Actions, Render Cron).
+- **Orchestration layer** — `Pipeline` primitive composes multiple sub-gens via `step` (sequential), `fan_out` (parallel branches with concurrency / threshold / failure modes), and `branch_on :signal` (deterministic conditional routing). Rollup IR / trace / budget owned by the framework; zero inference at the orchestration layer — the DSL compiles to a deterministic IR DAG, LLM calls happen only inside sub-gens. Pipeline-shared intra-run memory bucket via `scope: :pipeline_run`. RED-374 design / RED-381 impl.
 - **Observability** — `log :datadog` ships run + step events with a framework-owned severity mapping so monitors key off real run state.
 - **Serve mode** — `cambium serve --workspace <path> --bind tcp://127.0.0.1:9000` hosts every gen in a workspace as a long-lived HTTP server (RED-360). Locked v1 wire format (`POST /v1/run` + `GET /v1/healthz`); `--max-inflight`, `--run-timeout`, and `--shutdown-timeout` for ops. The transport for non-Node hosts (FastAPI, Django, Go, Elixir) — anything that speaks HTTP + JSON. First-party Python client: `pip install cambium-client` (RED-361; sync + async, one exception per `error.kind`).
 

@@ -47,7 +47,7 @@ Cambium — Rails for generation engineering
 Usage:
   cambium init [name]
   cambium new <type> <Name>
-  cambium run <file.cmb.rb> --method <method> --arg <path>|- [--trace <path>] [--out <path>] [--mock] [--memory-key <name>=<value> ...] [--session-id <id>] [--profile <name>]
+  cambium run <file.cmb.rb> --method <method> [--arg <path>|-] [--trace <path>] [--out <path>] [--mock] [--memory-key <name>=<value> ...] [--session-id <id>] [--profile <name>]
   cambium compile <file.cmb.rb> [--method <method>] [--arg <path>|-] [-o <output>]
   cambium serve --workspace <path> --bind <uri> [--allow-remote]
   cambium doctor
@@ -202,7 +202,13 @@ for (let i = 1; i < args.length; i++) {
   else usage(`Unknown flag: ${a}\nRun 'cambium run --help' for usage.`);
 }
 if (!method) usage('Missing --method\nRun "cambium run --help" for usage.');
-if (!arg) usage('Missing --arg\nRun "cambium run --help" for usage.');
+// --arg is optional (RED-244, RED-bug). When omitted, pass an empty JSON
+// object via stdin — works for both pipelines (which expect an object
+// matching their input schema) and gens with all-optional inputs.
+// Documented behavior on line 82; the previous "Missing --arg" block
+// contradicted the docs.
+const argFromStdin = !arg;
+if (argFromStdin) arg = '-';
 
 // RED-326: validate --profile against the same regex Ruby's
 // ModelAliases::NAME_RE enforces. Failing here is nicer than failing
@@ -272,6 +278,10 @@ const compile = spawnSync('ruby', [RUBY_COMPILE_SCRIPT, file, '--method', method
   encoding: 'utf8',
   maxBuffer: 50 * 1024 * 1024,
   env: compileEnv,
+  // When --arg was omitted, feed an empty JSON object via stdin so
+  // pipeline input-schema validation sees `{}` (a valid value when
+  // every field is optional) rather than empty string.
+  input: argFromStdin ? '{}' : undefined,
 });
 if (compile.status !== 0) {
   console.error(compile.stdout || '');
@@ -301,17 +311,36 @@ if (mock) process.env.CAMBIUM_ALLOW_MOCK = '1';
 if (sessionId !== null) process.env.CAMBIUM_SESSION_ID = sessionId;
 
 try {
-  const { runGenFromIr } = await import('@redwood-labs/cambium-runner');
-  const result = await runGenFromIr({
-    ir,
-    cwd: process.cwd(),
-    traceOut,
-    outputOut,
-    mock,
-    memoryKeys,
-    sessionId: sessionId ?? undefined,
-    firedBy: firedBy ?? undefined,
-  });
+  // RED-381 Phase B: Pipeline IRs dispatch through a separate entry
+  // point. Detect by the top-level `kind: "Pipeline"` field that
+  // `pipeline.rb`'s PipelineCompiler emits; gen IRs don't carry a kind.
+  // Falls through to runGenFromIr for all gen IRs unchanged.
+  const isPipeline = ir?.kind === 'Pipeline';
+  const runner = await import('@redwood-labs/cambium-runner');
+  const result = isPipeline
+    ? await runner.runPipelineFromIr({
+        ir,
+        cwd: process.cwd(),
+        traceOut,
+        outputOut,
+        mock,
+        firedBy: firedBy ?? undefined,
+        // Pass compile.rb path explicitly so the per-step sub-gen
+        // compile inside runPipelineFromIr doesn't depend on cwd
+        // (which breaks running pipelines from external `[package]`
+        // workspaces; the runner package doesn't ship ruby/).
+        compileRb: RUBY_COMPILE_SCRIPT,
+      })
+    : await runner.runGenFromIr({
+        ir,
+        cwd: process.cwd(),
+        traceOut,
+        outputOut,
+        mock,
+        memoryKeys,
+        sessionId: sessionId ?? undefined,
+        firedBy: firedBy ?? undefined,
+      });
 
   if (!result.ok) {
     if (result.errorMessage) {

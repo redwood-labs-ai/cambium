@@ -214,4 +214,52 @@ export function validateProviderBaseUrl(providerLabel: string, urlStr: string): 
 export function _resetValidatorCacheForTesting(): void {
   _validatedUrls.clear();
   _warnedEscapeHatches.clear();
+  _nudgedV1Strips.clear();
+}
+
+// ── /v1 suffix normalization (UX fix) ─────────────────────────────────
+//
+// LM Studio and a few other OpenAI-compatible servers document their
+// endpoint as `http://host:port/v1`. Users naturally paste the `/v1`
+// form into CAMBIUM_OMLX_BASEURL, but the runner internally appends
+// `/v1/chat/completions` — producing the broken doubled path
+// `POST /v1/v1/chat/completions`.
+//
+// Strip a trailing `/v1` (with optional trailing slash) once at load,
+// emit a one-time stderr nudge so the user can fix their env. Memoized
+// per (raw URL) so a misconfigured CI doesn't spam the log every call.
+
+const _nudgedV1Strips = new Set<string>();
+
+/**
+ * Normalize CAMBIUM_OMLX_BASEURL for the `${base}/v1/...` URL-build
+ * convention. Strips any trailing `/v1` (or `/v1/`) and any trailing
+ * slash. Emits a one-time stderr nudge when /v1 was stripped so the
+ * operator knows to fix their env. Returns the cleaned URL unchanged
+ * when no stripping is needed.
+ *
+ * The matching is intentionally narrow — only the literal `/v1` suffix
+ * — to avoid mangling base URLs whose path component carries real
+ * routing (e.g., an internal-proxy convention like `/llm-proxy/v1`).
+ * Those still get stripped (and a nudge fires), which is the right
+ * behavior because the proxy URL should NOT include the API version
+ * segment that the runner is going to append anyway.
+ */
+export function normalizeOmlxBaseUrl(raw: string): string {
+  let url = raw;
+  // Trim trailing slashes first so a `/v1/` form matches the `/v1` strip.
+  url = url.replace(/\/+$/, '');
+  const stripped = url.endsWith('/v1');
+  if (stripped) {
+    url = url.slice(0, -'/v1'.length);
+    if (!_nudgedV1Strips.has(raw)) {
+      _nudgedV1Strips.add(raw);
+      process.stderr.write(
+        `[cambium] CAMBIUM_OMLX_BASEURL ended in /v1 — stripped to ${url}. ` +
+        `The runner appends /v1/chat/completions automatically; including /v1 ` +
+        `in the base produces a doubled-path 404. Update your env to drop the suffix.\n`,
+      );
+    }
+  }
+  return url;
 }
