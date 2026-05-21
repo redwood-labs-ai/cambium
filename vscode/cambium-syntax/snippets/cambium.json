@@ -207,5 +207,72 @@
       "memory :${1:slot}, scope: :${2:pool_name}, top_k: ${3:5}"
     ],
     "description": "Reference a shared memory pool from app/memory_pools/ (RED-215). Pool is authoritative on strategy/embed/keyed_by."
+  },
+  "Pipeline boilerplate": {
+    "prefix": "pipeline",
+    "body": [
+      "class ${1:PipelineName} < Pipeline",
+      "  input :${2:document}, schema: ${3:SchemaName}",
+      "",
+      "  budget tokens: ${4:50_000}",
+      "",
+      "  step :${5:first_stage}, gen: ${6:FirstGen}, method: :${7:analyze},",
+      "    with: { ${2:document}: bind(:input).${2:document} }",
+      "",
+      "  step :${8:second_stage}, gen: ${9:SecondGen}, method: :${10:review},",
+      "    with: { analysis: bind(:${5:first_stage}) }",
+      "",
+      "  def ${11:run}(${2:document})",
+      "    # Empty body — 1:1 stance per RED-374. The operator chain above is what runs.",
+      "  end",
+      "end"
+    ],
+    "description": "Cambium Pipeline class skeleton: input slot + two sequential steps + 1:1 entry method (RED-381)."
+  },
+  "Pipeline step": {
+    "prefix": "pstep",
+    "body": [
+      "step :${1:step_id}, gen: ${2:GenClass}, method: :${3:analyze},",
+      "  with: { ${4:param}: bind(:${5:input}).${6:field} }"
+    ],
+    "description": "Sequential pipeline step (RED-381). Each step's `with:` clause binds inputs from upstream (bind(:input).<slot> or bind(:prior_step).<field>)."
+  },
+  "Pipeline fan_out": {
+    "prefix": "fanout",
+    "body": [
+      "fan_out :${1:fan_id}, collect_into: :${2:results} do",
+      "  branch :${3:branch_a}, agent: ${4:AgentA}, method: :${5:method}",
+      "  branch :${6:branch_b}, agent: ${7:AgentB}, method: :${5:method}",
+      "  concurrency ${8:2}",
+      "  on_branch_failure :${9|continue,fail_fast|}",
+      "  require :${10|all|}",
+      "  pass_context :${11:upstream_field}",
+      "end"
+    ],
+    "description": "Parallel pipeline fan-out (RED-381 Phase C). N branches against shared upstream context; downstream `bind(:fan_id)` returns the typed array."
+  },
+  "Pipeline branch_on": {
+    "prefix": "branchon",
+    "body": [
+      "branch_on bind(:${1:upstream_step}).${2:signal_field} do",
+      "  on :${3:critical} do",
+      "    step :${4:urgent_action}, gen: ${5:UrgentGen}, method: :${6:handle}",
+      "  end",
+      "  default do",
+      "    # explicit catch-all (required in v1, RED-381 Phase D)",
+      "  end",
+      "end"
+    ],
+    "description": "Deterministic conditional pipeline routing (RED-381 Phase D). Requires an explicit `default do ... end` block."
+  },
+  "Pipeline output composition": {
+    "prefix": "poutput",
+    "body": [
+      "output do",
+      "  ${1:field_a} bind(:${2:step_id}).${3:field_x}",
+      "  ${4:field_b} bind(:${5:other_step}).${6:field_y}",
+      "end"
+    ],
+    "description": "Pipeline output composition (RED-381). Default is last_step's output; this block assembles a custom shape from named step results."
   }
 }

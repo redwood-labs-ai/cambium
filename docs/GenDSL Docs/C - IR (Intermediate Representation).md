@@ -18,7 +18,16 @@ Define the auditable, replayable plan that the DSL compiles to.
 - Repair
 - Return
 
-## Top-level IR fields
+## IR kinds
+
+Two IR shapes ship today, distinguished by the top-level `kind` field:
+
+- **Gen IRs** (no `kind` field, or `kind` absent — back-compat default): the shape compiled from `.cmb.rb` `GenModel` subclasses. The table below describes this shape. Most fields are gen-specific.
+- **Pipeline IRs** (`kind: "Pipeline"`, RED-381): the shape compiled from `.pipeline.rb` `Cambium::Pipeline` subclasses. Carries `input`, `policies`, `operators[]`, and `output` — different top-level shape from gens. See "Pipeline IR fields" below.
+
+The CLI and `cambium serve` dispatch by `ir.kind`: pipeline IRs route through `runPipelineFromIr`, gens through `runGenFromIr`.
+
+## Top-level IR fields (gen IRs)
 
 | Field | Source primitive | Notes |
 |---|---|---|
@@ -41,9 +50,35 @@ Define the auditable, replayable plan that the DSL compiles to.
 | `enrichments`, `signals`, `triggers` | `enrich`, `extract`, `on` | sub-agent context + signal → deterministic action |
 | `context[<source>]` | runtime `--arg` | input for the gen, keyed by name. Values are **either** plain strings (text passed to the gen method, keyed by the grounding source when `grounded_in :<name>` is declared — RED-276; read via `getGroundingDocument(ir, groundingTextByKey)`, don't hardcode `ir.context.document`) **or** typed document envelopes `{ kind: 'base64_pdf' \| 'base64_image', data: string, media_type: string }` (RED-323; extracted via `extractDocuments(ir)` in `documents.ts` and emitted as Anthropic content blocks). For `base64_pdf` envelopes the runner also extracts plain text via `pdfjs-dist` and populates `groundingTextByKey[<source>]` so `grounded_in :<same_key>` verifies citations against the PDF content (0.3.1 fix). Non-Anthropic providers fail fast when envelopes are present. See `N - Model Identifiers` § Native document input for size caps + wire shape. |
 
+## Pipeline IR fields (RED-381)
+
+A Pipeline IR has `kind: "Pipeline"` and a structurally distinct top-level shape from gens — no `steps`, no `returnSchemaId`, no `enrichments`/`signals`/`triggers`. The runner dispatches operators in declaration order; sub-gen IRs are compiled on demand at each step's dispatch.
+
+| Field | Source primitive | Notes |
+|---|---|---|
+| `kind` | (discriminant) | `"Pipeline"` literal — `ir.kind === "Pipeline"` routes to `runPipelineFromIr` |
+| `version`, `name`, `entry` | core | `entry.source` is the `.pipeline.rb` path; `name` mirrors `entry.class` for trace observability |
+| `input` | `input :name, schema: X` | `Record<string, { schema: string }>` — declared input slots. Schemas validated against `src/contracts.ts` at compile time. Single-slot pipelines accept the CLI `--arg` value as that slot; multi-slot expect a JSON object. |
+| `policies.budget` | `budget tokens: N, tool_calls: N` | `{ tokens?: number, tool_calls?: number }` — pipeline-level cap (ceiling, not quota). Pre-dispatch token check via projection from each sub-gen's `model.max_tokens`; post-step tool-call check. |
+| `policies.security` | `security :pack_name` or `security network: {...}` | inherited into every sub-gen by default; sub-gen `security` blocks override per-slot. Same per-slot mixing rule as gen-side (RED-214). |
+| `policies.bind_defaults` | `bind_defaults :explicit | :pass_through` | `:explicit` (shipped default) or `:pass_through` (prior step's output flows into next step's primary input slot). |
+| `policies.memory[]` | `memory :name, strategy: :sym, ...` | pipeline-level memory slots (pipeline-authoritative on strategy/embed/keyed_by/retain). Sub-gens opt in via `memory :name, scope: :pipeline_run`. Bucket keyed by the pipeline's run id; all sub-gens of one run share the bucket. |
+| `policies.schedules[]` | `cron :daily, at: "9:00"` | same shape as gen `policies.schedules[]`; `cambium schedule list/compile` recognizes `.pipeline.rb` alongside `.cmb.rb` (RED-381 Phase F.1). |
+| `policies.log[]` | `log :datadog, ...` | same shape as gen `policies.log[]`. Run-level events use `<snake_pipeline_name>.<method>.<event>` (`complete` / `failed`). |
+| `operators[]` | `step`, `fan_out`, `branch_on` | typed entries: `{ kind: "Step", id, gen, method, with[] }`, `{ kind: "FanOut", id, branches[], concurrency?, on_branch_failure, require, pass_context?, collect_into, _homogeneous? }`, `{ kind: "BranchOn", signal, branches[], default? }`. `with[]` and `signal` carry `bind()` refs cross-validated against input + step outputs at compile time. |
+| `output` | `output do ... end` | optional. `{ kind: "last_step" }` (default) means pipeline output = last step's output. `{ kind: "compose", fields: [{ name, from }] }` means assembled from named bind refs. |
+| `context` | runtime `--arg` | `{ "_pipeline_arg": <string> }` — the raw CLI arg. `parsePipelineInputs()` in the runtime maps this to input slots (single slot gets the raw string; multi-slot expects JSON-object). |
+
+The bind-ref shape inside `with[]`, `signal`, and `output.fields[]` is `{ from: { input: <slot_name> | true } | { step: <step_id>, field?: <dotted_path> } | { literal: <value> } }`. Compile-time validation walks every ref and rejects:
+
+- unknown input slot names (typo'd `bind(:input).foo`)
+- step ids that don't appear earlier in the operator list (forward refs)
+- non-bind values where a bind is required (e.g. `branch_on` signals must be `bind(:step).field`)
+
 ## See also
 - [[C - Runner (TS runtime)]]
 - [[C - Trace (observability)]]
 - [[P - generate]]
 - [[P - Memory]]
 - [[P - Policy Packs (RED-214)]]
+- [[N - Orchestration Layer]] — Pipeline IR design + operator semantics

@@ -1,0 +1,47 @@
+diff --git a/ruby/cambium/pipeline.rb b/ruby/cambium/pipeline.rb
+index a1b2c3d..e4f5g6h 100644
+--- a/ruby/cambium/pipeline.rb
++++ b/ruby/cambium/pipeline.rb
+@@ -487,6 +487,18 @@ module Cambium
+       def bind(target)
+         BindRef.new(target)
+       end
+
++      # RED-403: declare a fail-soft policy on a step. When set, a
++      # failure on this step is recorded but doesn't terminate the
++      # pipeline; downstream operators see `bind(:step).ok == false`
++      # and can branch_on it.
++      def fail_soft(step_name, fallback: nil)
++        _cambium_pipeline_defaults['fail_soft'] ||= {}
++        _cambium_pipeline_defaults['fail_soft'][step_name.to_s] = {
++          'fallback' => fallback,
++        }
++      end
++
+       # ===== Internal helpers (shared between class-level operators
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 4a4a4a4..5b5b5b5 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -55,6 +55,7 @@
+ - **`memory`** ...
+ - **`Pipeline`** ...
++- **`fail_soft`** *(RED-403)*: TBD.
+diff --git a/packages/cambium-runner/src/pipeline.ts b/packages/cambium-runner/src/pipeline.ts
+index abc..def 100644
+--- a/packages/cambium-runner/src/pipeline.ts
++++ b/packages/cambium-runner/src/pipeline.ts
+@@ -250,6 +250,14 @@ async function dispatchOperatorList(
+           if (!stepTrace.ok) {
++            // RED-403: fail_soft policy lets the pipeline continue past
++            // a failed step. The result is still pushed to stepResults
++            // (with ok:false flag), so downstream branch_on can route
++            // on it.
++            const failSoft = ctx.ir.policies?.fail_soft?.[op.id];
++            if (failSoft) {
++              stepResults[op.id] = { ok: false, fallback: failSoft.fallback };
++              break;
++            }
+             return {
+               ok: false,
+               failureKind: 'step_failed',

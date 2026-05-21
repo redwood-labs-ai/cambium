@@ -1,0 +1,194 @@
+# Cambium CI Review — Cambium reviewing Cambium PRs
+#
+# Runs the `cambium_ci_review.pipeline.rb` pipeline against every PR
+# diff and posts the typed review (verdict + concerns grouped by
+# severity) as a PR comment. This is Cambium's own orchestration layer
+# reviewing changes to itself.
+#
+# Behavior:
+#   - With CAMBIUM_OMLX_BASEURL secret set + endpoint reachable: real
+#     local-LLM review (recommended). The CI review gens use
+#     `model :default` (= omlx:Qwen3.5-27B-4bit per app/config/models.rb),
+#     so the secret points the runner at a LAN-local oMLX server.
+#   - Without the secret, or with an unreachable endpoint: falls back
+#     to --mock mode and posts a warning. The workflow always exits
+#     cleanly on its first run, before any secret is configured.
+#
+# Why .forgejo/workflows/ and not .github/workflows/: the Cambium
+# repo is primary-hosted on Forgejo (source.deerlarch.net) and mirrored
+# to GitHub. Real-LLM review needs to reach either Anthropic's API or
+# a local-network oMLX endpoint, neither of which makes sense from a
+# public GitHub runner. .forgejo/workflows/ is read by Forgejo Actions
+# but invisible to GitHub Actions, so the same branch can carry the
+# workflow without GitHub trying to run it.
+#
+# The file syntax is still GitHub-Actions-flavored — Forgejo Actions
+# is a near-drop-in. If you ever want this on GitHub too (with the
+# ANTHROPIC_API_KEY secret set), copy it to .github/workflows/.
+
+name: Cambium CI Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write   # post the review comment
+      contents: read
+
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Setup Ruby
+        # Cambium's Ruby surface is stdlib-only (see CLAUDE.md
+        # "Dependency policy"), so the system Ruby from apt is
+        # sufficient. We avoid ruby/setup-ruby@v1 because Forgejo's
+        # action mirror tracks upstream's runs.using bump to node24,
+        # while the Forgejo runner currently maxes out at node20 —
+        # the action setup fails before any step runs.
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ruby ruby-dev
+          ruby --version
+
+      - name: Install dependencies + build runner
+        run: |
+          npm ci
+          cd packages/cambium-runner && npm run build
+
+      - name: Compute PR diff
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.sha }}
+          git diff ${{ github.event.pull_request.base.sha }}..HEAD > /tmp/pr.diff
+          echo "Diff size: $(wc -c < /tmp/pr.diff) bytes"
+          # Surface the first 100 lines in the workflow log for debugging
+          # if the pipeline produces unexpected output.
+          echo "::group::Diff preview (first 100 lines)"
+          head -100 /tmp/pr.diff
+          echo "::endgroup::"
+
+      - name: Run Cambium CI Review pipeline
+        env:
+          # Local inference: the CI review gens declare `model :default`,
+          # which app/config/models.rb resolves to "omlx:Qwen3.5-27B-4bit".
+          # The Forgejo runner reaches oMLX over Tailscale — set
+          # CAMBIUM_OMLX_BASEURL as a repo secret pointing at the
+          # HTTPS URL fronted by `tailscale serve` (e.g.
+          # `https://<machine>.<tailnet>.ts.net`). We probe /v1/models
+          # before each run; if the endpoint isn't reachable we fall
+          # back to --mock with a warning instead of hanging.
+          CAMBIUM_OMLX_BASEURL: ${{ secrets.CAMBIUM_OMLX_BASEURL }}
+          # Optional bearer token. Harmless if unset and oMLX accepts
+          # anonymous requests; required if oMLX is started with
+          # `--api-key`.
+          CAMBIUM_OMLX_API_KEY: ${{ secrets.CAMBIUM_OMLX_API_KEY }}
+        run: |
+          # Auth header for the probe goes into a bash array so the
+          # `-H` flag and its value stay as two separate argv tokens
+          # (no word-splitting surprises from string concatenation).
+          AUTH_ARGS=()
+          if [ -n "$CAMBIUM_OMLX_API_KEY" ]; then
+            AUTH_ARGS=(-H "Authorization: Bearer $CAMBIUM_OMLX_API_KEY")
+          fi
+
+          if [ -z "$CAMBIUM_OMLX_BASEURL" ]; then
+            MOCK_FLAG="--mock"
+            echo "::warning::CAMBIUM_OMLX_BASEURL secret not set — running in --mock mode (canned response). Configure the secret in repo settings to enable real reviews."
+          elif curl --max-time 5 -sS -o /dev/null -f "${AUTH_ARGS[@]}" "$CAMBIUM_OMLX_BASEURL/v1/models"; then
+            MOCK_FLAG=""
+            echo "Real-LLM mode (oMLX reachable at $CAMBIUM_OMLX_BASEURL)"
+          else
+            MOCK_FLAG="--mock"
+            echo "::warning::oMLX at $CAMBIUM_OMLX_BASEURL not reachable from the runner — running in --mock mode."
+            # Probe failed — re-run verbose so the workflow log shows
+            # the actual cause (DNS / TLS / 401 / connection refused).
+            echo "::group::Probe diagnostics (curl -v)"
+            curl --max-time 5 -v "${AUTH_ARGS[@]}" "$CAMBIUM_OMLX_BASEURL/v1/models" 2>&1 || true
+            echo "::endgroup::"
+          fi
+          node cli/cambium.mjs run \
+            packages/cambium/app/pipelines/cambium_ci_review.pipeline.rb \
+            --method review \
+            --arg /tmp/pr.diff \
+            --out /tmp/review.json \
+            $MOCK_FLAG
+
+      - name: Post review comment
+        # Forgejo's action mirror does not carry actions/github-script
+        # ("repository not found" against data.forgejo.org), so this
+        # step uses Node + curl directly. The endpoint shape
+        # (POST /repos/{owner}/{repo}/issues/{N}/comments) is identical
+        # on Forgejo and GitHub, and ${GITHUB_API_URL} resolves to the
+        # right base for each.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const review = JSON.parse(fs.readFileSync("/tmp/review.json", "utf8"));
+            const concerns = review.concerns ?? [];
+            const blocking    = concerns.filter(c => c.severity === "blocking");
+            const suggestions = concerns.filter(c => c.severity === "suggestion");
+            const nits        = concerns.filter(c => c.severity === "nit");
+
+            const verdictBadge = {
+              approve: "✅ Approve",
+              approve_with_suggestions: "🟡 Approve with suggestions",
+              request_changes: "⛔ Request changes",
+            }[review.overall_verdict] ?? review.overall_verdict;
+
+            const lines = [
+              "## 🤖 Cambium CI Review",
+              "",
+              `**Verdict:** ${verdictBadge}`,
+              "",
+              review.summary ?? "",
+              "",
+            ];
+
+            const renderGroup = (heading, group) => {
+              if (group.length === 0) return;
+              lines.push(`### ${heading}`);
+              for (const c of group) {
+                const fileTag = c.file ? ` (\`${c.file}\`)` : "";
+                lines.push(`- **${c.category}**${fileTag}: ${c.message}`);
+              }
+              lines.push("");
+            };
+
+            renderGroup("⛔ Blocking", blocking);
+            renderGroup("🟡 Suggestions", suggestions);
+            renderGroup("💬 Nits", nits);
+
+            if (concerns.length === 0) {
+              lines.push("No concerns flagged.");
+              lines.push("");
+            }
+
+            lines.push("---");
+            lines.push(
+              "_Generated by the Cambium CI Review pipeline — Cambium reviewing Cambium using its own orchestration layer (RED-381)._"
+            );
+
+            fs.writeFileSync("/tmp/comment-body.json", JSON.stringify({ body: lines.join("\n") }));
+          '
+          curl -sS -f -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            --data-binary @/tmp/comment-body.json \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments"

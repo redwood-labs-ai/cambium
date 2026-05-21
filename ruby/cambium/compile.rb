@@ -2,9 +2,11 @@
 
 require 'json'
 require_relative './runtime'
+require_relative './pipeline'
 
-# Make GenModel available at top-level for the Ruby DSL.
+# Make GenModel + Pipeline available at top-level for the Ruby DSL.
 GenModel = Cambium::GenModel unless defined?(GenModel)
+Pipeline = Cambium::Pipeline unless defined?(Pipeline)
 
 def usage(msg = nil)
   warn("\n#{msg}") if msg
@@ -61,9 +63,6 @@ end
 Cambium::CompilerState.current_source_file = file
 load file
 
-klass = Cambium::Registry.model_classes.last
-raise Cambium::CompileError, "No GenModel subclass found after loading #{file}" unless klass
-
 arg = if arg_path.nil?
         ''
       elsif arg_path == '-'
@@ -71,6 +70,32 @@ arg = if arg_path.nil?
       else
         File.read(arg_path)
       end
+
+# RED-381 Phase A: dispatch to PipelineCompiler when a Pipeline subclass
+# is registered. Pipeline files declare `class Foo < Pipeline`; gen files
+# declare `class Foo < GenModel`. The two registries are distinct, so a
+# single .cmb.rb / .pipeline.rb file unambiguously routes to one path.
+# Pipeline takes precedence when both exist (shouldn't happen in practice
+# — one file, one declaration), and the existing gen path is otherwise
+# untouched.
+if (pipeline_klass = Cambium::Registry.pipeline_classes.last)
+  # Always restore const_missing before exit — gen path does this via
+  # ensure; mirror it here.
+  begin
+    irs = Cambium::PipelineCompiler.emit(pipeline_klass, file, arg, method)
+  ensure
+    Module.define_method(:const_missing, orig_module_const_missing)
+  end
+  if method
+    puts JSON.pretty_generate(irs[method])
+  else
+    puts JSON.pretty_generate(irs)
+  end
+  exit 0
+end
+
+klass = Cambium::Registry.model_classes.last
+raise Cambium::CompileError, "No GenModel or Pipeline subclass found after loading #{file}" unless klass
 
 # Determine which methods to compile. With --method, just that one.
 # Without, enumerate every public user method on the GenModel — the
@@ -231,6 +256,14 @@ end
 resolved_memory = []
 resolved_pools  = {}
 builtin_scopes  = %w[session global schedule]
+# RED-381 Phase E: :pipeline_run is a scope where the pipeline (not the
+# gen) owns strategy/embed/keyed_by/retain. The gen-side decl is an
+# opt-in stub — it declares the slot name + optional reader knobs, and
+# the pipeline runtime injects the authoritative slot config at sub-gen
+# dispatch time. Same source-of-truth stance as named pools (RED-215),
+# applied to pipeline-level memory slots.
+pipeline_authoritative_scopes = %w[pipeline_run]
+pipeline_authoritative_slots  = %w[strategy embed keyed_by retain]
 
 (defs[:memory] || []).each do |m|
   scope = m['scope']
@@ -249,6 +282,23 @@ builtin_scopes  = %w[session global schedule]
     if m['embed']
       m['embed'] = model_aliases.resolve(m['embed'], context: "memory '#{m['name']}' embed")
     end
+    resolved_memory << m
+  elsif pipeline_authoritative_scopes.include?(scope)
+    # Pipeline-authoritative scope. Gen-side decl must NOT carry
+    # pool-owned slots — the pipeline's slot definition is the source
+    # of truth. Reader knobs (size, top_k) are allowed and override
+    # the pipeline's defaults per-gen.
+    conflicts = pipeline_authoritative_slots.select { |k| m.key?(k) }
+    unless conflicts.empty?
+      raise Cambium::CompileError,
+            "memory '#{m['name']}' scope: :#{scope} — the pipeline is the source of truth " \
+            "for #{pipeline_authoritative_slots.join(', ')}. " \
+            "Remove #{conflicts.map { |c| "`#{c}:`" }.join(' and ')} from the gen-side decl " \
+            "(edit the pipeline's memory slot instead). See N - Orchestration Layer § Pipeline memory."
+    end
+    # Pass through with name + scope + reader knobs only. The pipeline
+    # runtime merges in strategy/embed/keyed_by/retain at sub-gen
+    # dispatch time (pipeline.ts injectPipelineMemorySlots).
     resolved_memory << m
   else
     # Named pool — load it (once; subsequent references hit the cache)
@@ -363,6 +413,70 @@ resolved_memory.each do |m|
   end
 end
 
+# RED-383 (minimum cut): resolve `grounded_in :source, from: "<path>"`
+# to an actual context value at compile time. CLI `--arg` overrides at
+# runtime (testing stays easy: swap fixtures via --arg without
+# editing the .cmb.rb). URL fetching + magic-byte sniffing for files
+# without recognized extensions defer to a follow-up (RED-383 v2).
+#
+# Path resolution: absolute paths pass through; relative paths anchor
+# to the gen file's directory (not cwd) so a gen compiles the same
+# way regardless of where the operator runs it from.
+#
+# Content-type by extension: .pdf → base64_pdf envelope, .png/.jpg/
+# .jpeg/.webp/.gif → base64_image envelope (reuses RED-323's envelope
+# normalization downstream), anything else → text. The runner's
+# documents.ts already accepts these envelope shapes for both
+# Anthropic native PDF blocks and the extracted-text path for other
+# providers.
+effective_grounding_value = nil
+if defs[:grounding] && defs[:grounding]['from']
+  from_path = defs[:grounding]['from']
+  source_name = defs[:grounding]['source']
+  gen_dir = File.dirname(File.expand_path(file))
+  # File.expand_path with a base: relative paths anchor to gen_dir,
+  # absolute paths pass through (base ignored). Works on every Ruby
+  # version Cambium supports — File.absolute_path? is 3.1+.
+  full_path = File.expand_path(from_path, gen_dir)
+
+  unless File.exist?(full_path)
+    raise Cambium::CompileError,
+          "grounded_in :#{source_name} from: #{from_path.inspect} — file not found at #{full_path}. " \
+          "Relative paths resolve from the gen's directory (#{gen_dir}); use an absolute path or fix the relative path."
+  end
+  unless File.file?(full_path)
+    raise Cambium::CompileError,
+          "grounded_in :#{source_name} from: #{from_path.inspect} — #{full_path} exists but is not a regular file."
+  end
+
+  # Base64-encode via core String#pack('m0') rather than `require 'base64'`.
+  # `pack('m0')` returns RFC 4648 base64 with no line breaks — identical
+  # to Base64.strict_encode64 — and is built into Ruby's core, so it
+  # doesn't require widening the stdlib allowlist in
+  # scripts/check-ruby-deps.mjs (see CLAUDE.md "Dependency policy").
+  b64 = ->(bytes) { [bytes].pack('m0') }
+
+  ext = File.extname(full_path).downcase
+  effective_grounding_value =
+    case ext
+    when '.pdf'
+      { 'kind' => 'base64_pdf', 'data' => b64.call(File.binread(full_path)), 'media_type' => 'application/pdf' }
+    when '.png'
+      { 'kind' => 'base64_image', 'data' => b64.call(File.binread(full_path)), 'media_type' => 'image/png' }
+    when '.jpg', '.jpeg'
+      { 'kind' => 'base64_image', 'data' => b64.call(File.binread(full_path)), 'media_type' => 'image/jpeg' }
+    when '.webp'
+      { 'kind' => 'base64_image', 'data' => b64.call(File.binread(full_path)), 'media_type' => 'image/webp' }
+    when '.gif'
+      { 'kind' => 'base64_image', 'data' => b64.call(File.binread(full_path)), 'media_type' => 'image/gif' }
+    else
+      # Text fallthrough — anything not a recognized binary extension
+      # reads as a string. Future RED-383 v2 magic-byte sniffing
+      # would tighten this for unmarked PDFs / images.
+      File.read(full_path)
+    end
+end
+
 # Build an IR per compiled method. Per-class state (model, system,
 # policies, memory, etc.) is shared; per-method state is `entry.method`
 # and `steps` (the PlanBuilder output captured per-method above).
@@ -404,8 +518,16 @@ build_ir = lambda do |method_name, steps|
     # the gen declares grounding, else fall back to 'document' for
     # back-compat with analyst-style gens. Keeps the grounding validator's
     # `context[source]` lookup self-consistent with what the gen declared.
+    #
+    # RED-383: `arg` (from CLI --arg) wins when supplied — empty-string
+    # default falls through to the from:-resolved value. Pipeline-driven
+    # invocations override at sub-gen dispatch time (pipeline.ts merges
+    # `with:` bindings into subIr.context), so the from: bake-in becomes
+    # the "no caller supplied anything" default.
     'context' => {
-      (defs[:grounding]&.fetch('source', nil) || 'document') => arg
+      (defs[:grounding]&.fetch('source', nil) || 'document') => (
+        (arg.nil? || arg == '') && !effective_grounding_value.nil? ? effective_grounding_value : arg
+      )
     },
     'enrichments' => (defs[:enrichments] || []),
     'signals' => (defs[:signals] || []),

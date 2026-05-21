@@ -37,6 +37,7 @@ import { spawnSync } from 'node:child_process';
 import { dirname, resolve as pathResolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runGenFromIr, type IR } from '../runner.js';
+import { runPipelineFromIr } from '../pipeline.js';
 import { parseMemoryKeys } from '../memory/keys.js';
 import { loadGenCatalog, type GenCatalog } from './gen-catalog.js';
 import type { BindTarget } from './bind.js';
@@ -113,6 +114,9 @@ export type CompileBareFn = (genFilePath: string) => Promise<Record<string, IR>>
 /** Dispatch fn matching `runGenFromIr`'s signature. Injectable for tests. */
 export type RunGenFromIrFn = typeof runGenFromIr;
 
+/** RED-381 Phase F.3: dispatch fn for Pipeline IRs. Injectable for tests. */
+export type RunPipelineFromIrFn = typeof runPipelineFromIr;
+
 export interface RunServeOptions {
   /** Path to the workspace containing `Genfile.toml`. */
   workspaceDir: string;
@@ -127,6 +131,8 @@ export interface RunServeOptions {
   compileRb?: string;
   /** Override the dispatch fn (default is the imported runGenFromIr). For tests. */
   runGenFromIrFn?: RunGenFromIrFn;
+  /** RED-381 Phase F.3: override the Pipeline dispatch fn. For tests. */
+  runPipelineFromIrFn?: RunPipelineFromIrFn;
   /** Override the runtime cwd passed to runGenFromIr. Defaults to workspaceDir. */
   runCwd?: string;
   /**
@@ -177,6 +183,7 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
     opts.compileRb ?? process.env.CAMBIUM_COMPILE_RB ?? MONOREPO_FALLBACK_COMPILE_RB;
   const compileBare = opts.compileBare ?? makeDefaultCompileBare(compileRb);
   const runGenFromIrImpl = opts.runGenFromIrFn ?? runGenFromIr;
+  const runPipelineFromIrImpl = opts.runPipelineFromIrFn ?? runPipelineFromIr;
   const runCwd = opts.runCwd ?? opts.workspaceDir;
   // 0 or negative would lock the server out entirely — treat those as
   // "unlimited" rather than "block everything." `Infinity` is the sentinel.
@@ -379,14 +386,30 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
     const ir = JSON.parse(JSON.stringify(cachedIr)) as IR;
     injectInput(ir, input);
 
+    // RED-381 Phase F.3: route by IR kind. Pipeline IRs (kind: "Pipeline")
+    // dispatch through runPipelineFromIr; gen IRs (kind absent) go through
+    // runGenFromIr unchanged. Both return the same RunGenResult-shaped
+    // result object, so the downstream wire-encoding logic is shared.
+    const isPipeline = (ir as any)?.kind === 'Pipeline';
+
     let result;
     try {
-      const runP = runGenFromIrImpl({
-        ir,
-        cwd: runCwd,
-        memoryKeys,
-        firedBy: typeof body.fired_by === 'string' ? body.fired_by : undefined,
-      });
+      const runP = isPipeline
+        ? runPipelineFromIrImpl({
+            ir,
+            cwd: runCwd,
+            mock: false,
+            firedBy: typeof body.fired_by === 'string' ? body.fired_by : undefined,
+            // Hand the same compile.rb path serve already resolved at
+            // boot to the per-step sub-gen compiles. Mirrors the CLI.
+            compileRb,
+          })
+        : runGenFromIrImpl({
+            ir,
+            cwd: runCwd,
+            memoryKeys,
+            firedBy: typeof body.fired_by === 'string' ? body.fired_by : undefined,
+          });
 
       if (runTimeoutMs === Infinity) {
         result = await runP;

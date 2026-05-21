@@ -34,10 +34,17 @@ const GENFILE_NAME = 'Genfile.toml';
 const GEN_NAME_RE = /^[A-Z][A-Za-z0-9_]*$/;
 
 export interface GenCatalogEntry {
-  /** Export name as declared in `[exports.gens]` (e.g., "ResumeParser"). */
+  /** Export name as declared in `[exports.gens]` or `[exports.pipelines]`
+   *  (e.g., "ResumeParser", "CiReview"). */
   name: string;
-  /** Absolute path to the `.cmb.rb` gen file. */
+  /** Absolute path to the `.cmb.rb` (gen) or `.pipeline.rb` (pipeline) file. */
   genFilePath: string;
+  /** RED-381 Phase F.3: which Genfile section declared this entry. The
+   *  serve dispatcher routes 'pipeline' entries to runPipelineFromIr
+   *  and 'gen' entries to runGenFromIr. Boot detects the kind from the
+   *  Genfile section; the IR's own kind field is the runtime-side
+   *  invariant. */
+  kind: 'gen' | 'pipeline';
 }
 
 export interface GenCatalog {
@@ -45,7 +52,9 @@ export interface GenCatalog {
   workspaceDir: string;
   /** Absolute path to Genfile.toml itself (for error messages). */
   genfilePath: string;
-  /** Catalog entries keyed by export name. Keys preserve declared casing. */
+  /** Catalog entries keyed by export name. Keys preserve declared casing.
+   *  Names are unique across the union of [exports.gens] and
+   *  [exports.pipelines] — duplicates raise at load time. */
   entries: Map<string, GenCatalogEntry>;
 }
 
@@ -74,51 +83,97 @@ export function loadGenCatalog(workspaceDir: string): GenCatalog {
     );
   }
 
+  // RED-381 Phase F.3: pipelines declared parallel to gens, in
+  // `[exports.pipelines]`. Same validation surface (name regex, path
+  // shape, traversal guard, existence check); kind tag on each entry
+  // tells the serve dispatcher which runner to use.
   const gens = parsed?.exports?.gens;
-  if (gens === undefined) {
+  const pipelines = parsed?.exports?.pipelines;
+  if (gens === undefined && pipelines === undefined) {
     throw new Error(
-      `cambium serve: ${genfilePath} has no [exports.gens] section. ` +
-        `Declare each gen as <ExportName> = "<relative path to .cmb.rb>".`,
-    );
-  }
-  if (typeof gens !== 'object' || Array.isArray(gens) || gens === null) {
-    throw new Error(
-      `cambium serve: ${genfilePath} [exports.gens] must be a TOML table ` +
-        `(got ${Array.isArray(gens) ? 'array' : typeof gens}).`,
-    );
-  }
-
-  const keys = Object.keys(gens);
-  if (keys.length === 0) {
-    throw new Error(
-      `cambium serve: ${genfilePath} [exports.gens] is empty — nothing to serve. ` +
-        `Declare at least one gen.`,
+      `cambium serve: ${genfilePath} has neither [exports.gens] nor [exports.pipelines]. ` +
+        `Declare at least one gen or pipeline to serve.`,
     );
   }
 
   const entries = new Map<string, GenCatalogEntry>();
-  for (const name of keys) {
+  validateAndAddSection(
+    'gens',
+    gens,
+    'gen',
+    'cmb.rb',
+    genfilePath,
+    absWorkspace,
+    entries,
+  );
+  validateAndAddSection(
+    'pipelines',
+    pipelines,
+    'pipeline',
+    'pipeline.rb',
+    genfilePath,
+    absWorkspace,
+    entries,
+  );
+
+  if (entries.size === 0) {
+    throw new Error(
+      `cambium serve: ${genfilePath} declares no entries in [exports.gens] or ` +
+        `[exports.pipelines] — nothing to serve.`,
+    );
+  }
+
+  return { workspaceDir: absWorkspace, genfilePath, entries };
+}
+
+function validateAndAddSection(
+  sectionName: 'gens' | 'pipelines',
+  section: unknown,
+  kind: 'gen' | 'pipeline',
+  expectedExt: string,
+  genfilePath: string,
+  absWorkspace: string,
+  entries: Map<string, GenCatalogEntry>,
+): void {
+  if (section === undefined) return;
+  if (typeof section !== 'object' || Array.isArray(section) || section === null) {
+    throw new Error(
+      `cambium serve: ${genfilePath} [exports.${sectionName}] must be a TOML table ` +
+        `(got ${Array.isArray(section) ? 'array' : typeof section}).`,
+    );
+  }
+
+  const sectionTable = section as Record<string, unknown>;
+  for (const name of Object.keys(sectionTable)) {
     if (!GEN_NAME_RE.test(name)) {
       throw new Error(
-        `cambium serve: ${genfilePath} [exports.gens] key "${name}" is not a valid ` +
+        `cambium serve: ${genfilePath} [exports.${sectionName}] key "${name}" is not a valid ` +
           `export name. Names must match /^[A-Z][A-Za-z0-9_]*$/ (PascalCase, optional underscores).`,
       );
     }
-    const raw = (gens as Record<string, unknown>)[name];
+    if (entries.has(name)) {
+      const prior = entries.get(name)!;
+      throw new Error(
+        `cambium serve: ${genfilePath} declares "${name}" in both [exports.${sectionName}] ` +
+          `and [exports.${prior.kind === 'gen' ? 'gens' : 'pipelines'}]. Names must be ` +
+          `unique across the union of gens and pipelines.`,
+      );
+    }
+    const raw = sectionTable[name];
     if (typeof raw !== 'string') {
       throw new Error(
-        `cambium serve: ${genfilePath} [exports.gens].${name} must be a string path ` +
+        `cambium serve: ${genfilePath} [exports.${sectionName}].${name} must be a string path ` +
           `(got ${typeof raw}).`,
       );
     }
     if (raw.length === 0) {
       throw new Error(
-        `cambium serve: ${genfilePath} [exports.gens].${name} is an empty string.`,
+        `cambium serve: ${genfilePath} [exports.${sectionName}].${name} is an empty string.`,
       );
     }
     if (isAbsolute(raw)) {
       throw new Error(
-        `cambium serve: ${genfilePath} [exports.gens].${name} = "${raw}" must be ` +
+        `cambium serve: ${genfilePath} [exports.${sectionName}].${name} = "${raw}" must be ` +
           `relative to the workspace directory (no absolute paths).`,
       );
     }
@@ -126,18 +181,22 @@ export function loadGenCatalog(workspaceDir: string): GenCatalog {
     const rel = relative(absWorkspace, abs);
     if (rel.startsWith('..') || isAbsolute(rel)) {
       throw new Error(
-        `cambium serve: ${genfilePath} [exports.gens].${name} = "${raw}" resolves ` +
+        `cambium serve: ${genfilePath} [exports.${sectionName}].${name} = "${raw}" resolves ` +
           `outside the workspace directory.`,
       );
     }
     if (!existsSync(abs)) {
       throw new Error(
-        `cambium serve: ${genfilePath} [exports.gens].${name} = "${raw}" — file ` +
+        `cambium serve: ${genfilePath} [exports.${sectionName}].${name} = "${raw}" — file ` +
           `does not exist at ${abs}.`,
       );
     }
-    entries.set(name, { name, genFilePath: abs });
+    if (!abs.endsWith(`.${expectedExt}`)) {
+      throw new Error(
+        `cambium serve: ${genfilePath} [exports.${sectionName}].${name} = "${raw}" must end ` +
+          `with .${expectedExt} (got ${raw.split('.').pop() ?? '(no extension)'}).`,
+      );
+    }
+    entries.set(name, { name, genFilePath: abs, kind });
   }
-
-  return { workspaceDir: absWorkspace, genfilePath, entries };
 }

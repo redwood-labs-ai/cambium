@@ -29,7 +29,7 @@ import {
   stripInlineToolCalls,
   type ToolCallMessage,
 } from './inline-tool-calls.js';
-import { validateProviderBaseUrl } from './providers/base-url-validator.js';
+import { normalizeOmlxBaseUrl, validateProviderBaseUrl } from './providers/base-url-validator.js';
 import {
   planMemory,
   readMemoryForRun,
@@ -216,7 +216,9 @@ async function generateText(opts: { model: string; system: string; prompt: strin
 
     if (provider === 'omlx') {
       // oMLX server (OpenAI-compatible)
-      const baseUrl = process.env.CAMBIUM_OMLX_BASEURL ?? 'http://localhost:8080';
+      const baseUrl = normalizeOmlxBaseUrl(
+        process.env.CAMBIUM_OMLX_BASEURL ?? 'http://localhost:8080',
+      );
       validateProviderBaseUrl('oMLX (CAMBIUM_OMLX_BASEURL)', baseUrl);
       const url = `${baseUrl.replace(/\/$/, '')}/v1/chat/completions`;
 
@@ -510,7 +512,9 @@ async function generateWithTools(opts: {
     throw new Error(`Agentic mode: unknown provider "${provider}". Supported: omlx, ollama, anthropic.`);
   }
 
-  const baseUrl = process.env.CAMBIUM_OMLX_BASEURL ?? 'http://localhost:8080';
+  const baseUrl = normalizeOmlxBaseUrl(
+    process.env.CAMBIUM_OMLX_BASEURL ?? 'http://localhost:8080',
+  );
   validateProviderBaseUrl('oMLX (CAMBIUM_OMLX_BASEURL)', baseUrl);
   const url = `${baseUrl.replace(/\/$/, '')}/v1/chat/completions`;
 
@@ -622,6 +626,33 @@ function mockGenerate(prompt: string, schema?: { $id?: string }): string {
     // reason. Both paths are exercised by integration tests.
     return JSON.stringify({
       writes: [{ memory: 'conversation', content: 'mock retro agent note' }],
+    });
+  }
+  // RED-381 Cambium CI Review POC: framework-internal schemas with
+  // `additionalProperties: false` would otherwise reject the default
+  // mock payload at validation. Canned shape-valid responses keep the
+  // e2e test honest without a real LLM call.
+  if (schema?.$id === 'CambiumDiffAnalysis') {
+    return JSON.stringify({
+      summary: 'Mock Cambium diff analysis: changes appear to touch the DSL surface.',
+      touched_surfaces: ['ruby_dsl', 'docs'],
+      risk_categories: ['new_dsl_primitive'],
+      magnitude: 'small',
+      files_changed: 2,
+      key_excerpts: [],
+    });
+  }
+  if (schema?.$id === 'CambiumCiReview') {
+    return JSON.stringify({
+      summary: 'Mock review: changes look reasonable; verify the docs entry is in.',
+      concerns: [
+        {
+          severity: 'suggestion',
+          category: 'docs-drift',
+          message: 'New DSL primitive — confirm CLAUDE.md "Key concepts" and a P-doc entry both land.',
+        },
+      ],
+      overall_verdict: 'approve_with_suggestions',
     });
   }
 
@@ -758,6 +789,12 @@ export interface RunGenOptions {
    *  wants every exit path to leave a discoverable artifact location.
    *  Library callers typically omit this. */
   runId?: string;
+  /** RED-381 Phase E: pipeline run id for the parent pipeline when this
+   *  gen is dispatched as a sub-gen of a Pipeline. Memory decls with
+   *  scope: :pipeline_run use this as the bucket key. Set automatically
+   *  by runPipelineFromIr; direct library callers running a gen that
+   *  declares :pipeline_run memory must pass this themselves. */
+  pipelineRunId?: string;
 }
 
 export interface RunGenResult {
@@ -800,6 +837,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     logSinks: optsLogSinks,
     firedBy: optsFiredBy,
     runId: optsRunId,
+    pipelineRunId: optsPipelineRunId,
   } = opts;
 
   // Plumb opts.mock through to the deterministic-mock branch in
@@ -1113,6 +1151,68 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     };
   }
 
+  // ── Grounded-in pre-flight check ─────────────────────────────────────
+  //
+  // When a gen declares `grounded_in :source`, it's a load-bearing
+  // contract: the model is told to cite from a specific doc, and
+  // citations are verified against that doc post-generation. If the
+  // doc is missing/empty/non-coercible, the prior behavior was:
+  //   - getGroundingDocument returns '' silently
+  //   - the LLM hallucinates a response from the schema shape alone
+  //   - with require_citations:false → gen "succeeds" with groundless
+  //     output; the contract violation never surfaces
+  //   - with require_citations:true → citation validation fails AFTER
+  //     the wasted LLM call; failure-mode is loud but expensive
+  //
+  // Make grounded_in a real contract by checking BEFORE any LLM
+  // dispatch: the doc MUST resolve to non-trivially-empty content. If
+  // it doesn't, fail fast with a clear error pointing the operator at
+  // either --arg (standalone runs) or the pipeline `with:` binding
+  // (pipeline runs) as the fix.
+  //
+  // Mock-mode exemption: the mock provider returns canned output keyed
+  // only on schemaId; it doesn't read the doc. Pipeline / runtime tests
+  // routinely chain steps where the mid-pipeline doc is the upstream
+  // step's mock output (effectively empty or placeholder). The contract
+  // applies to real LLM runs, not framework-plumbing tests. The
+  // CAMBIUM_ALLOW_MOCK gate is the same env var --mock sets.
+  const grounding = ir.policies?.grounding as { source?: string; require_citations?: boolean } | undefined;
+  const mockActive = process.env.CAMBIUM_ALLOW_MOCK === '1';
+  if (grounding?.source && !mockActive) {
+    const source = grounding.source;
+    const text = getGroundingDocument(ir, groundingTextByKey);
+    // getGroundingDocument returns '' when (a) the source key is
+    // missing entirely, (b) it's null/undefined, or (c) it's a typed
+    // document envelope that didn't produce extracted text. All three
+    // are contract violations when grounded_in is declared.
+    const trimmed = text.trim();
+    if (trimmed.length === 0) {
+      const ctxKeys = Object.keys(ir.context ?? {});
+      const hint =
+        source in (ir.context ?? {})
+          ? `ir.context.${source} resolved to empty content (was: ${JSON.stringify((ir.context as any)[source])}).`
+          : `ir.context.${source} is missing entirely. Found keys: [${ctxKeys.join(', ') || '(none)'}].`;
+      trace.steps.push({
+        type: 'GroundingMissing',
+        ok: false,
+        errors: [{ source, message: hint }],
+      });
+      return {
+        ok: false,
+        output: null,
+        trace,
+        runId,
+        schemaId: schema.$id,
+        ir,
+        errorMessage:
+          `grounded_in :${source} declared but no document found. ${hint} ` +
+          `For standalone runs: pass the doc via --arg. For pipeline steps: ` +
+          `bind it via \`with: { ${source}: bind(:upstream) }\` (or rename ` +
+          `the upstream binding to match the grounding source).`,
+      };
+    }
+  }
+
   // ── Memory (RED-215 phase 3): plan + pre-generate read ──────────────
   // Each memory decl opens its SQLite bucket, optionally reads recent
   // entries (sliding_window), and contributes a block that is appended
@@ -1153,6 +1253,10 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
       keys,
       runsRoot,
       scheduleId: firedBy?.scheduleId,
+      // RED-381 Phase E: when this gen is a sub-gen of a pipeline,
+      // the pipeline runtime sets pipelineRunId so :pipeline_run
+      // memory decls share a bucket across the pipeline's sub-gens.
+      pipelineRunId: optsPipelineRunId,
     };
     memoryPlans = planMemory(memoryDecls, memCtx);
     const { block, trace: readTrace, backends } = await readMemoryForRun(memoryPlans, memCtx);

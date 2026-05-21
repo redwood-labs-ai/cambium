@@ -137,11 +137,12 @@ Explicit memory agents are the common path.
 
 ## Scope (decided)
 
-Four scope kinds, covering all the cases `:user` / `:gen` would have covered without the ceremony:
+Five scope kinds, covering all the cases `:user` / `:gen` would have covered without the ceremony:
 
 - `:session` — a single conversation / run-chain.
 - `:global`  — workspace-wide.
 - `:schedule` — per-schedule-id bucket (RED-305). Requires a paired `cron` declaration on the gen (compile-time) and `--fired-by schedule:<id>` at runtime. All fires of the same schedule share one bucket. See [[P - cron (schedule)]].
+- `:pipeline_run` — intra-pipeline-run scratchpad (RED-381 Phase E). All sub-gens of one `Pipeline` execution share the bucket (keyed by the pipeline's run id); sub-gens of different pipeline runs see different buckets. **Pipeline-authoritative**: the pipeline declares the slot with strategy/embed/keyed_by/retain; the sub-gen-side decl is opt-in (`memory :findings, scope: :pipeline_run` plus optional reader knobs `size` / `top_k`). Setting any pool-authoritative slot on the sub-gen side is a compile error. Direct `cambium run` of a `:pipeline_run`-scoped gen (outside a pipeline) errors clearly at plan time — silent writes to an unkeyed bucket would be the worst failure mode. See [[N - Orchestration Layer]] § Pipeline memory.
 - **Named pools** (e.g. `:support_team`, `:security_agent`) — a shared memory bucket addressable by name. Any number of gens can opt in by referencing the pool's symbol.
 
 `:user` is handled by `:session` + `keyed_by: :user_id`. `:gen` is handled by a named pool the gen opts into alone. Simpler grammar, same coverage.

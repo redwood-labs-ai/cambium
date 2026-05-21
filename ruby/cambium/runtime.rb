@@ -1707,16 +1707,34 @@ module Cambium
       # `grounded_in :__proto__` is rejected at compile time instead of
       # producing a brittle IR.
       GROUNDING_SOURCE_REGEX = /\A[a-z][a-z0-9_]*\z/
-      def grounded_in(source, require_citations: false)
+      def grounded_in(source, from: nil, require_citations: false)
         source_str = source.to_s
         unless source_str.match?(GROUNDING_SOURCE_REGEX)
           raise ArgumentError,
                 "grounded_in source must match /^[a-z][a-z0-9_]*$/, got: #{source.inspect}"
         end
-        _cambium_defaults[:grounding] = {
+
+        # RED-383 minimum-cut: `from:` accepts a file path; compile.rb
+        # reads the file and stamps the contents (or a base64_pdf /
+        # base64_image envelope for binary types) into
+        # `ir.context[<source>]` at compile time. URLs + magic-byte
+        # sniffing defer to a follow-up. CLI `--arg` overrides the
+        # baked-in value at run time, matching the design-note stance
+        # that `from:` is a default, not a lock.
+        unless from.nil?
+          unless from.is_a?(String) && !from.empty?
+            raise ArgumentError,
+                  "grounded_in #{source.inspect} from: must be a non-empty String file path " \
+                  "(got #{from.inspect}). v1 accepts file paths only; URL fetching is RED-383 follow-up."
+          end
+        end
+
+        entry = {
           'source' => source_str,
           'require_citations' => require_citations
         }
+        entry['from'] = from unless from.nil?
+        _cambium_defaults[:grounding] = entry
       end
 
       # Signals: declare a typed extraction from the output.

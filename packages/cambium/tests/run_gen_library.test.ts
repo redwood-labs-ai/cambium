@@ -10,7 +10,7 @@
  * If this test ever fails for the import-side reason, the symptom would
  * be a thrown "Missing --ir" before the test body even runs.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { runGen, type RunGenOptions, type IR } from '../../cambium-runner/src/index.js';
 import { Type } from '@sinclair/typebox';
 
@@ -140,5 +140,79 @@ describe('runGen library entry (RED-220 POC follow-up)', () => {
       schemas: { MockReport }, // no NotInSchemas
       mock: true,
     } as RunGenOptions)).rejects.toThrow(/Schema not found in injected schemas/);
+  });
+});
+
+describe('grounded_in pre-flight strict contract', () => {
+  // When a gen declares `grounded_in :source`, the doc MUST resolve to
+  // non-empty content before any LLM dispatch. Pre-fix, an empty/missing
+  // doc silently produced an empty DOCUMENT: section and the LLM
+  // hallucinated freely — gen "succeeded" with groundless output. Strict
+  // pre-flight (real-LLM mode only — mock is exempt for framework tests)
+  // fails the run early with a clear pointer to --arg / pipeline `with:`.
+
+  function groundedIr(source: string, contextValue?: any) {
+    const ir = minimalIr('MockReport') as any;
+    ir.policies.grounding = { source, require_citations: false };
+    // Replace the default `document` key with one keyed by the source name.
+    if (contextValue === undefined) {
+      ir.context = {};
+    } else {
+      ir.context = { [source]: contextValue };
+    }
+    return ir;
+  }
+
+  // Switch the runtime out of mock mode for these specific checks so the
+  // pre-flight actually fires. The runGen call below would otherwise
+  // exempt itself via mock=true. Restored after each test.
+  let savedMock: string | undefined;
+  beforeEach(() => {
+    savedMock = process.env.CAMBIUM_ALLOW_MOCK;
+    delete process.env.CAMBIUM_ALLOW_MOCK;
+  });
+  afterEach(() => {
+    if (savedMock === undefined) delete process.env.CAMBIUM_ALLOW_MOCK;
+    else process.env.CAMBIUM_ALLOW_MOCK = savedMock;
+  });
+
+  it('fails fast when grounded_in source is missing from ir.context', async () => {
+    const result = await runGen({
+      ir: groundedIr('report') as never,
+      schemas: { MockReport },
+      mock: false,
+    } as RunGenOptions);
+    expect(result.ok).toBe(false);
+    expect(result.errorMessage).toMatch(/grounded_in :report/);
+    expect(result.errorMessage).toMatch(/missing entirely/);
+    // Must also leave a GroundingMissing trace step so observability
+    // captures the failure shape, not just the error message.
+    const step = result.trace?.steps?.find((s: any) => s.type === 'GroundingMissing');
+    expect(step).toBeDefined();
+    expect(step?.ok).toBe(false);
+  });
+
+  it('fails fast when grounded_in source is an empty string', async () => {
+    const result = await runGen({
+      ir: groundedIr('report', '') as never,
+      schemas: { MockReport },
+      mock: false,
+    } as RunGenOptions);
+    expect(result.ok).toBe(false);
+    expect(result.errorMessage).toMatch(/grounded_in :report/);
+    expect(result.errorMessage).toMatch(/resolved to empty content/);
+  });
+
+  it('exempts mock-mode runs (framework-plumbing tests pass empty docs to mocked LLMs)', async () => {
+    // The strict check shouldn't fire when --mock is active. Mock
+    // provider returns canned output keyed only on schemaId — it never
+    // reads the doc, so an empty grounded doc is acceptable for tests.
+    const result = await runGen({
+      ir: groundedIr('report', '') as never,
+      schemas: { MockReport },
+      mock: true,
+    } as RunGenOptions);
+    expect(result.ok).toBe(true);
+    expect(result.trace?.steps?.find((s: any) => s.type === 'GroundingMissing')).toBeUndefined();
   });
 });

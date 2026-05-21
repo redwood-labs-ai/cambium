@@ -31,12 +31,28 @@ describe('getGroundingDocument (RED-276)', () => {
     expect(getGroundingDocument({ context: {} })).toBe('');
   });
 
-  it('ignores non-string context values', () => {
+  it('JSON-serializes non-string context values (RED-382)', () => {
+    // Pre-RED-382 this returned '' silently. Pipeline-injected bind()
+    // targets are object-shaped (e.g., `with: { document: bind(:axes) }`
+    // hands the AxesRolled object to the next sub-gen) — silently
+    // dropping them meant the downstream LLM saw an empty DOCUMENT:
+    // section. Now objects get JSON-stringified so the data is visible.
     const ir = {
       policies: { grounding: { source: 'thing' } },
       context: { thing: { nested: 'obj' } },
     };
-    // Non-string under the source → fall through to document or empty.
+    expect(getGroundingDocument(ir)).toBe(JSON.stringify({ nested: 'obj' }, null, 2));
+  });
+
+  it('does NOT serialize base64 document envelopes (RED-323 preservation)', () => {
+    // Typed doc envelopes are handled via the documents/extracted-text
+    // path — JSON-stringifying them would dump base64 data into the
+    // prompt. Source-key lookup returns null for envelopes; the
+    // fallback to context.document kicks in (here also absent → '').
+    const ir = {
+      policies: { grounding: { source: 'invoice' } },
+      context: { invoice: { kind: 'base64_pdf', data: 'AAA', media_type: 'application/pdf' } },
+    };
     expect(getGroundingDocument(ir)).toBe('');
   });
 

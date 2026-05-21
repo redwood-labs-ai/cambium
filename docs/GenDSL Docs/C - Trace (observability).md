@@ -44,6 +44,7 @@ A trace MUST include:
 | `ExtractSignals` / `Trigger` | Signal extraction + trigger evaluation (see [[C - Signals, State, and Triggers]]). |
 | `ActionCall` | A trigger's `action :name` side-effect handler invocation (RED-212). | `trigger`, `action`, `input`, `output`, `target` |
 | `GroundingCheck` | Citation verification. | `citations_verified`, `failures` |
+| `GroundingMissing` | Pre-flight strict-contract failure: `grounded_in :source` is declared but `ir.context[source]` resolved to empty/missing content. Emitted BEFORE any LLM dispatch; the run returns `ok: false` immediately. Mock-mode (`CAMBIUM_ALLOW_MOCK=1`) is exempt — framework-plumbing tests that chain mock outputs through sub-gens get the legacy lax behavior. Always `ok: false`. | `errors[0].source` (the grounded_in source name), `errors[0].message` (hint pointing to `--arg` or pipeline `with:` binding) |
 | `memory.read` | Per memory decl, before `Generate`. See RED-215 section below. | `strategy`, `scope`, `name`, `k`, `hits`, `bytes`, `embed_model?`, `embed_dim?`, `query_source?`, `query_preview?` |
 | `memory.write` | Per writable memory decl, after `finalOk`. | `name`, `entry_id`, `bytes`, `written_by`, `strategy?`, `embed_model?` |
 | `memory.prune` | On TTL/cap eviction (governance follow-up; wired but not yet fired). | `reason` (`"ttl"` \| `"cap"`), `count` |
@@ -56,6 +57,11 @@ A trace MUST include:
 | `ExecSnapshotLoaded` | `:firecracker`-only (RED-256). Fired between `ExecSpawned` and the outcome event when the snapshot cache interacted with the call. Warm-restore path: cached snapshot was used. Cold-boot-and-save path: first call for a cache key; cold-boot ran and a snapshot was saved inline for next time. | `runtime`, `cache_key`, `restore_ms` (warm path) OR `create_ms` + `note` (cold-and-save path) |
 | `ExecSnapshotFallback` | `:firecracker`-only (RED-256). Fired between `ExecSpawned` and the outcome event when the snapshot cache was bypassed; the VM cold-booted without saving a snapshot. | `runtime`, `cache_key`, `reason` (`missing` \| `non_canonical_sizing` \| `load_failed` \| `shared_mem_unsupported` \| `build_locked` \| `allowlist_hash_failed`), `fallback` (`cold_boot`). `allowlist_hash_failed` fires when hashing the filesystem allowlist's source directories threw at dispatch time (RED-258). |
 | `tool.exec.unsandboxed` | Dispatch-time event when `runtime: :native` runs `execute_code` without isolation (deprecated; RED-249). Also surfaces as a stderr warning once per process. | `tool`, `deprecated: true` |
+| `PipelineRun` | Top-level wrapper for a pipeline run (RED-381). Replaces the gen-side `Generate`/`steps[]` shape — pipelines have `operators[]` instead. `ok: false` when any operator failed or the budget cap tripped; `error` carries a human-readable summary. | `name`, `entry`, `run_id`, `version`, `started_at`, `finished_at`, `meta: { total_tokens, total_tool_calls, operators_executed, budget_cap_tokens?, budget_cap_tool_calls? }`, `operators[]` (nested step entries), `log_events?`, `fired_by?`, `error?` |
+| `PipelineStep` | One sequential step in a pipeline. Wraps the sub-gen's full trace. `ok: false` when the sub-gen failed validation/repair or threw. | `id`, `gen`, `method`, `started_at`, `finished_at`, `meta: { tokens, tool_calls }`, `trace` (the full nested sub-gen trace — has its own `steps[]`), `error?` |
+| `PipelineFanOut` | Parallel-branch operator in a pipeline (RED-381 Phase C). `meta.threshold` carries the resolved require-rule (`"all"` or `"at_least:N"`); `meta.on_branch_failure` carries the policy mode. `branches[]` has one entry per dispatched branch with `branch_id`, `ok`, `trace` (sub-gen trace), and `error?` on failures. | `id`, `collect_into`, `meta: { succeeded, failed, threshold, on_branch_failure }`, `branches[]` |
+| `PipelineBranchOn` | Conditional-routing operator (RED-381 Phase D). Records which branch fired. `fired_branch` is the matched `on` values array, or `null` if the `default` block fired. Nested operator traces appear under `operators[]`. | `signal` (the IR bind ref), `signal_value` (the resolved string), `fired_branch` (or null), `default_fired` (bool), `operators[]`, `meta: { total_tokens, total_tool_calls, operators_executed }`, `error?` |
+| `PipelineBudgetExceeded` | Pipeline-level cap trip (RED-381 Phase B.2). Fires before the next operator dispatches (token check projects from the sub-gen's `model.max_tokens`) or after a step completes (tool-call check is post-spend). The pipeline terminates with `ok: false, failureKind: 'budget'`. | `id` (the operator that would have run / just ran), `metric` (`tokens` \| `tool_calls`), `cap`, `used`, `projected?` (token path only) |
 
 ## Memory events (RED-215)
 
@@ -72,8 +78,15 @@ Events emitted under `type: "tool.*"` alongside the `ToolCall` step whenever the
 - **`tool.permission.denied`** — `ctx.fetch` denied egress. Meta: `tool`, `host`, `reason` (`denylist` | `allowlist_miss` | `block_private` | `block_metadata` | `invalid_url` | `unresolvable` | `unsupported_protocol`), `rule` (`"default"` for built-in blocks), `resolved_ips` (when DNS was consulted).
 - **`tool.budget.exceeded`** — a per-tool or per-run `budget` cap was hit before dispatch. Meta: `tool`, `metric` (`max_calls` | `max_tool_calls`), `current`, `increment`, `limit`. A budget violation mid-agentic-loop terminates the loop (force final output); the event appears in the trace before the loop exits.
 
+## Pipeline runs (RED-381)
+
+Pipelines produce a `type: "PipelineRun"` root trace instead of the gen-side `Generate`/`steps[]` shape. The top-level `operators[]` array carries one entry per declared operator (in declaration order). Each entry's `trace` field nests the sub-gen's full gen-side trace — `steps[]` of `Generate` / `Validate` / `ToolCall` etc. The runtime aggregates `meta.total_tokens` + `meta.total_tool_calls` across all nested sub-gens; `meta.budget_cap_*` mirrors `policies.budget` so visualization tooling can show the cap alongside spend without re-parsing the IR.
+
+Operator ordering rule: `operators[]` reflects compile-time declaration order, NOT execution order. For `fan_out` (parallel) the branches all dispatch concurrently; per-branch `started_at`/`finished_at` capture actual execution windows.
+
 ## See also
 - [[N - Failure Modes & Debugging]]
 - [[C - Repair Loop]]
 - [[S - Tool Sandboxing (RED-137)]]
 - [[P - Memory]]
+- [[N - Orchestration Layer]] — Pipeline trace shape, operator semantics, budget enforcement

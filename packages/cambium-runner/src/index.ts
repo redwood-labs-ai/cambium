@@ -18,6 +18,12 @@ export type { IR, RunGenOptions, RunGenResult } from './runner.js';
 export { runGenFromIr } from './runner.js';
 export type { RunGenFromIrOptions, RunGenFromIrResult } from './runner.js';
 
+// RED-381 Phase B: Pipeline runtime. Mirrors runGenFromIr's shape but
+// for Pipeline IRs. CLI dispatches between gen + pipeline IRs based on
+// `ir.kind`. Engine-mode pipelines defer.
+export { runPipelineFromIr } from './pipeline.js';
+export type { RunPipelineFromIrOptions, RunPipelineFromIrResult } from './pipeline.js';
+
 // RED-275 app-corrector plugin surface. External apps scaffold
 // `app/correctors/<name>.corrector.ts` and import these types to get
 // the correct export signature.

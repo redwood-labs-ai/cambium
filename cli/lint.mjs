@@ -327,6 +327,87 @@ function lintPackage(pkgDir) {
       }
     }
   }
+
+  // 8. Scan all .pipeline.rb files for common issues (RED-381 Phase G.2).
+  //
+  // The Ruby compiler (PipelineCompiler.validate_file_basename! +
+  // resolve_methods_to_compile + Validator) is the strict gate; lint is
+  // the before-you-compile heads-up that catches the same classes of
+  // mistake with friendlier framing.
+  const pipelinesDir = join(pkgDir, 'app/pipelines');
+  if (existsSync(pipelinesDir)) {
+    const pipelineFiles = readdirSync(pipelinesDir).filter(f => f.endsWith('.pipeline.rb'));
+    for (const f of pipelineFiles) {
+      const content = readFileSync(join(pipelinesDir, f), 'utf8');
+
+      // 8a. File basename regex (same /^[a-z][a-z0-9_]*$/ stance every
+      // other named-symbol surface uses).
+      const basename = f.replace(/\.pipeline\.rb$/, '');
+      if (!/^[a-z][a-z0-9_]*$/.test(basename)) {
+        fail(
+          `app/pipelines/${f}: basename '${basename}' must match /^[a-z][a-z0-9_]*$/ ` +
+          `(snake_case, e.g. ci_review.pipeline.rb).`,
+        );
+      }
+
+      // 8b. Class must inherit from Pipeline (the runtime gates this
+      // via registry detection in compile.rb; lint catches the typo
+      // before compile spawns Ruby).
+      if (!/class\s+\w+\s*<\s*Pipeline\b/.test(content)) {
+        fail(
+          `app/pipelines/${f}: must declare 'class <Name> < Pipeline' — ` +
+          `inherit from the Pipeline base class (RED-374).`,
+        );
+      }
+
+      // 8c. 1:1 stance — exactly one `def`. Multiple methods would also
+      // fail at compile time with a clearer message, but a lint heads-up
+      // is more user-friendly.
+      const defLines = [...content.matchAll(/^\s*def\s+([a-z_][a-z0-9_]*)/gm)];
+      if (defLines.length === 0) {
+        fail(
+          `app/pipelines/${f}: declares no entry method. ` +
+          `Pipelines need exactly one public 'def <name>(<input>); end' (1:1 stance per RED-374).`,
+        );
+      } else if (defLines.length > 1) {
+        const names = defLines.map((m) => `:${m[1]}`).join(', ');
+        fail(
+          `app/pipelines/${f}: declares ${defLines.length} public methods (${names}). ` +
+          `Pipelines are 1:1 — one class, one method, one chain. ` +
+          `Split into one Pipeline class per chain.`,
+        );
+      }
+
+      // 8d. Input schema (best-effort) — every input :name, schema: X
+      // should resolve to a contracts.ts export. Mirrors the gen-side
+      // returns check above.
+      const inputMatches = [...content.matchAll(/input\s+:[a-z_][a-z0-9_]*\s*,\s*schema:\s*(\w+)/g)];
+      if (inputMatches.length > 0 && genfile.types?.contracts) {
+        const contracts = Array.isArray(genfile.types.contracts) ? genfile.types.contracts : [genfile.types.contracts];
+        const availableExports = new Set();
+        for (const c of contracts) {
+          const cc = readFileSync(join(pkgDir, c), 'utf8');
+          const exportRe = /^\s*export\s+const\s+([A-Z][A-Za-z0-9_]*)\b/gm;
+          for (const m of cc.matchAll(exportRe)) availableExports.add(m[1]);
+        }
+        for (const m of inputMatches) {
+          const schemaName = m[1];
+          if (!availableExports.has(schemaName)) {
+            const suggestion = [...availableExports]
+              .find((e) => e.toLowerCase() === schemaName.toLowerCase());
+            const hint = suggestion ? ` Did you mean '${suggestion}'?` : '';
+            fail(
+              `app/pipelines/${f}: input schema ${schemaName} not exported from ` +
+              `${contracts.join(', ')}.${hint}`,
+            );
+          }
+        }
+      }
+    }
+    if (pipelineFiles.length > 0) {
+      pass(`app/pipelines/: ${pipelineFiles.length} pipeline file${pipelineFiles.length === 1 ? '' : 's'} scanned`);
+    }
+  }
 }
 
 // ── Engine-mode sentinel detection ────────────────────────────────────

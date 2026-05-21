@@ -974,6 +974,117 @@ default   "omlx:Qwen3.5-27B-4bit"
   console.log(`  2. Re-run your gens — policy is checked at compile time; violators fail fast.`);
 }
 
+// ── pipeline (RED-381 Phase G.1) ───────────────────────────────────────
+
+function generatePipeline(name, ctx) {
+  validateName(name, 'pipeline name');
+  const snake = snakeCase(name);
+  const pascal = pascalCase(name);
+  const schemaName = `${pascal}Input`;
+
+  console.log(`\nGenerating pipeline: ${pascal}\n`);
+
+  if (ctx.mode === 'engine') {
+    console.error(
+      `Engine-mode pipelines are not yet supported. ` +
+        `Pipelines live in app-mode workspaces under app/pipelines/. ` +
+        `Run 'cambium new pipeline ${name}' from your app workspace instead.`,
+    );
+    process.exit(2);
+  }
+
+  const PKG = ctx.appPkgRoot;
+  writeFile(join(PKG, 'app/pipelines', `${snake}.pipeline.rb`), `\
+# ${pascal} — multi-gen orchestration pipeline (RED-374).
+#
+# Sequential 'step', parallel 'fan_out', and deterministic 'branch_on'
+# operators compose sub-gens with rollup IR / trace / budget. Pipelines
+# follow Cambium's 1:1 stance: one class, one method, one operator chain.
+#
+# See docs/GenDSL Docs/N - Orchestration Layer.md.
+
+class ${pascal} < Pipeline
+  input :document, schema: ${schemaName}
+
+  # Optional: pipeline-level shared memory bucket. Sub-gens declare
+  # \`memory :findings, scope: :pipeline_run\` to opt into the bucket.
+  # memory :findings, strategy: :log
+
+  # Optional: top-level budget cap (tokens + tool_calls across all
+  # sub-gens). Per-gen budgets enforce themselves independently.
+  # budget tokens: 50_000
+  # budget tool_calls: 50
+
+  # Optional: security pack flows into every sub-gen by default;
+  # sub-gen \`security\` overrides per-slot.
+  # security :research_defaults
+
+  # Steps run sequentially. Each step's gen/method is invoked with the
+  # bindings declared in \`with:\`. Replace TODO with your real sub-gen
+  # classes (\`cambium new agent FooAnalyst\` creates them).
+  step :triage, gen: TODORenameMe, method: :analyze,
+    with: { document: bind(:input).document }
+
+  # Example fan_out (parallel from same context):
+  # fan_out :reviewers, collect_into: :reviews do
+  #   branch :security,      agent: TODOSecurityAgent,      method: :review
+  #   branch :architectural, agent: TODOArchitecturalAgent, method: :review
+  #   concurrency 2
+  #   on_branch_failure :continue
+  #   require :all
+  #   pass_context :summary
+  # end
+
+  # Example branch_on (deterministic conditional, REQUIRES a default block):
+  # branch_on bind(:triage).severity do
+  #   on :critical do
+  #     step :urgent, gen: TODOUrgent, method: :handle
+  #   end
+  #   default do
+  #     # explicit no-op for other severities
+  #   end
+  # end
+
+  # Example output composition (default is last_step's output):
+  # output do
+  #   severity bind(:triage).severity
+  # end
+
+  def run(document)
+    # Empty body — entry-point declaration only. 1:1 stance per RED-374:
+    # the class-level operator chain above is what actually runs.
+  end
+end
+`);
+
+  writeFile(join(PKG, 'tests', `${snake}.pipeline.test.ts`), `\
+import { describe, it, expect } from 'vitest'
+import { execSync } from 'node:child_process'
+
+describe('${pascal} pipeline', () => {
+  it('compiles to a valid Pipeline IR', () => {
+    const ir = JSON.parse(execSync(
+      'ruby ruby/cambium/compile.rb ${PKG}/app/pipelines/${snake}.pipeline.rb --method run',
+      { encoding: 'utf8' },
+    ))
+    expect(ir.kind).toBe('Pipeline')
+    expect(ir.entry.class).toBe('${pascal}')
+    expect(ir.entry.method).toBe('run')
+  })
+})
+`);
+
+  // Genfile [exports.pipelines] entry — best-effort. We don't try to
+  // edit the TOML in-place (TOML rewrites without a real parser are a
+  // footgun); print the line for the user to paste in.
+  console.log(`\nNext steps:`);
+  console.log(`  1. Define ${schemaName} in ${PKG}/src/contracts.ts`);
+  console.log(`  2. Replace TODORenameMe with a real GenModel class (cambium new agent <Name>)`);
+  console.log(`  3. Optionally add to ${PKG}/Genfile.toml under [exports.pipelines]:`);
+  console.log(`         ${pascal} = "app/pipelines/${snake}.pipeline.rb"`);
+  console.log(`  4. Run: cambium run ${PKG}/app/pipelines/${snake}.pipeline.rb --method run --arg <fixture>`);
+}
+
 // ── Dispatch ──────────────────────────────────────────────────────────
 
 const GENERATORS = {
@@ -988,6 +1099,10 @@ const GENERATORS = {
   log_profile: generateLogProfile,
   config: generateConfig,
   engine: generateEngine,
+  // RED-381 Phase G.1: pipelines scaffold parallel to agents. App-mode
+  // only in v1 — engine-mode pipelines (a pipeline as the engine's
+  // execution unit) defer until a real forcing case appears.
+  pipeline: generatePipeline,
 };
 
 export function runGenerate(type, name) {
@@ -997,6 +1112,7 @@ export function runGenerate(type, name) {
     console.error(`Examples:`);
     console.error(`  cambium new engine Summarizer       # new engine folder under ./cambium/`);
     console.error(`  cambium new agent BtcAnalyst        # new gen (engine sibling, or app/gens/)`);
+    console.error(`  cambium new pipeline ${'CiReview'}        # new orchestration pipeline (RED-381)`);
     console.error(`  cambium new tool price_fetcher      # new tool (engine sibling, or app/tools/)`);
     console.error(`  cambium new action slack_notify     # new trigger action (RED-212)`);
     console.error(`  cambium new schema TradeSignal      # add a TypeBox export`);

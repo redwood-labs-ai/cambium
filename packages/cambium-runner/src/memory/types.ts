@@ -57,6 +57,13 @@ export type MemoryRunContext = {
    *  Present only for scheduled invocations; memory decls with scope:
    *  :schedule use this as the bucket key. */
   scheduleId?: string;
+  /** RED-381 Phase E: pipeline run id when this gen is dispatched as a
+   *  sub-gen of a Pipeline. Present only inside pipeline runs (set by
+   *  runPipelineFromIr on every sub-gen invocation). Memory decls with
+   *  scope: :pipeline_run use this as the bucket key — all sub-gens of
+   *  the same pipeline run see the same bucket, sub-gens of different
+   *  pipeline runs see different buckets. */
+  pipelineRunId?: string;
 };
 
 /** One entry as stored in the SQLite `entries` table. */
