@@ -157,6 +157,52 @@ describe('cambium lint — RED-284 coverage for new surfaces', () => {
     expect(output).toMatch(/corrector name "BadCase".*must match/);
   });
 
+  it('passes a well-formed custom provider (RED-393)', () => {
+    const pkg = setupMinimalWorkspace(scratch);
+    mkdirSync(join(pkg, 'app/providers'), { recursive: true });
+    writeFileSync(
+      join(pkg, 'app/providers/bedrock.ts'),
+      `import { openaiCompatible } from '@redwood-labs/cambium-runner';\n`
+        + `export default openaiCompatible({ name: 'bedrock', baseUrl: () => 'https://x', auth: () => undefined });\n`,
+    );
+
+    const { output } = runLint(scratch);
+    expect(output).toMatch(/provider: bedrock\.ts/);
+  });
+
+  it('fails a provider whose name field does not match the basename (RED-393)', () => {
+    const pkg = setupMinimalWorkspace(scratch);
+    mkdirSync(join(pkg, 'app/providers'), { recursive: true });
+    writeFileSync(
+      join(pkg, 'app/providers/bedrock.ts'),
+      `export default { name: 'wrong', generateText() {}, generateWithTools() {} };\n`,
+    );
+
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(1);
+    expect(output).toMatch(/declares name 'wrong' but the filename requires 'bedrock'/);
+  });
+
+  it('fails a provider with no export default (RED-393)', () => {
+    const pkg = setupMinimalWorkspace(scratch);
+    mkdirSync(join(pkg, 'app/providers'), { recursive: true });
+    writeFileSync(join(pkg, 'app/providers/bedrock.ts'), `export const x = 1;\n`);
+
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(1);
+    expect(output).toMatch(/must `export default` a CambiumProvider/);
+  });
+
+  it('fails a provider with an invalid basename (RED-393)', () => {
+    const pkg = setupMinimalWorkspace(scratch);
+    mkdirSync(join(pkg, 'app/providers'), { recursive: true });
+    writeFileSync(join(pkg, 'app/providers/BadCase.ts'), `export default {};\n`);
+
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(1);
+    expect(output).toMatch(/provider file name "BadCase".*must match/);
+  });
+
   it('passes known config files and warns on unknown ones', () => {
     const pkg = setupMinimalWorkspace(scratch);
     mkdirSync(join(pkg, 'app/config'), { recursive: true });

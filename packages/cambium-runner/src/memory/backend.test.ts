@@ -5,6 +5,24 @@ import { join } from 'node:path';
 import { SqliteMemoryBackend } from './backend.js';
 import { mockEmbed, MOCK_DIM } from '../providers/embed.js';
 
+// RED-378/RED-408: sqlite-vec ships no musl prebuilt, so its native extension
+// can't load on Alpine. Skip the semantic tests when the extension won't load
+// (it's an optional native dep) rather than hard-fail — keeps the Ruby-3.x
+// docker gate (test-on-ruby) green. On glibc/macOS it loads and they run.
+async function sqliteVecLoadable(): Promise<boolean> {
+  try {
+    const { default: Database } = await import('better-sqlite3');
+    const sqliteVec: any = await import('sqlite-vec');
+    const db = new Database(':memory:');
+    sqliteVec.load(db);
+    db.close();
+    return true;
+  } catch {
+    return false;
+  }
+}
+const VEC_OK = await sqliteVecLoadable();
+
 describe('SqliteMemoryBackend (RED-215 phase 3+5)', () => {
   function freshBucket(): string {
     const dir = mkdtempSync(join(tmpdir(), 'cambium-memory-'));
@@ -136,7 +154,7 @@ describe('SqliteMemoryBackend.prune (RED-239)', () => {
     rmSync(path, { force: true });
   });
 
-  it('prunes entries_vec rows alongside entries for semantic buckets', async () => {
+  it.skipIf(!VEC_OK)('prunes entries_vec rows alongside entries for semantic buckets', async () => {
     const path = freshBucket();
     const b = await SqliteMemoryBackend.open(path);
     await b.initSemantic('mock:bge-small', MOCK_DIM);
@@ -156,7 +174,7 @@ describe('SqliteMemoryBackend.prune (RED-239)', () => {
   });
 });
 
-describe('SqliteMemoryBackend semantic (RED-215 phase 5)', () => {
+describe.skipIf(!VEC_OK)('SqliteMemoryBackend semantic (RED-215 phase 5)', () => {
   function freshBucket(): string {
     const dir = mkdtempSync(join(tmpdir(), 'cambium-sem-'));
     return join(dir, 'sem.sqlite');

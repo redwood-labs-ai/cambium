@@ -22,6 +22,56 @@ If no `provider:` prefix is given, the bare string is treated as `"ollama:<name>
 
 Agentic mode is the tool-use loop (`mode :agentic`). Single-turn `generate` works for all three providers.
 
+## How the prefix resolves to a provider (RED-393)
+
+The runner dispatches every model call through a **provider registry** keyed by the model-id prefix. `model "anthropic:claude-sonnet-4-6"` → the registry's `anthropic` provider; a bare `"llama3"` (no prefix) → `ollama`. The registry is built per-run: framework built-ins (`anthropic`, `omlx`, `ollama`) first, then app-supplied `app/providers/*.ts` — **last write wins, so an app provider shadows a built-in with the same prefix** (the override hook, same stance as tools/correctors).
+
+The dispatcher owns the cross-cutting concerns — prefix parse, Qwen thinking auto-detect, the native-document support gate (`provider.supportsDocuments`), the `--mock` short-circuit, fetch-failure hinting, and inline tool-call markup parsing. A provider implements ONLY build-body → fetch → normalize, so app providers inherit all the gates for free.
+
+## Custom providers (RED-393)
+
+Add a provider — Bedrock, Azure OpenAI, OpenRouter, Vertex, a self-hosted gateway — without forking the runner and **with zero new dependencies** (Cambium ships no provider SDKs; built-ins are raw `fetch`). One file, `app/providers/<name>.ts`, `export default` a provider; **the filename is the model-id prefix**.
+
+Scaffold one with `cambium new provider <Name>` — it emits an `openaiCompatible` template (the Tier-1 shape below) with the `validateProviderBaseUrl` SSRF guard already wired and a `name` matching the filename. `cambium lint` then checks every `app/providers/*.ts` for the basename regex, an `export default`, and name/filename agreement.
+
+Two authoring tiers:
+
+**Tier 1 — factories** (the common "different base URL + auth header" case). `openaiCompatible({...})` / `anthropicCompatible({...})` compose the framework's own request/normalize logic:
+
+```ts
+// app/providers/openrouter.ts  →  model "openrouter:anthropic/claude-3.5"
+import { openaiCompatible, validateProviderBaseUrl } from '@redwood-labs/cambium-runner';
+
+export default openaiCompatible({
+  name: 'openrouter',
+  supportsDocuments: false,
+  baseUrl: () => {
+    const url = process.env.OPENROUTER_BASEURL ?? 'https://openrouter.ai/api';
+    validateProviderBaseUrl('openrouter', url);
+    return url;
+  },
+  auth: () => process.env.OPENROUTER_API_KEY,   // resolved from env at call time
+});
+```
+
+The `modelName` knob maps Cambium's clean name → the wire id the API wants (function OR an object map for Azure-deployment sugar). It applies only at request-build time — the IR, trace, and aliases keep the clean `provider:name` form; the wire id never leaks past the provider boundary.
+
+**Tier 2 — `defineProvider({...})`** when the API isn't OpenAI/Anthropic-shaped (full control over build/fetch/normalize). This is how the built-in `ollama` provider is written. With full control comes full responsibility: **a Tier-2 provider must call `validateProviderBaseUrl(label, url)` itself before each `fetch`** — the SSRF guard that blocks private/metadata ranges is applied automatically by the Tier-1 factories, but `defineProvider` does no fetching on your behalf, so the check is yours to make.
+
+The in-repo example is `packages/cambium/app/providers/gateway.ts` — a no-SDK OpenAI-compatible gateway.
+
+### Conventions + guards
+
+- **Filename = model-id prefix**, matched `/^[a-z][a-z0-9_]*$/`. If the provider sets a `name`, it must equal the filename (honesty check) or discovery throws.
+- `export default` must implement both `generateText` and `generateWithTools`.
+- Secrets resolve from env via the `auth` callback — never bake a key into the file.
+- The base URL is operator-controlled (same trust boundary as `CAMBIUM_OMLX_BASEURL`); run it through `validateProviderBaseUrl` for the SSRF guard.
+- Set `supportsDocuments` honestly — `false` makes the runtime fail fast on a native-document gen instead of stringifying a base64 blob into the prompt.
+
+### Bedrock (consumer recipe, not shipped)
+
+Bedrock needs AWS SigV4, which means an AWS SDK. That's the **consumer's** dependency, not Cambium's — write `app/providers/bedrock.ts` with `defineProvider`, import `@aws-sdk/...` in your own app, and sign the request inside `generateText`/`generateWithTools`. Run the endpoint through `validateProviderBaseUrl` before signing (Tier-2 providers don't get the factory's automatic SSRF guard). Cambium stays SDK-free; your app owns its own dependency hygiene.
+
 ## Anthropic prompt caching (RED-321)
 
 `buildAnthropicMessagesRequest` automatically applies `cache_control: {type: 'ephemeral'}` to two blocks:

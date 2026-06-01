@@ -10,7 +10,7 @@
 // doesn't need to install anything transitive.
 
 import { readdirSync, statSync, mkdirSync, copyFileSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, relative, sep, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -25,11 +25,24 @@ function walk(dir, visit) {
   }
 }
 
+// Viewer assets (RED-313): the `cambium inspect` server reads its static
+// files from `<module>/public/` at runtime, so those must land in dist/.
+const VIEWER_ASSET_EXT = new Set(['.html', '.css', '.svg', '.js']);
+const PUBLIC_FRAGMENT = `${sep}inspect${sep}public${sep}`;
+const FIXTURES_FRAGMENT = `${sep}__fixtures__${sep}`;
+
 let copied = 0;
 walk(SRC, (path) => {
-  if (!path.endsWith('.json')) return;
-  if (path.endsWith('tsconfig.json')) return;
-  if (path.endsWith('package.json')) return;
+  // Never ship test fixtures in the published tarball.
+  if (path.includes(FIXTURES_FRAGMENT)) return;
+
+  const isJson =
+    path.endsWith('.json') && !path.endsWith('tsconfig.json') && !path.endsWith('package.json');
+  // Viewer static assets, but only under inspect/public/ (not stray .js, which
+  // tsc emits itself — those aren't ours to copy).
+  const isViewerAsset = path.includes(PUBLIC_FRAGMENT) && VIEWER_ASSET_EXT.has(extname(path));
+
+  if (!isJson && !isViewerAsset) return;
   const rel = relative(SRC, path);
   const out = join(DEST, rel);
   mkdirSync(dirname(out), { recursive: true });
@@ -37,4 +50,4 @@ walk(SRC, (path) => {
   copied += 1;
 });
 
-console.error(`copy-assets: copied ${copied} JSON file(s) from src/ to dist/`);
+console.error(`copy-assets: copied ${copied} asset file(s) from src/ to dist/`);

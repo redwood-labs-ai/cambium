@@ -66,6 +66,18 @@ export interface RunPipelineFromIrOptions {
    *  node_modules layouts; throws a clear error if it can't find
    *  compile.rb). */
   compileRb?: string;
+  /** RED-385 Phase B: pipeline replay. When set, the runner resumes the
+   *  operator DAG from the first incomplete operator in `priorTrace` (or
+   *  `fromOp` if given), rehydrating `stepResults` from the recorded
+   *  outputs of the preceding operators rather than re-dispatching them.
+   *  `parentRunId` is recorded as `trace.parent_run_id`. Budget meta is
+   *  seeded from the parent trace so the cap spans the replay chain; the
+   *  `:pipeline_run` memory bucket is fresh (keyed on the new run id). */
+  replay?: {
+    priorTrace: any;
+    parentRunId: string;
+    fromOp?: string | null;
+  };
 }
 
 export interface RunPipelineFromIrResult {
@@ -155,6 +167,98 @@ function resolveDefaultCompileRb(): string | null {
   if (existsSync(dev)) return dev;
 
   return null;
+}
+
+// ── RED-385 Phase B: pipeline replay planning ──────────────────────────
+
+interface PipelineResumePlan {
+  /** Operator id execution resumes at. */
+  resumeOpId: string;
+  /** Prior-trace entries for the operators BEFORE the resume point,
+   *  in order — pushed into the new trace (tagged `reused`) and walked
+   *  to rehydrate stepResults. */
+  reusedEntries: any[];
+  /** IR operators to actually dispatch (the resume point onward). */
+  toDispatch: any[];
+}
+
+/**
+ * Decide where a pipeline replay resumes and which prior outputs to reuse.
+ *
+ * Matching is by INDEX: `priorTrace.operators[i]` corresponds to
+ * `operators[i]` because `dispatchOperatorList` pushes exactly one entry
+ * per operator in declaration order (and replay reuses the same IR). This
+ * sidesteps id-matching (branch_on trace entries carry no `id`) and is
+ * exact because the IR is identical across the chain.
+ *
+ * Default resume point: the first operator whose prior entry is missing or
+ * not `ok: true` (covers ok:false, PipelineBudgetExceeded, and error
+ * entries, none of which carry `ok: true`). `fromOp` overrides it.
+ */
+export function planPipelineResume(
+  operators: any[],
+  priorTrace: any,
+  fromOp: string | null,
+): PipelineResumePlan {
+  const priorOps: any[] = priorTrace?.operators ?? [];
+
+  let resumeIndex: number;
+  if (fromOp) {
+    resumeIndex = operators.findIndex((o) => o.id === fromOp);
+    if (resumeIndex < 0) {
+      // The loader already validates this; defense-in-depth.
+      throw new Error(`replay: --from-op "${fromOp}" is not an operator of this pipeline.`);
+    }
+  } else {
+    resumeIndex = operators.findIndex((_, i) => priorOps[i]?.ok !== true);
+    if (resumeIndex < 0) {
+      throw new Error(
+        `replay: the prior run completed every operator successfully — nothing to resume. ` +
+          `Pass --from-op <id> to force a resume point. Operators: [${operators
+            .map((o) => o.id)
+            .join(', ')}].`,
+      );
+    }
+  }
+
+  const reusedEntries = priorOps.slice(0, resumeIndex);
+  // Every reused operator must have actually succeeded — otherwise we'd
+  // feed downstream steps a failed/garbage upstream output. This only
+  // bites the `--from-op` path (the default resume point is, by
+  // construction, the first non-ok operator).
+  for (let i = 0; i < reusedEntries.length; i++) {
+    const e = reusedEntries[i];
+    if (!e || e.ok !== true) {
+      throw new Error(
+        `replay: cannot resume at :${operators[resumeIndex].id} — upstream operator ` +
+          `:${operators[i]?.id ?? `#${i}`} did not succeed in the prior run. ` +
+          `Pick a resume point at or before it.`,
+      );
+    }
+  }
+
+  return {
+    resumeOpId: operators[resumeIndex].id,
+    reusedEntries,
+    toDispatch: operators.slice(resumeIndex),
+  };
+}
+
+/**
+ * Rehydrate `stepResults` from reused prior-trace entries. Recurses into
+ * `branch_on` bodies (those nested step/fan_out entries populated
+ * stepResults during the original run; the branch_on entry itself carries
+ * no output and adds no stepResults key).
+ */
+export function rehydrateFromEntries(entries: any[], stepResults: Record<string, any>): void {
+  for (const e of entries) {
+    if (!e) continue;
+    if (e.type === 'PipelineBranchOn') {
+      rehydrateFromEntries(e.operators ?? [], stepResults);
+    } else if (e.id != null && 'output' in e) {
+      stepResults[e.id] = e.output;
+    }
+  }
 }
 
 export async function runPipelineFromIr(
@@ -324,6 +428,37 @@ export async function runPipelineFromIr(
 
   // ── Operator dispatch ────────────────────────────────────────────────
   const operators: any[] = opts.ir.operators ?? [];
+
+  // ── RED-385 Phase B: pipeline replay resume ──────────────────────────
+  // Rehydrate stepResults from the prior run's recorded operator outputs,
+  // seed the budget counters from the parent (so the cap spans the replay
+  // chain), and dispatch only the operators from the resume point onward.
+  // `topLevelOps` stays the FULL list so bind()/pass_context lookups still
+  // resolve against the complete DAG.
+  let dispatchOps = operators;
+  if (opts.replay) {
+    const plan = planPipelineResume(operators, opts.replay.priorTrace, opts.replay.fromOp ?? null);
+    rehydrateFromEntries(plan.reusedEntries, stepResults);
+    for (const e of plan.reusedEntries) trace.operators.push({ ...e, reused: true });
+    // Caller-supplied (read from the prior run's trace.json); clamp to a
+    // non-negative integer so a hand-edited/garbage trace can't hand the
+    // replay extra budget via negative arithmetic. We can't verify the
+    // value's accuracy against the original run — the user owns the file —
+    // but this keeps the cap honest for well-formed traces.
+    trace.meta.total_tokens = Math.max(0, Math.trunc(opts.replay.priorTrace?.meta?.total_tokens ?? 0));
+    trace.meta.total_tool_calls = Math.max(0, Math.trunc(opts.replay.priorTrace?.meta?.total_tool_calls ?? 0));
+    trace.parent_run_id = opts.replay.parentRunId;
+    trace.replay = {
+      from_op: plan.resumeOpId,
+      reused_op_count: plan.reusedEntries.length,
+    };
+    process.stderr.write(
+      `[cambium] pipeline replay parent=${opts.replay.parentRunId} ` +
+        `resume_from=${plan.resumeOpId} reused=${plan.reusedEntries.length} ops\n`,
+    );
+    dispatchOps = plan.toDispatch;
+  }
+
   const dispatchCtx: DispatchContext = {
     ir: opts.ir,
     pipelineFile,
@@ -339,7 +474,7 @@ export async function runPipelineFromIr(
     compileRb,
     appCorrectors,
   };
-  const dispatchResult = await dispatchOperatorList(operators, dispatchCtx, stepResults, trace);
+  const dispatchResult = await dispatchOperatorList(dispatchOps, dispatchCtx, stepResults, trace);
   const pipelineOk = dispatchResult.ok;
   const pipelineError = dispatchResult.errorMessage;
   const pipelineFailureKind = dispatchResult.failureKind;
@@ -924,6 +1059,11 @@ async function runStep(op: any, ctx: RunStepContext): Promise<StepTrace> {
       // here so `corrects :foo` resolves the same inside a pipeline
       // step as it does in a standalone `cambium run`.
       correctors: ctx.appCorrectors,
+      // RED-391: thread the pipeline's workspace root through to runGen
+      // so tool/action discovery scans <workspace>/app/tools/ instead
+      // of resolving from process.cwd() (which in CI/action contexts
+      // points at the consuming repo, not the cambium workspace).
+      appRoot: ctx.workspaceDir,
     });
   } catch (err: any) {
     return {
@@ -958,6 +1098,12 @@ async function runStep(op: any, ctx: RunStepContext): Promise<StepTrace> {
       started_at: startedAt,
       finished_at: new Date().toISOString(),
       meta: { tokens, tool_calls: toolCalls },
+      // RED-385 Phase A: persist the operator's output value so a later
+      // `cambium replay` of the pipeline can rehydrate stepResults (the
+      // bind()-resolution state) without re-running this step. The full
+      // sub-gen `trace` was already here; `output` is the small piece
+      // resume actually needs.
+      output: subResult.output,
       trace: subResult.trace,
     },
     ok: subResult.ok,
@@ -1160,6 +1306,10 @@ async function runFanOut(
       return {
         branch_id: branch.id,
         ok: r.value.ok,
+        // RED-385 Phase A: per-branch output for pipeline replay. Only
+        // ok branches carry one; failed branches contributed `undefined`
+        // to the result array (JSON drops the key).
+        ...(r.value.ok ? { output: r.value.output } : {}),
         trace: r.value.subTrace,
         ...(r.value.errorMessage ? { error: r.value.errorMessage } : {}),
       };
@@ -1185,6 +1335,10 @@ async function runFanOut(
         threshold: requireSpec.kind === 'all' ? 'all' : `at_least:${requireSpec.n}`,
         on_branch_failure: onFailure,
       },
+      // RED-385 Phase A: the merged branch-output array (same value that
+      // flows into stepResults), so pipeline replay can rehydrate this
+      // fan_out's contribution without re-dispatching its branches.
+      output: resultArray,
       branches: branchEntries,
     },
     ok: fanOutOk,
@@ -1265,6 +1419,8 @@ async function runBranch(
       runsRoot: join(ctx.workspaceDir, 'runs'),
       pipelineRunId: ctx.pipelineRunId,
       correctors: ctx.appCorrectors,
+      // RED-391: same fix as runStep — pipeline workspace root for tool discovery
+      appRoot: ctx.workspaceDir,
     });
   } catch (err: any) {
     return {

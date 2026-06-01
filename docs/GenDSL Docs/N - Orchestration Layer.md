@@ -120,7 +120,7 @@ Loops, `map_over :collection`, model-decided branching, and dynamic-fan-out are 
 ### Designed-for, shipped-later
 
 - **`cambium serve` streaming partial progress** — deferred to v1.5. v1 endpoints block on completion and return the assembled output.
-- **`cambium replay <run-id>` for pipelines** — deferred, but v1 IR and trace are designed to be replay-adequate. Replay wiring is the next initiative after pipeline impl.
+- **`cambium replay <run-id>` for pipelines** — shipped (RED-385 Phase A + B). `PipelineStep`/`PipelineFanOut` entries persist their `output`; replay resumes from the first incomplete operator (or `--from-op <id>`), rehydrating `stepResults` from the recorded upstream outputs. `step` + `branch_on` resume fully; partial `fan_out`-branch reuse is the remaining follow-up. See [[P - cambium replay]].
 
 ---
 
@@ -387,6 +387,7 @@ A pipeline run produces one trace tree. Each operator's sub-traces nest under it
       "type": "PipelineStep",
       "id": "recon",
       "ok": true,
+      "output": { "...the step's output value..." },
       "trace": { "steps": [ "...full sub-trace..." ] }
     },
     {
@@ -394,24 +395,26 @@ A pipeline run produces one trace tree. Each operator's sub-traces nest under it
       "id": "reviewers",
       "ok": true,
       "meta": { "succeeded": 4, "failed": 0, "threshold": "all" },
+      "output": [ "...merged branch-output array..." ],
       "branches": [
-        { "branch_id": "security",      "ok": true, "trace": { "steps": [ "..." ] } },
-        { "branch_id": "architectural", "ok": true, "trace": { "steps": [ "..." ] } },
-        { "branch_id": "performance",   "ok": true, "trace": { "steps": [ "..." ] } },
-        { "branch_id": "semantic",      "ok": true, "trace": { "steps": [ "..." ] } }
+        { "branch_id": "security",      "ok": true, "output": { "..." }, "trace": { "steps": [ "..." ] } },
+        { "branch_id": "architectural", "ok": true, "output": { "..." }, "trace": { "steps": [ "..." ] } },
+        { "branch_id": "performance",   "ok": true, "output": { "..." }, "trace": { "steps": [ "..." ] } },
+        { "branch_id": "semantic",      "ok": true, "output": { "..." }, "trace": { "steps": [ "..." ] } }
       ]
     },
     {
       "type": "PipelineStep",
       "id": "fix",
       "ok": true,
+      "output": { "...the step's output value..." },
       "trace": { "steps": [ "...full sub-trace..." ] }
     }
   ]
 }
 ```
 
-Trace step types added by pipelines: `PipelineRun` (top), `PipelineStep`, `PipelineFanOut`. Per-branch state lives in `PipelineFanOut.branches[]` (no separate `PipelineBranch` wrapper type). Existing per-gen trace types (`Generate`, `Validate`, `Repair`, `Correct`, `Review`, etc.) nest unchanged inside each sub-trace.
+Trace step types added by pipelines: `PipelineRun` (top), `PipelineStep`, `PipelineFanOut`. Per-branch state lives in `PipelineFanOut.branches[]` (no separate `PipelineBranch` wrapper type). Each `PipelineStep`/`PipelineFanOut` entry (and each ok branch) carries its `output` value — persisted so `cambium replay` can rehydrate `stepResults` and resume a pipeline mid-DAG (RED-385 Phase A). Existing per-gen trace types (`Generate`, `Validate`, `Repair`, `Correct`, `Review`, etc.) nest unchanged inside each sub-trace.
 
 Budget totals roll up at each level. The pipeline-level `meta.total_tokens` is the sum of all sub-gens' final token counts.
 
@@ -453,7 +456,7 @@ The pipeline budget IS NOT split among sub-gens implicitly. There is no "each st
 - **Dynamic branch generation.** `fan_out from: ctx.classes` where the branch set comes from runtime data. v1 supports static branches plus an `enabled_when:` predicate (deterministic) per branch; runtime-determined branch sets defer.
 - **Streaming partial pipeline output** to downstream consumers mid-run. v1 blocks on completion; streaming defers to v1.5.
 - **Hierarchical pipelines** (a step that is itself a pipeline). Should compose naturally from the v1 primitive but not a v1 design target — the IR is pipeline-aware but the operator dispatch isn't yet recursive.
-- **Resume / replay across steps.** Deferred but designed-for: v1 IR and trace are replay-adequate.
+- **Resume / replay across steps.** Shipped (RED-385 Phase A + B) — see [[P - cambium replay]]. Remaining: partial `fan_out`-branch reuse (re-run only the failed branch).
 - **Cross-pipeline-run memory pools accessed from inside another pipeline.** Cross-run state stays in the existing scope vocabulary (`:session`, `:named_pool`); inter-pipeline coordination defers.
 
 ---

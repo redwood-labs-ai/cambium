@@ -115,6 +115,28 @@ describe('RED-381 Phase B.1: sequential pipeline runs end-to-end (mock)', () => 
     }
   });
 
+  it('persists each PipelineStep output value in the trace (RED-385 Phase A)', () => {
+    // Pipeline replay rehydrates stepResults (the bind()-resolution state)
+    // from the recorded operator outputs. Before Phase A these lived only
+    // in memory; they must now be serialized into each operator entry.
+    const result = runPipelineCli(SAMPLE_PIPELINE, 'review', FIXTURE, [
+      '--trace', traceOut,
+      '--out', outputOut,
+    ]);
+    expect(result.status).toBe(0);
+
+    const trace = JSON.parse(readFileSync(traceOut, 'utf8'));
+    for (const op of trace.operators) {
+      expect(op).toHaveProperty('output');
+      expect(op.output).toBeTruthy();
+    }
+    // The last step's persisted output equals the pipeline's final output
+    // (default last_step assembly) — proves it's the real value, not a stub.
+    const output = JSON.parse(readFileSync(outputOut, 'utf8'));
+    const lastOp = trace.operators[trace.operators.length - 1];
+    expect(lastOp.output).toEqual(output);
+  });
+
   it('pipeline output is the last step output (default last_step assembly)', () => {
     const result = runPipelineCli(SAMPLE_PIPELINE, 'review', FIXTURE, [
       '--trace', traceOut,
@@ -1476,5 +1498,90 @@ end
     const br = trace.operators[1];
     expect(br.meta.operators_executed).toBe(2); // nested a + b
     expect(br.operators).toHaveLength(2);
+  });
+});
+
+describe('RED-385 Phase B: pipeline replay resume (mock, end-to-end)', () => {
+  let scratch: string;
+
+  beforeEach(() => {
+    scratch = mkdtempSync(join(tmpdir(), 'cambium-red385-b-'));
+  });
+  afterEach(() => {
+    if (scratch && existsSync(scratch)) rmSync(scratch, { recursive: true, force: true });
+  });
+
+  function pipelineRunId(stderr: string): string {
+    // The pipeline emits its own run dir first, before any sub-gen run id.
+    const m = stderr.match(/\[cambium\] run (run_\S+)/);
+    if (!m) throw new Error(`no run id in stderr:\n${stderr}`);
+    return m[1];
+  }
+
+  it('--from-op resumes mid-pipeline: reuses upstream output, re-runs the tail', () => {
+    // 1. Produce a successful 3-step run (triage → remediate → summary).
+    const run = runPipelineCli(SAMPLE_PIPELINE, 'review', FIXTURE);
+    expect(run.status).toBe(0);
+    const runId = pipelineRunId(run.stderr);
+    const runDir = join('packages/cambium/runs', runId);
+
+    const traceOut = join(scratch, 'replay-trace.json');
+    const outputOut = join(scratch, 'replay-output.json');
+
+    // 2. Replay from `remediate` — triage is reused, remediate + summary re-run.
+    //    Path form because workspace-layout runs land under
+    //    packages/cambium/runs/, not <cwd>/runs/.
+    const replay = spawnSync(
+      'node',
+      [CLI, 'replay', runDir, '--from-op', 'remediate', '--mock', '--trace', traceOut, '--out', outputOut],
+      { cwd: REPO_ROOT, encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 },
+    );
+    const replayRunId = (() => {
+      try { return pipelineRunId(replay.stderr); } catch { return null; }
+    })();
+    try {
+      if (replay.status !== 0) {
+        throw new Error(`replay exited ${replay.status}\nstdout: ${replay.stdout}\nstderr: ${replay.stderr}`);
+      }
+
+      const trace = JSON.parse(readFileSync(traceOut, 'utf8'));
+      expect(trace.parent_run_id).toBe(runId);
+      expect(trace.replay).toMatchObject({ from_op: 'remediate', reused_op_count: 1 });
+
+      const byId = Object.fromEntries(trace.operators.map((o: any) => [o.id, o]));
+      // triage was rehydrated, not re-executed.
+      expect(byId.triage.reused).toBe(true);
+      // remediate + summary were freshly dispatched (no reused flag).
+      expect(byId.remediate.reused).toBeUndefined();
+      expect(byId.summary.reused).toBeUndefined();
+      // The resumed steps succeeded — proving triage's output was correctly
+      // rehydrated into stepResults (remediate binds bind(:triage).summary).
+      expect(byId.remediate.ok).toBe(true);
+      expect(byId.summary.ok).toBe(true);
+      // Budget meta seeded from the parent so the cap spans the chain
+      // (mock reports 0 tokens; the point is it carries the parent total
+      // forward, not that it's positive).
+      const parentTrace = JSON.parse(readFileSync(join(runDir, 'trace.json'), 'utf8'));
+      expect(trace.meta.total_tokens).toBe(parentTrace.meta.total_tokens);
+    } finally {
+      rmSync(runDir, { recursive: true, force: true });
+      if (replayRunId) rmSync(join('packages/cambium/runs', replayRunId), { recursive: true, force: true });
+    }
+  });
+
+  it('refuses --edit on a pipeline replay (gen-level only)', () => {
+    const run = runPipelineCli(SAMPLE_PIPELINE, 'review', FIXTURE);
+    expect(run.status).toBe(0);
+    const runId = pipelineRunId(run.stderr);
+    const runDir = join('packages/cambium/runs', runId);
+    try {
+      const replay = spawnSync('node', [CLI, 'replay', runDir, '--edit', '--mock'], {
+        cwd: REPO_ROOT, encoding: 'utf8', maxBuffer: 50 * 1024 * 1024,
+      });
+      expect(replay.status).not.toBe(0);
+      expect(replay.stderr).toMatch(/--edit is gen-level only/);
+    } finally {
+      rmSync(runDir, { recursive: true, force: true });
+    }
   });
 });

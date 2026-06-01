@@ -29,7 +29,8 @@ import {
   stripInlineToolCalls,
   type ToolCallMessage,
 } from './inline-tool-calls.js';
-import { normalizeOmlxBaseUrl, validateProviderBaseUrl } from './providers/base-url-validator.js';
+import { buildBuiltinRegistry } from './providers/builtins.js';
+import { ProviderRegistry } from './providers/registry.js';
 import {
   planMemory,
   readMemoryForRun,
@@ -157,10 +158,33 @@ function resolveDisableThinking(modelName: string, modelOptions?: { disable_thin
   return false;
 }
 
-async function generateText(opts: { model: string; system: string; prompt: string; max_tokens?: number; temperature?: number; jsonSchema?: any; documents?: any[]; modelOptions?: { disable_thinking?: boolean }; }): Promise<GenerateResult> {
-  const { provider, name } = parseModelId(opts.model);
+// RED-393 phase 2/3: provider dispatch goes through a registry. The two
+// dispatchers below own the cross-cutting concerns — model-id prefix parse,
+// Qwen thinking auto-detect, native-document support gate, `--mock`
+// short-circuit, fetch-failure hinting, and (for tools) inline tool-call
+// markup parsing — and delegate the raw build→fetch→normalize to the
+// resolved `CambiumProvider`.
+//
+// RED-393 phase 3: the registry is built per-`runGen` (built-ins, then
+// app-supplied `app/providers/*.ts`, then engine siblings — last write wins,
+// so app/engine providers shadow built-ins). `makeGenerateText` /
+// `makeGenerateWithTools` close over that per-run registry; runGen creates the
+// concrete dispatchers and threads them into the step handlers. Building
+// per-run (not once at module scope) gives long-lived engine-mode hosts the
+// same App-A-can't-leak-into-App-B isolation the corrector registry has
+// (RED-299).
+function makeGenerateText(providerRegistry: ProviderRegistry) {
+ return async function generateText(opts: { model: string; system: string; prompt: string; max_tokens?: number; temperature?: number; jsonSchema?: any; documents?: any[]; modelOptions?: { disable_thinking?: boolean }; }): Promise<GenerateResult> {
+  const { provider: prefix, name } = parseModelId(opts.model);
   const documents = opts.documents ?? [];
   const disableThinking = resolveDisableThinking(name, opts.modelOptions);
+
+  const provider = providerRegistry.get(prefix);
+  if (!provider) {
+    throw new Error(
+      `Unknown model provider "${prefix}". Known providers: ${providerRegistry.names().join(', ')}.`,
+    );
+  }
 
   // RED-323: fail fast if a gen with native document input hits a
   // provider that doesn't support it. Silently JSON.stringifying a
@@ -168,201 +192,38 @@ async function generateText(opts: { model: string; system: string; prompt: strin
   // produce a useless response. This gate runs BEFORE the mock check
   // so `--mock` can't green-light a configuration that would fail in
   // production (cambium-security RED-323 review finding).
-  if (documents.length > 0 && provider !== 'anthropic') {
+  if (documents.length > 0 && !provider.supportsDocuments) {
     const kinds = [...new Set(documents.map(d => d.kind))].join(', ');
     throw new Error(
-      `Provider "${provider}" does not support native document input (kinds: ${kinds}). ` +
+      `Provider "${prefix}" does not support native document input (kinds: ${kinds}). ` +
       `Switch to an anthropic: model, or pre-extract text and pass it as a plain string.`
     );
   }
 
   // Force-mock path: `--mock` on the CLI sets CAMBIUM_ALLOW_MOCK=1, which
   // MUST mean "use the deterministic stub, do not contact any model
-  // backend." Previously this was only a *fallback* on provider fetch
-  // failure, which meant a reachable oMLX/Ollama server swallowed the
-  // flag — breaking the promise of `--mock` as an offline/CI path.
+  // backend." This runs after the doc-gate (above) so a bad config still
+  // fails, but before any provider fetch.
   if (process.env.CAMBIUM_ALLOW_MOCK === '1') {
     return { text: mockGenerate(opts.prompt, opts.jsonSchema) };
   }
 
   try {
-    if (provider === 'ollama') {
-      const body = {
-        model: name,
-        prompt: `${opts.system}\n\n${opts.prompt}`,
-        stream: false,
-        options: {
-          temperature: opts.temperature ?? 0.2,
-          num_predict: opts.max_tokens ?? 1200,
-        }
-      };
-
-      const res = await fetch('http://localhost:11434/api/generate', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-      if (!res.ok) throw new Error(`Ollama error: HTTP ${res.status}`);
-      const json: any = await res.json();
-      return {
-        text: json.response as string,
-        usage: json.prompt_eval_count != null ? {
-          prompt_tokens: json.prompt_eval_count ?? 0,
-          completion_tokens: json.eval_count ?? 0,
-          total_tokens: (json.prompt_eval_count ?? 0) + (json.eval_count ?? 0),
-        } : undefined,
-      };
-    }
-
-    if (provider === 'omlx') {
-      // oMLX server (OpenAI-compatible)
-      const baseUrl = normalizeOmlxBaseUrl(
-        process.env.CAMBIUM_OMLX_BASEURL ?? 'http://localhost:8080',
-      );
-      validateProviderBaseUrl('oMLX (CAMBIUM_OMLX_BASEURL)', baseUrl);
-      const url = `${baseUrl.replace(/\/$/, '')}/v1/chat/completions`;
-
-      // RED-325 Part 3: thinking-mode suppression is now opt-in via the
-      // DSL `disable_thinking` flag (auto-detected for Qwen3). When on,
-      // we inject `/no_think` into BOTH system and user prompts (some
-      // Qwen builds only respect it in system position) AND send the
-      // chat_template_kwargs flag — three signals stacked.
-      const systemContent = disableThinking ? `/no_think\n${opts.system}` : opts.system;
-      const userContent = disableThinking ? `${opts.prompt}\n/no_think` : opts.prompt;
-
-      const body: any = {
-        model: name,
-        temperature: opts.temperature ?? 0.2,
-        max_tokens: opts.max_tokens ?? 1200,
-        messages: [
-          { role: 'system', content: systemContent },
-          { role: 'user', content: userContent }
-        ],
-      };
-      if (disableThinking) {
-        body.chat_template_kwargs = { enable_thinking: false };
-      }
-
-      // Structured output (vLLM-compatible) — requires xgrammar enabled on the server.
-      if (opts.jsonSchema && (process.env.CAMBIUM_OMLX_STRUCTURED_OUTPUTS ?? '1') === '1') {
-        body.extra_body = { structured_outputs: { json: opts.jsonSchema } };
-      }
-
-      // Some servers also support OpenAI-style response_format. Enable optionally.
-      if (opts.jsonSchema && (process.env.CAMBIUM_OMLX_RESPONSE_FORMAT ?? '0') === '1') {
-        body.response_format = {
-          type: 'json_schema',
-          json_schema: {
-            name: opts.jsonSchema?.$id ?? 'Schema',
-            schema: opts.jsonSchema
-          }
-        };
-      }
-
-      const apiKey = process.env.CAMBIUM_OMLX_API_KEY;
-      const headers: Record<string, string> = { 'content-type': 'application/json' };
-      if (apiKey) headers['authorization'] = `Bearer ${apiKey}`;
-
-      const res = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body)
-      });
-      if (!res.ok) {
-        // RED-325 Part 4: include up to 1500 chars of upstream body so
-        // we don't lose the actual oMLX/vLLM error context. Anthropic's
-        // path keeps the body OUT (credential leak posture); oMLX bodies
-        // are server-internal and safe to surface.
-        const errBody = (await res.text().catch(() => '')).slice(0, 1500);
-        throw new Error(`oMLX error: HTTP ${res.status}${errBody ? ` — ${errBody}` : ''}`);
-      }
-      const json: any = await res.json();
-      const message = json?.choices?.[0]?.message;
-      let content = message?.content;
-      // RED-325 Part 4: belt-and-suspenders fallback. Some thinking
-      // models leak final output to reasoning_content rather than content
-      // (Qwen + thinking-mode-on does this). Less correct than fixing
-      // disable_thinking (Part 3) but stops a silent failure when an
-      // unknown thinking-model variant slips past auto-detection.
-      if (!content && typeof message?.reasoning_content === 'string') {
-        process.stderr.write(
-          `[cambium] oMLX: empty content but reasoning_content present (${message.reasoning_content.length} chars). ` +
-          `Falling back to reasoning_content. Consider \`model "<id>", disable_thinking: true\` to address at the source.\n`
-        );
-        content = message.reasoning_content;
-      }
-      if (!content) {
-        const bodyPreview = JSON.stringify(json).slice(0, 1500);
-        throw new Error(`oMLX: missing choices[0].message.content — ${bodyPreview}`);
-      }
-      const usage = json?.usage;
-      return {
-        text: content as string,
-        usage: usage ? {
-          prompt_tokens: usage.prompt_tokens ?? 0,
-          completion_tokens: usage.completion_tokens ?? 0,
-          total_tokens: usage.total_tokens ?? 0,
-        } : undefined,
-      };
-    }
-
-    if (provider === 'anthropic') {
-      // RED-321: Anthropic Messages API. Provider-level prompt caching is
-      // applied automatically (system block + last tool) via
-      // buildAnthropicMessagesRequest.
-      const { buildAnthropicMessagesRequest, normalizeAnthropicMessagesResponse } = await import('./providers/anthropic.js');
-      const baseUrl = process.env.CAMBIUM_ANTHROPIC_BASEURL ?? 'https://api.anthropic.com';
-      validateProviderBaseUrl('Anthropic (CAMBIUM_ANTHROPIC_BASEURL)', baseUrl);
-      const url = `${baseUrl.replace(/\/$/, '')}/v1/messages`;
-
-      const body = buildAnthropicMessagesRequest({
-        model: name,
-        messages: [
-          { role: 'system', content: opts.system },
-          { role: 'user', content: opts.prompt },
-        ],
-        max_tokens: opts.max_tokens,
-        temperature: opts.temperature,
-        documents,
-      });
-
-      const apiKey = process.env.CAMBIUM_ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_API_KEY;
-      if (!apiKey) {
-        throw new Error('Anthropic: ANTHROPIC_API_KEY (or CAMBIUM_ANTHROPIC_API_KEY) is required.');
-      }
-      const headers: Record<string, string> = {
-        'content-type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      };
-
-      const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
-      if (!res.ok) {
-        // Drop the response body from the error message: Anthropic 401/403 bodies
-        // can echo credential fragments (e.g., last-4 of the key). Match oMLX path.
-        throw new Error(`Anthropic error: HTTP ${res.status}`);
-      }
-      const json: any = await res.json();
-      const normalized = normalizeAnthropicMessagesResponse(json);
-      return {
-        text: normalized.message.content ?? '',
-        usage: normalized.usage,
-      };
-    }
-
-    throw new Error(`Unknown model provider: ${provider}`);
+    return await provider.generateText({
+      model: name,
+      system: opts.system,
+      prompt: opts.prompt,
+      max_tokens: opts.max_tokens,
+      temperature: opts.temperature,
+      jsonSchema: opts.jsonSchema,
+      documents,
+      modelOptions: { disable_thinking: disableThinking },
+    });
   } catch (err: any) {
-    // Allow a deterministic mock for local development when the provider isn't reachable.
-    if (process.env.CAMBIUM_ALLOW_MOCK === '1') {
-      return { text: mockGenerate(opts.prompt) };
-    }
-    const hint = provider === 'omlx'
-      ? 'oMLX fetch failed. Check CAMBIUM_OMLX_BASEURL (default http://localhost:8080) and server status.'
-      : provider === 'anthropic'
-      ? 'Anthropic fetch failed. Check ANTHROPIC_API_KEY and network reachability to api.anthropic.com.'
-      : 'Ollama fetch failed. Start Ollama (`ollama serve`).';
+    const hint = provider.fetchFailureHint ?? `${prefix} fetch failed.`;
     throw new Error(`${hint}\nOriginal error: ${err?.message ?? String(err)}`);
   }
+ };
 }
 
 type Message = { role: string; content: string | null; tool_calls?: any[]; tool_call_id?: string };
@@ -373,7 +234,8 @@ type GenerateWithToolsResult = {
   usage?: TokenUsage;
 };
 
-async function generateWithTools(opts: {
+function makeGenerateWithTools(providerRegistry: ProviderRegistry) {
+ return async function generateWithTools(opts: {
   model: string;
   messages: Message[];
   tools: any[];
@@ -382,27 +244,30 @@ async function generateWithTools(opts: {
   documents?: any[];
   modelOptions?: { disable_thinking?: boolean };
 }): Promise<GenerateWithToolsResult> {
-  const { provider, name } = parseModelId(opts.model);
+  const { provider: prefix, name } = parseModelId(opts.model);
   const documents = opts.documents ?? [];
   const disableThinking = resolveDisableThinking(name, opts.modelOptions);
 
+  const provider = providerRegistry.get(prefix);
+  if (!provider) {
+    throw new Error(
+      `Agentic mode: unknown provider "${prefix}". Known providers: ${providerRegistry.names().join(', ')}.`,
+    );
+  }
+
   // RED-323: fail fast if a gen with native document input hits a
   // provider that doesn't support it. Same posture as generateText.
-  if (documents.length > 0 && provider !== 'anthropic') {
+  if (documents.length > 0 && !provider.supportsDocuments) {
     const kinds = [...new Set(documents.map(d => d.kind))].join(', ');
     throw new Error(
-      `Provider "${provider}" does not support native document input (kinds: ${kinds}). ` +
+      `Provider "${prefix}" does not support native document input (kinds: ${kinds}). ` +
       `Switch to an anthropic: model, or pre-extract text and pass it as a plain string.`
     );
   }
 
-  // RED-375: Force-mock path. The non-agentic `generateText` gates on
-  // CAMBIUM_ALLOW_MOCK before any provider fetch (see line 184); this
-  // function used to skip the gate entirely, so `mode :agentic` gens
-  // under `--mock` silently hit the real provider. Return a single
-  // turn of mock text with no tool_calls so the agentic loop terminates
-  // immediately with the mock content as the final answer — same
-  // semantic as the non-agentic mock path.
+  // RED-375: Force-mock path. Return a single turn of mock text with no
+  // tool_calls so the agentic loop terminates immediately with the mock
+  // content as the final answer — same semantic as the non-agentic mock path.
   if (process.env.CAMBIUM_ALLOW_MOCK === '1') {
     const lastUser = [...opts.messages].reverse().find(m => m.role === 'user');
     const promptText = typeof lastUser?.content === 'string' ? lastUser.content : '';
@@ -411,201 +276,36 @@ async function generateWithTools(opts: {
     };
   }
 
-  if (provider === 'ollama') {
-    // RED-208: Ollama's /api/chat accepts OpenAI-format tools and returns
-    // tool_calls in message.tool_calls. Request/response shaping lives in
-    // src/providers/ollama.ts so it's unit-testable without a live server.
-    const { buildOllamaChatRequest, normalizeOllamaChatResponse } = await import('./providers/ollama.js');
-    const baseUrl = process.env.CAMBIUM_OLLAMA_BASEURL ?? 'http://localhost:11434';
-    validateProviderBaseUrl('Ollama (CAMBIUM_OLLAMA_BASEURL)', baseUrl);
-    const url = `${baseUrl.replace(/\/$/, '')}/api/chat`;
-    const body = buildOllamaChatRequest({
-      model: name,
-      messages: opts.messages,
-      tools: opts.tools,
-      max_tokens: opts.max_tokens,
-      temperature: opts.temperature,
-    });
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`Ollama error: HTTP ${res.status}`);
-    const json: any = await res.json();
-    const normalized = normalizeOllamaChatResponse(json);
-
-    // Inline tool-call parsing fallback — some Ollama models emit tool calls
-    // as markup in content (same as RED-142 for Gemma on oMLX).
-    let content = normalized.message.content;
-    let toolCalls = normalized.message.tool_calls;
-    if ((!toolCalls || toolCalls.length === 0) && content) {
-      const parsed = parseInlineToolCalls(content);
-      if (parsed.length > 0) {
-        toolCalls = parsed;
-        content = stripInlineToolCalls(content);
-      }
-    }
-
-    return {
-      message: { content, tool_calls: toolCalls },
-      usage: normalized.usage,
-    };
-  }
-
-  if (provider === 'anthropic') {
-    // RED-321: Anthropic Messages API. Request/response shaping lives in
-    // src/providers/anthropic.ts so it's unit-testable without a live server.
-    // Prompt caching on system + last tool is applied by the builder.
-    const { buildAnthropicMessagesRequest, normalizeAnthropicMessagesResponse } = await import('./providers/anthropic.js');
-    const baseUrl = process.env.CAMBIUM_ANTHROPIC_BASEURL ?? 'https://api.anthropic.com';
-    validateProviderBaseUrl('Anthropic (CAMBIUM_ANTHROPIC_BASEURL)', baseUrl);
-    const url = `${baseUrl.replace(/\/$/, '')}/v1/messages`;
-
-    const body = buildAnthropicMessagesRequest({
-      model: name,
-      messages: opts.messages,
-      tools: opts.tools,
-      max_tokens: opts.max_tokens,
-      temperature: opts.temperature,
-      documents,
-    });
-
-    const apiKey = process.env.CAMBIUM_ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) {
-      throw new Error('Anthropic: ANTHROPIC_API_KEY (or CAMBIUM_ANTHROPIC_API_KEY) is required.');
-    }
-    const headers: Record<string, string> = {
-      'content-type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    };
-
-    const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
-    if (!res.ok) {
-      // Drop the response body from the error message — Anthropic 401/403 bodies
-      // can echo credential fragments. Match oMLX path.
-      throw new Error(`Anthropic error: HTTP ${res.status}`);
-    }
-    const json: any = await res.json();
-    const normalized = normalizeAnthropicMessagesResponse(json);
-
-    // Inline tool-call parsing fallback — models that emit tool calls as
-    // markup in text content rather than structured tool_use blocks.
-    let content = normalized.message.content;
-    let toolCalls = normalized.message.tool_calls;
-    if ((!toolCalls || toolCalls.length === 0) && content) {
-      const parsed = parseInlineToolCalls(content);
-      if (parsed.length > 0) {
-        toolCalls = parsed;
-        content = stripInlineToolCalls(content);
-      }
-    }
-
-    return {
-      message: { content, tool_calls: toolCalls },
-      usage: normalized.usage,
-    };
-  }
-
-  if (provider !== 'omlx') {
-    throw new Error(`Agentic mode: unknown provider "${provider}". Supported: omlx, ollama, anthropic.`);
-  }
-
-  const baseUrl = normalizeOmlxBaseUrl(
-    process.env.CAMBIUM_OMLX_BASEURL ?? 'http://localhost:8080',
-  );
-  validateProviderBaseUrl('oMLX (CAMBIUM_OMLX_BASEURL)', baseUrl);
-  const url = `${baseUrl.replace(/\/$/, '')}/v1/chat/completions`;
-
-  // RED-325 Part 3: only inject /no_think when disableThinking resolved
-  // true (explicit DSL flag or auto-detected Qwen3). When on, append to
-  // the LAST user message AND prepend to the first system message; same
-  // three-signal stack as the non-agentic path.
-  let messages = opts.messages;
-  if (disableThinking) {
-    messages = opts.messages.map((m, i) => {
-      if (m.role === 'user' && i === opts.messages.findLastIndex(msg => msg.role === 'user')) {
-        return { ...m, content: (m.content ?? '') + '\n/no_think' };
-      }
-      if (m.role === 'system' && i === opts.messages.findIndex(msg => msg.role === 'system')) {
-        return { ...m, content: `/no_think\n${m.content ?? ''}` };
-      }
-      return m;
-    });
-  }
-
-  const body: any = {
+  const result = await provider.generateWithTools({
     model: name,
-    temperature: opts.temperature ?? 0.2,
-    max_tokens: opts.max_tokens ?? 1200,
-    messages,
-  };
-  if (disableThinking) {
-    body.chat_template_kwargs = { enable_thinking: false };
-  }
+    messages: opts.messages,
+    tools: opts.tools,
+    max_tokens: opts.max_tokens,
+    temperature: opts.temperature,
+    documents,
+    modelOptions: { disable_thinking: disableThinking },
+  });
 
-  // Include tools if we have them; force content output if empty
-  if (opts.tools.length > 0) {
-    body.tools = opts.tools;
-  } else {
-    // Explicitly disable tool calls — the model has seen tools in earlier turns
-    // and will keep calling them unless told not to
-    body.tool_choice = 'none';
-  }
-
-  const apiKey = process.env.CAMBIUM_OMLX_API_KEY;
-  const headers: Record<string, string> = { 'content-type': 'application/json' };
-  if (apiKey) headers['authorization'] = `Bearer ${apiKey}`;
-
-  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
-  if (!res.ok) {
-    // RED-325 Part 4: include up to 1500 chars of upstream body in oMLX errors.
-    const errBody = (await res.text().catch(() => '')).slice(0, 1500);
-    throw new Error(`oMLX error: HTTP ${res.status}${errBody ? ` — ${errBody}` : ''}`);
-  }
-  const json: any = await res.json();
-
-  const msg = json?.choices?.[0]?.message;
-  if (!msg) {
-    const bodyPreview = JSON.stringify(json).slice(0, 1500);
-    throw new Error(`oMLX: missing choices[0].message — ${bodyPreview}`);
-  }
-
-  const usage = json?.usage;
-
-  // Standard OpenAI tool_calls, or parse from content for models that use inline formats
-  let toolCalls = msg.tool_calls ?? undefined;
-  let content = msg.content ?? null;
-  // RED-325 Part 4: reasoning_content fallback for thinking models that
-  // leak the final answer into reasoning_content rather than content.
-  if (!content && typeof msg.reasoning_content === 'string') {
-    process.stderr.write(
-      `[cambium] oMLX (agentic): empty content but reasoning_content present (${msg.reasoning_content.length} chars). ` +
-      `Falling back to reasoning_content.\n`
-    );
-    content = msg.reasoning_content;
-  }
-
-  if (!toolCalls && content) {
+  // RED-393: inline tool-call markup parsing, lifted out of the per-provider
+  // branches (all three built-ins applied it identically). Some models emit
+  // tool calls as markup in `content` rather than structured tool_calls
+  // (RED-142 for Gemma on oMLX, same for Ollama/Anthropic). Triggers only
+  // when the provider returned no structured tool_calls.
+  let content = result.message.content;
+  let toolCalls = result.message.tool_calls;
+  if ((!toolCalls || toolCalls.length === 0) && content) {
     const parsed = parseInlineToolCalls(content);
     if (parsed.length > 0) {
       toolCalls = parsed;
-      content = stripInlineToolCalls(content); // strip markup, keep remaining text
+      content = stripInlineToolCalls(content);
     }
   }
 
   return {
-    message: {
-      content,
-      tool_calls: toolCalls,
-    },
-    usage: usage ? {
-      prompt_tokens: usage.prompt_tokens ?? 0,
-      completion_tokens: usage.completion_tokens ?? 0,
-      total_tokens: usage.total_tokens ?? 0,
-    } : undefined,
+    message: { content, tool_calls: toolCalls },
+    usage: result.usage,
   };
+ };
 }
 
 function mockGenerate(prompt: string, schema?: { $id?: string }): string {
@@ -735,6 +435,34 @@ export interface RunGenOptions {
    *  host knows which engine folder the gen came from — e.g. a host
    *  bundling a pre-compiled IR without its source tree. */
   engineDir?: string;
+  /** RED-391: Override for app-root resolution. When set, `resolveAppRoot`
+   *  walks up from this directory instead of `process.cwd()`. Required
+   *  for pipeline sub-gen dispatch: the pipeline runner knows the
+   *  workspace root, but `runGen` would otherwise resolve from
+   *  whatever the host's cwd happens to be (e.g. a CI checkout for
+   *  a consuming repo). Tool/action discovery under `app/tools/`
+   *  needs the correct root to find custom tools. */
+  appRoot?: string;
+  /** RED-312: Replay checkpoint. When set, runGen SKIPS the Generate
+   *  (and agentic tool-loop) step entirely and seeds the post-Generate
+   *  candidate from this value, then runs the cheap/deterministic tail
+   *  (validate → repair → correct → grounding) against it. This is the
+   *  load-bearing primitive behind `cambium replay`: the expensive step
+   *  stays paid-for; you iterate only on the tail. `undefined` (the
+   *  default) means a normal run. A resolved candidate from any prior
+   *  run's `output.json` (or a `--from-step` checkpoint) flows in here. */
+  resumeCandidate?: unknown;
+  /** RED-312: Trace annotation for the checkpoint the candidate came
+   *  from (`output` by default, or a trace step type via `--from-step`).
+   *  The runner does not resolve the checkpoint itself — the replay
+   *  loader reads the prior trace and passes the resolved candidate in
+   *  `resumeCandidate`; this string is recorded on the `ReplayResume`
+   *  step for observability only. */
+  resumeFromStep?: string;
+  /** RED-312: Lineage. When this run is a replay of a prior run, its id
+   *  is recorded as `trace.parent_run_id` so the replay chain is walkable
+   *  (`run_A → run_B(parent=A) → run_C(parent=B)`). */
+  parentRunId?: string;
   /** RED-287: Root for run artifacts (memory sqlite buckets live at
    *  `<runsRoot>/memory/<scope>/<key>/<name>.sqlite`). Defaults to
    *  `<engineDir>/runs` when engine mode is detected, else
@@ -831,6 +559,10 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     mock: mockFlag = false,
     memoryKeys = [],
     engineDir: engineDirOpt,
+    appRoot: appRootOpt,
+    resumeCandidate: resumeCandidateOpt,
+    resumeFromStep: optsFromStep,
+    parentRunId: parentRunIdOpt,
     runsRoot: runsRootOpt,
     sessionId: sessionIdOpt,
     correctors: optsCorrectors,
@@ -924,6 +656,10 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     started_at: new Date().toISOString(),
   };
   if (firedBy) trace.fired_by = optsFiredBy;
+  // RED-312: replay lineage. A replayed run records the run it resumed
+  // from so the chain is walkable.
+  if (parentRunIdOpt) trace.parent_run_id = parentRunIdOpt;
+  const isReplay = resumeCandidateOpt !== undefined;
 
   // ── Load contracts (caller-injected, RED-243) ───────────────────────
   const schema = contractsMod[ir.returnSchemaId];
@@ -963,7 +699,10 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   // folder directly (the IR's `entry.source` still points at the
   // original compile location, which may not exist at host runtime).
   const engineDir = engineDirOpt ?? resolveEngineDir(ir.entry?.source);
-  const { appPkgRoot } = resolveAppRoot(process.cwd());
+  // RED-391: pipeline hosts pass appRoot explicitly; standalone callers
+  // fall back to process.cwd() (the pre-RED-391 behavior). This is the
+  // load-bearing fix for sub-gen tool discovery in external CI contexts.
+  const { appPkgRoot } = resolveAppRoot(appRootOpt ?? process.cwd());
 
   // ── Load tool registry ──────────────────────────────────────────────
   const toolRegistry = new ToolRegistry();
@@ -988,6 +727,20 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   if (engineDir) {
     await actionRegistry.loadFromDir(engineDir);
   }
+
+  // ── Load provider registry (RED-393 phase 3) ───────────────────────
+  // Built-ins first (anthropic/omlx/ollama), then app-supplied providers
+  // under app/providers/*.ts. loadFromDir's last-write-wins means an app
+  // provider shadows a built-in with the same model-id prefix — the
+  // override hook, same as tools/correctors. Engine-mode providers are a
+  // follow-up (engine siblings are plain `.ts`, indistinguishable from
+  // schemas/correctors without a typed extension). Built per-runGen so a
+  // long-lived engine-mode host gets App-A-can't-leak-into-App-B isolation
+  // (RED-299 stance), and the dispatchers close over THIS registry.
+  const providerRegistry = buildBuiltinRegistry();
+  await providerRegistry.loadFromDir(join(appPkgRoot, 'app/providers'));
+  const generateText = makeGenerateText(providerRegistry);
+  const generateWithTools = makeGenerateWithTools(providerRegistry);
 
   // ── Build per-`runGen` corrector map (RED-275, RED-287, RED-299) ─────
   // Precedence (low → high; later entries win on name collision):
@@ -1343,7 +1096,10 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   try {
 
   // ── Enrichments (pre-generate context processing) ───────────────────
-  const enrichments = ir.enrichments ?? [];
+  // RED-312: skipped on replay. Enrichments are sub-agent digests that
+  // feed the Generate prompt and fire their own LLM calls; replay skips
+  // Generate, so their output is already baked into the candidate.
+  const enrichments = isReplay ? [] : (ir.enrichments ?? []);
   for (const enrichDef of enrichments) {
     const contextValue = ir.context?.[enrichDef.field];
     if (contextValue === undefined) {
@@ -1415,7 +1171,30 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     let raw: string;
     let parsed: any;
 
-    if (ir.mode === 'agentic') {
+    if (isReplay) {
+      // RED-312 replay: skip Generate entirely (and, for agentic gens,
+      // the whole tool-use loop) and seed the candidate from the prior
+      // run's resolved output. The expensive step is already paid-for;
+      // execution falls straight through to the cheap/deterministic
+      // tail (validate → repair → correct → grounding). No LLM or tool
+      // call fires here. A repair step downstream may still call the
+      // model — that's the one place replay can re-pay, and only when
+      // the candidate genuinely fails validation.
+      parsed = resumeCandidateOpt;
+      raw = typeof resumeCandidateOpt === 'string'
+        ? resumeCandidateOpt
+        : JSON.stringify(resumeCandidateOpt);
+      trace.steps.push({
+        type: 'ReplayResume',
+        id: step.id,
+        ok: parsed !== undefined,
+        meta: {
+          parent_run_id: parentRunIdOpt,
+          from_step: optsFromStep ?? 'output',
+          mode: ir.mode ?? 'standard',
+        },
+      });
+    } else if (ir.mode === 'agentic') {
       const maxToolCalls = ir.policies?.constraints?.budget?.max_tool_calls ?? 20;
       const toolsOpenAI = toolRegistry.toOpenAIFormat(toolsAllowed);
 
@@ -1823,6 +1602,53 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
       }
     }
 
+    // 5b. RED-392: Field-values verification (when grounded_in verify: :field_values)
+    if (grounding?.verify === 'field_values') {
+      const fvResult = handleCorrect(parsed, ['field_values'], { document: getGroundingDocument(ir, groundingTextByKey) }, correctors);
+      const fieldValuesResult = fvResult.meta?.fieldValuesResult;
+      const fvIssues = fvResult.meta?.issues ?? [];
+
+      trace.steps.push({
+        ...fvResult,
+        type: 'GroundingFieldValueCheck',
+        ok: fieldValuesResult
+          ? fieldValuesResult.allValid
+          : !fvIssues.some((i: any) => i.severity === 'error'),
+        meta: {
+          ...fvResult.meta,
+          passed: fieldValuesResult?.passed?.length ?? 0,
+          failed: fieldValuesResult?.failed?.length ?? 0,
+          skipped: fieldValuesResult?.skipped?.length ?? 0,
+          totalChecked: fieldValuesResult?.totalChecked ?? 0,
+          details: fieldValuesResult?.failed ?? [],
+        },
+      });
+
+      const fvErrors = fvIssues.filter((i: any) => i.severity === 'error');
+      if (fvErrors.length > 0) {
+        // Feed field-value errors into repair
+        const repairErrors = fvErrors.map((i: any) => ({
+          message: `Grounding: ${i.message}`,
+          instancePath: i.path,
+        }));
+        const repair = await handleRepair(
+          JSON.stringify(parsed, null, 2), repairErrors, schema, ir,
+          maxRepairAttempts + 1, generateText, extractJsonObject,
+        );
+        pushRepairStep(repair);
+
+        if (repair.parsed) {
+          const revalidate = handleValidate(repair.parsed, validate, 'ValidateAfterGroundingValues');
+          if (revalidate.ok) {
+            parsed = repair.parsed;
+            trace.steps.push(revalidate);
+          } else {
+            trace.steps.push(revalidate);
+          }
+        }
+      }
+    }
+
     // 6. Signals + Triggers (general-purpose tool dispatch)
     const signalDefs = ir.signals ?? [];
     const triggerDefs = ir.triggers ?? [];
@@ -2056,6 +1882,12 @@ export interface RunGenFromIrOptions {
   /** Working directory for genfile discovery + default artifact root.
    *  Defaults to `process.cwd()`. */
   cwd?: string;
+  /** RED-391/RED-393: explicit app-package root for plugin discovery
+   *  (tools/actions/providers/log sinks). When omitted, runGenFromIr
+   *  anchors on the gen's workspace (walked up from `ir.entry.source`)
+   *  rather than `process.cwd()`. Pipeline sub-gen dispatch passes this
+   *  explicitly. */
+  appRoot?: string;
   /** Override the trace-output path. Defaults to `<runsDir>/<runId>/trace.json`. */
   traceOut?: string;
   /** Override the output-output path. Defaults to `<runsDir>/<runId>/output.json`. */
@@ -2067,6 +1899,17 @@ export interface RunGenFromIrOptions {
   firedBy?: string;
   /** Optional caller-provided log-sink overrides (parallel to runGen's). */
   logSinks?: Record<string, LogSink>;
+  /** RED-312 replay: post-Generate candidate to resume from. When set,
+   *  Generate (and the agentic tool loop) is skipped and the cheap tail
+   *  runs against this value. The CLI `cambium replay` resolves this
+   *  from a prior run's `output.json` (default) or a `--from-step`
+   *  checkpoint; the library equivalent is `runGenFromIr({ ir, candidate })`. */
+  candidate?: unknown;
+  /** RED-312 replay: trace annotation for the checkpoint origin. */
+  fromStep?: string;
+  /** RED-312 replay: id of the run being resumed, recorded as
+   *  `trace.parent_run_id`. */
+  parentRunId?: string;
 }
 
 export interface RunGenFromIrResult extends RunGenResult {
@@ -2142,7 +1985,18 @@ export async function runGenFromIr(opts: RunGenFromIrOptions): Promise<RunGenFro
   // (host running a downstream tool against another project; container
   // with a mismatched cwd). The engine-mode lookup right above already
   // anchors on `entry.source`; this matches that stance.
-  const genfileDir = findGenfileDir(opts.ir.entry?.source) ?? cwd;
+  // RED-393: anchor app/<type> discovery on the SAME root as contracts +
+  // correctors. `findGenfileDir(entry.source)` walks up from the gen file to
+  // its workspace (the RED-274 stance); when that succeeds we thread it into
+  // runGen as `appRoot` so tool/action/provider/log-sink discovery resolves
+  // there too — NOT from process.cwd(). When it returns null (engine mode, or
+  // a host-compiled IR whose source is unreachable), appRoot stays undefined
+  // and runGen keeps its cwd fallback. This closes the long-standing seam
+  // where contracts loaded from the gen's workspace but plugins loaded from
+  // cwd — the recurring Docker/CI/run-from-anywhere bug class. See the
+  // "App-root resolution is single-sourced" invariant in CLAUDE.md.
+  const genfileDirFromSource = findGenfileDir(opts.ir.entry?.source);
+  const genfileDir = genfileDirFromSource ?? cwd;
   const genfile = resolveGenfileContracts(genfileDir);
   let appCorrectors: Record<string, CorrectorFn> | undefined;
   if (engineDir) {
@@ -2182,9 +2036,18 @@ export async function runGenFromIr(opts: RunGenFromIrOptions): Promise<RunGenFro
     correctors: appCorrectors,
     logSinks: opts.logSinks,
     firedBy: opts.firedBy,
+    // RED-312: replay plumbing — when `candidate` is set, runGen skips
+    // Generate and resumes the tail against it.
+    resumeCandidate: opts.candidate,
+    resumeFromStep: opts.fromStep,
+    parentRunId: opts.parentRunId,
     // RED-353: pass the resolved engineDir so runGen doesn't re-detect
     // from entry.source and miss the cwd fallback we just applied.
     engineDir: engineDir ?? undefined,
+    // RED-393: anchor app-plugin discovery (tools/actions/providers/log
+    // sinks) on the gen's own workspace, not process.cwd(). Explicit
+    // opts.appRoot (pipeline sub-gens, RED-391) still wins.
+    appRoot: opts.appRoot ?? genfileDirFromSource ?? undefined,
     // RED-330: pass the same runId we emitted on stderr so the artifact
     // path the operator saw is the path that gets written.
     runId,

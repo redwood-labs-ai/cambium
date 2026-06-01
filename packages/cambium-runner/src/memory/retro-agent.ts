@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { writeFileSync, readFileSync, existsSync, mkdtempSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import type { SqliteMemoryBackend } from './backend.js';
 
@@ -14,6 +15,64 @@ import type { SqliteMemoryBackend } from './backend.js';
 // than the original.
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const WORKSPACE_ROOT = resolve(MODULE_DIR, '..', '..', '..', '..');
+
+/**
+ * RED-380: Resolve the `cli/cambium.mjs` path. Mirrors the precedence
+ * chain established by RED-376 (`resolveDefaultCompileRb`) so the retro
+ * subprocess no longer depends on `process.cwd()` being the monorepo
+ * root. Precedence, highest first:
+ *
+ *   1. Explicit `override` (caller/test override — `opts.cambiumCli`).
+ *
+ *   2. `CAMBIUM_CLI` env var (operator escape hatch for non-standard
+ *      install layouts where `@redwood-labs/cambium` isn't resolvable
+ *      from the runner's module location — e.g. strict-pnpm trees,
+ *      symlinked CLIs).
+ *
+ *   3. Production npm install: runner at
+ *      `<install>/node_modules/@redwood-labs/cambium-runner/dist/memory/retro-agent.js`,
+ *      CLI at the sibling `@redwood-labs/cambium` package's `cli/cambium.mjs`.
+ *      Resolve via createRequire(import.meta.url) so the lookup works
+ *      with pnpm, yarn workspaces, or any other node_modules layout
+ *      that follows the standard resolution algorithm.
+ *
+ *   4. In-tree development / monorepo fallback: retro-agent at
+ *      `<repo>/packages/cambium-runner/{src,dist}/memory/retro-agent.{ts,js}`,
+ *      CLI at `<repo>/cli/cambium.mjs`. Walk up from MODULE_DIR to the
+ *      `<repo>/packages/cambium-runner` level, then one more to repo root.
+ *
+ * The explicit `override` and `CAMBIUM_CLI` links return as-is (no
+ * existence gate): an operator/test asserting a path should surface its
+ * own spawn error rather than silently falling back to a different CLI.
+ * Returns null when none of links 1–4 resolve — caller returns a clear
+ * "pass cliPath / set CAMBIUM_CLI" error.
+ */
+export function resolveDefaultCli(override?: string): string | null {
+  // 1. Explicit caller override (tests, embedding hosts) wins outright.
+  if (override && override.trim()) return override;
+
+  // 2. Operator escape hatch.
+  const envCli = process.env.CAMBIUM_CLI;
+  if (envCli && envCli.trim()) return envCli;
+
+  // 3. Production: ask Node to resolve the cambium package's manifest,
+  //    then walk to `cli/cambium.mjs` next to it.
+  try {
+    const req = createRequire(import.meta.url);
+    const cambiumPkg = req.resolve('@redwood-labs/cambium/package.json');
+    const candidate = resolve(dirname(cambiumPkg), 'cli/cambium.mjs');
+    if (existsSync(candidate)) return candidate;
+  } catch {
+    // Falls through to in-tree dev resolution below.
+  }
+
+  // 4. In-tree dev: walk up from this module's location to the repo root.
+  // retro-agent.ts → packages/cambium-runner/src/memory/ → up 4 → repo root.
+  const dev = resolve(MODULE_DIR, '..', '..', '..', '..', 'cli/cambium.mjs');
+  if (existsSync(dev)) return dev;
+
+  return null;
+}
 
 /**
  * RED-215 phase 4: retro memory-agent dispatch.
@@ -99,6 +158,11 @@ export function invokeRetroAgent(args: {
   agentFile: string;
   ctx: string;
   mockMode: boolean;
+  /** RED-380: optional explicit `cli/cambium.mjs` path. Highest-priority
+   *  link in the resolution chain — used by tests and embedding hosts
+   *  that know the CLI location. Falls back to `CAMBIUM_CLI` env, then
+   *  module-location resolution. See {@link resolveDefaultCli}. */
+  cambiumCli?: string;
 }): RetroResult {
   const dir = mkdtempSync(join(tmpdir(), 'cambium-retro-'));
   const ctxFile = join(dir, 'ctx.json');
@@ -116,7 +180,22 @@ export function invokeRetroAgent(args: {
   ];
   if (args.mockMode) flags.push('--mock');
 
-  const result = spawnSync('node', ['cli/cambium.mjs', ...flags], {
+  // RED-380: resolve the CLI path from this module's location instead
+  // of relying on process.cwd(). When called from an engine-mode host
+  // or any consumer where cwd isn't the cambium monorepo root, the
+  // hardcoded 'cli/cambium.mjs' path silently fails with ENOENT.
+  const cliPath = resolveDefaultCli(args.cambiumCli);
+  if (!cliPath) {
+    return {
+      ok: false,
+      reason:
+        'retro-agent could not locate cli/cambium.mjs. Ensure @redwood-labs/cambium ' +
+        'is installed alongside @redwood-labs/cambium-runner, set CAMBIUM_CLI to its ' +
+        'path, or run from the monorepo root.',
+    };
+  }
+
+  const result = spawnSync('node', [cliPath, ...flags], {
     encoding: 'utf8',
     env: { ...process.env },
     maxBuffer: 50 * 1024 * 1024,

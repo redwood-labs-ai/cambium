@@ -1,0 +1,199 @@
+{
+  "run_id": "run_20260529_144903_f5a00e",
+  "version": "0.2",
+  "entry": {
+    "class": "Analyst",
+    "method": "analyze",
+    "source": "packages/cambium/app/gens/analyst.cmb.rb"
+  },
+  "model": {
+    "id": "omlx:Qwen3.5-27B-4bit",
+    "temperature": 0.2,
+    "max_tokens": 1200
+  },
+  "steps": [
+    {
+      "type": "SecurityCheck",
+      "ok": true,
+      "meta": {
+        "tools_checked": [
+          "calculator"
+        ],
+        "policy": {}
+      }
+    },
+    {
+      "type": "ReplayResume",
+      "id": "generate_1",
+      "ok": true,
+      "meta": {
+        "parent_run_id": "run_20260529_144847_7ceed0",
+        "from_step": "output",
+        "mode": "standard"
+      }
+    },
+    {
+      "type": "Review",
+      "ok": true,
+      "ms": 0,
+      "meta": {
+        "issues": [],
+        "raw_preview": "{\n  \"summary\": \"Mock analysis (model provider not available).\",\n  \"metrics\": {\n    \"latency_ms_samples\": [\n      120,\n      140,\n      160,\n      195,\n      265,\n      271,\n      199,\n      258,\n      8\n    ]\n  },\n  \"key_facts\": []\n}"
+      }
+    },
+    {
+      "type": "Correct",
+      "ms": 0,
+      "ok": true,
+      "output": {
+        "summary": "Mock analysis (model provider not available).",
+        "metrics": {
+          "latency_ms_samples": [
+            120,
+            140,
+            160,
+            195,
+            265,
+            271,
+            199,
+            258,
+            8
+          ],
+          "avg_latency_ms": 179.556
+        },
+        "key_facts": []
+      },
+      "meta": {
+        "correctors": [
+          "math"
+        ],
+        "corrected": false,
+        "issues": []
+      }
+    },
+    {
+      "type": "GroundingCheck",
+      "ms": 0,
+      "ok": true,
+      "output": {
+        "summary": "Mock analysis (model provider not available).",
+        "metrics": {
+          "latency_ms_samples": [
+            120,
+            140,
+            160,
+            195,
+            265,
+            271,
+            199,
+            258,
+            8
+          ],
+          "avg_latency_ms": 179.556
+        },
+        "key_facts": []
+      },
+      "meta": {
+        "correctors": [
+          "citations"
+        ],
+        "corrected": false,
+        "issues": [],
+        "citationResult": {
+          "passed": [],
+          "failed": [],
+          "missing": [],
+          "totalChecked": 0,
+          "allValid": true
+        },
+        "passed": 0,
+        "failed": 0,
+        "missing": 0,
+        "totalChecked": 0,
+        "details": []
+      }
+    },
+    {
+      "type": "ExtractSignals",
+      "ok": true,
+      "meta": {
+        "state": {
+          "latency_ms": [
+            120,
+            140,
+            160,
+            195,
+            265,
+            271,
+            199,
+            258,
+            8
+          ]
+        }
+      }
+    },
+    {
+      "type": "ToolCall",
+      "ok": true,
+      "ms": 0,
+      "meta": {
+        "trigger": "latency_ms",
+        "tool": "calculator",
+        "operation": "avg",
+        "input": {
+          "operation": "avg",
+          "operands": [
+            120,
+            140,
+            160,
+            195,
+            265,
+            271,
+            199,
+            258,
+            8
+          ]
+        },
+        "output": {
+          "value": 179.556
+        },
+        "target": "metrics.avg_latency_ms"
+      }
+    }
+  ],
+  "started_at": "2026-05-29T21:49:03.153Z",
+  "parent_run_id": "run_20260529_144847_7ceed0",
+  "finished_at": "2026-05-29T21:49:03.187Z",
+  "final": {
+    "ok": true,
+    "schema_id": "AnalysisReport",
+    "usage": {
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "llm_calls": 0
+    },
+    "budget": {
+      "tokens": {
+        "used": 0,
+        "max": "unlimited"
+      },
+      "tool_calls": {
+        "used": 1,
+        "max": "unlimited"
+      },
+      "duration_ms": {
+        "used": 1,
+        "max": "unlimited"
+      },
+      "per_tool": {
+        "calculator": {
+          "calls": {
+            "used": 1,
+            "max": "unlimited"
+          }
+        }
+      }
+    }
+  }
+}

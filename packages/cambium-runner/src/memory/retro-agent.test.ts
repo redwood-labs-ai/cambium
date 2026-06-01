@@ -1,12 +1,13 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import {
   classNameToFileBase,
   findRetroAgentFile,
   buildRetroContext,
   applyRetroWrites,
+  resolveDefaultCli,
   sanitizeRetroContent,
   MAX_RETRO_CONTENT_BYTES,
 } from './retro-agent.js';
@@ -62,6 +63,59 @@ describe('findRetroAgentFile (RED-215 phase 4)', () => {
     const primary = join(dir, 'primary.cmb.rb');
     expect(findRetroAgentFile('SomeBogusAgentName', primary)).toBeNull();
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('resolveDefaultCli (RED-380)', () => {
+  const ORIGINAL_CWD_CLI = process.env.CAMBIUM_CLI;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (ORIGINAL_CWD_CLI === undefined) delete process.env.CAMBIUM_CLI;
+    else process.env.CAMBIUM_CLI = ORIGINAL_CWD_CLI;
+  });
+
+  it('an explicit override wins outright (highest precedence)', () => {
+    process.env.CAMBIUM_CLI = '/env/should/be/ignored/cambium.mjs';
+    expect(resolveDefaultCli('/explicit/override/cambium.mjs')).toBe(
+      '/explicit/override/cambium.mjs',
+    );
+  });
+
+  it('falls back to CAMBIUM_CLI env when no override is given', () => {
+    process.env.CAMBIUM_CLI = '/operator/escape/hatch/cambium.mjs';
+    expect(resolveDefaultCli()).toBe('/operator/escape/hatch/cambium.mjs');
+  });
+
+  it('ignores a blank/whitespace override and env value', () => {
+    process.env.CAMBIUM_CLI = '   ';
+    // No override, blank env → falls through to module-location resolution,
+    // which finds the in-tree cli/cambium.mjs (tests run from the monorepo).
+    const resolved = resolveDefaultCli('   ');
+    expect(resolved).not.toBeNull();
+    expect(resolved!.endsWith(join('cli', 'cambium.mjs'))).toBe(true);
+  });
+
+  it('resolves the CLI independent of process.cwd() — the RED-380 fix', () => {
+    // Simulate an engine-mode / external-consumer cwd: process.cwd()
+    // points at some unrelated checkout, NOT the cambium monorepo root.
+    // The pre-RED-380 code spawned the cwd-relative literal 'cli/cambium.mjs'
+    // and ENOENT'd here; the module-location resolution must still succeed.
+    delete process.env.CAMBIUM_CLI;
+    const foreignCwd = mkdtempSync(join(tmpdir(), 'cambium-foreign-cwd-'));
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(foreignCwd);
+    try {
+      const resolved = resolveDefaultCli();
+      expect(resolved).not.toBeNull();
+      // Anchored at the module location, so it's absolute and lands on
+      // an actual cli/cambium.mjs — never under the foreign cwd.
+      expect(resolved!.endsWith(join('cli', 'cambium.mjs'))).toBe(true);
+      expect(resolved!.startsWith(foreignCwd + sep)).toBe(false);
+      expect(resolved!.startsWith('/') || /^[A-Za-z]:[\\/]/.test(resolved!)).toBe(true);
+    } finally {
+      cwdSpy.mockRestore();
+      rmSync(foreignCwd, { recursive: true, force: true });
+    }
   });
 });
 

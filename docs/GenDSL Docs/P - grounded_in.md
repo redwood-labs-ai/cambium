@@ -104,6 +104,43 @@ Content-type by extension:
 * Magic-byte content-type sniffing for files without a recognized extension — deferred to RED-383 v2 (today, unmarked binaries land as text + fail downstream)
 * Inline arrays of sources — `grounded_in :doc, from: ["a.pdf", "b.pdf"]` not supported
 
+## Value-level verification: the `verify:` kwarg (RED-392)
+
+By default `grounded_in` verifies **citations** — "did the model quote text that actually exists in the source?". `verify: :field_values` adds a second, complementary mode that verifies **extracted values** — "are the structured values the model put in the output actually present in the source?".
+
+```ruby
+grounded_in :invoice, verify: :field_values
+grounded_in :receipt, from: "./receipt.pdf", verify: :field_values
+```
+
+This is for **structured-extraction** gens (invoice parsers, contract extraction, document Q&A) — anything that pulls typed fields out of a source. Instead of each gen rolling its own "do these fields match the source" check, the framework cross-checks them.
+
+**How it works.** After generation (and after the citations check, if `require_citations` is also set), the runner runs the built-in `field_values` corrector against the output:
+- It walks the output tree and, for each **leaf value** (string or number), checks the value appears in the grounding document via normalized substring match (case-insensitive, whitespace-collapsed, punctuation-tolerant for numeric formatting like `1,234` vs `1234`).
+- **Skipped:** booleans, `null`/`undefined`, and any `citations` field (already covered by the citations corrector).
+- On a mismatch it emits a `GroundingFieldValueCheck` step (`ok: false`) and feeds the failing fields into one repair attempt (`ValidateAfterGroundingValues` re-validates the repaired output's schema). See [[C - Trace (observability)]].
+
+**Limitations (v1, deterministic substring matcher).** This is an exact-presence check, not a semantic judge:
+- **Derived / normalized / enum values may false-fail.** A value the model correctly normalized (`vendor_name: "Acme Corporation"` when the doc says "ACME CORP.", or a currency code, or a computed total) isn't verbatim in the doc and will be flagged → a wasted (and possibly output-degrading) repair. If your schema has such fields, prefer not enabling `verify:` on the whole output yet.
+- **Very short values may false-pass.** A short number or code (`5`, `2024`, a 2-char status) can substring-match incidentally; treat field-value grounding as a strong signal, not a proof, for short leaves.
+- It checks **all** leaves — there's no per-field allowlist yet. A `fields:`-scoped form and a semantic/LLM-judge strategy (`verify: :semantic_similarity`) are the natural follow-ups; the kwarg's allowlist (`GROUNDING_VERIFY_VALUES`) is built to extend.
+
+An empty grounding document is caught earlier by the `GroundingMissing` pre-flight (it fires for any `grounded_in` source), so `verify:` never runs against an empty doc on a real run.
+
+### `verify:` IR output
+
+```json
+"policies": {
+  "grounding": {
+    "source": "invoice",
+    "require_citations": false,
+    "verify": "field_values"
+  }
+}
+```
+
+Invalid strategies are rejected at compile time: `grounded_in :doc, verify: :bogus` raises a `CompileError` ("verify: must be nil or one of :field_values").
+
 ## Future: richer source types
 
 URL fetching and magic-byte sniffing complete the design in [RED-383 v2](https://linear.app/redwood-labs/issue/RED-383). The v1 file-paths-only cut covers the canonical "ground in this PDF on disk" friction without dragging in the SSRF-guard / allowlist work URLs need.

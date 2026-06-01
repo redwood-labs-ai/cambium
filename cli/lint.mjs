@@ -258,7 +258,45 @@ function lintPackage(pkgDir) {
     }
   }
 
-  // 6f. Config files (RED-237 + RED-239, lint added RED-284).
+  // 6f. Custom providers (RED-393, lint added 0.6.0).
+  // Basename = model-id prefix → must match the regex AND the file must
+  // `export default`. The registry's loadFromDir enforces the same regex +
+  // an export-name-must-match-basename rule at load time; lint catches the
+  // file-shape issues before the first model dispatch (providers fail at
+  // dispatch, not at startup, so the runtime error is one indirection away).
+  const providersDir = join(pkgDir, 'app/providers');
+  if (existsSync(providersDir)) {
+    const SYMBOL_REGEX = /^[a-z][a-z0-9_]*$/;
+    const providerFiles = readdirSync(providersDir).filter(
+      f => (f.endsWith('.ts') || f.endsWith('.js'))
+        && !f.endsWith('.d.ts') && !f.endsWith('.test.ts') && !f.endsWith('.test.js'),
+    );
+    for (const f of providerFiles) {
+      const name = f.replace(/\.(ts|js)$/, '');
+      if (!SYMBOL_REGEX.test(name)) {
+        fail(`provider file name "${name}" (${f}) must match /^[a-z][a-z0-9_]*$/ — the basename becomes the model-id prefix (RED-393)`);
+        continue;
+      }
+      pass(`provider: ${f}`);
+
+      const body = readFileSync(join(providersDir, f), 'utf8');
+      if (!/export\s+default/.test(body)) {
+        fail(`  ${f}: must \`export default\` a CambiumProvider (RED-393 loader requirement)`);
+      }
+      // Honesty: if a `name: '...'` config field is present it must equal the
+      // basename (the loader rejects a mismatch — name derives from filename).
+      // Anchor to an object-literal token position (after `{`, `,`, or a line
+      // break) so a `name: '...'` inside a comment or prose doesn't trip a
+      // false failure. The runtime loader (registry.loadFromDir) is the
+      // authoritative check; this is the early-warning.
+      const nameField = body.match(/[\n,{]\s*name:\s*['"]([a-z][a-z0-9_]*)['"]/);
+      if (nameField && nameField[1] !== name) {
+        fail(`  ${f}: declares name '${nameField[1]}' but the filename requires '${name}' — rename the file or drop the name field (RED-393)`);
+      }
+    }
+  }
+
+  // 6g. Config files (RED-237 + RED-239, lint added RED-284).
   // Whitelist of allowed names; presence check. Syntax validation is
   // deferred to the Ruby compiler's own load path — lint just catches
   // typos like `model.rb` or `memory-policy.rb`.

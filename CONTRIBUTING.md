@@ -119,6 +119,8 @@ output.json + trace.json
 │   │   ├── actions/       # App trigger actions — paired .action.json + .action.ts
 │   │   ├── correctors/    # App corrector plugins (.corrector.ts) — auto-discovered
 │   │   │                  #   in app-mode, override built-ins by name (RED-275)
+│   │   ├── providers/     # App model providers (<name>.ts, export default) —
+│   │   │                  #   filename = model-id prefix; shadow built-ins (RED-393)
 │   │   ├── policies/      # Named policy packs (.policy.rb) for security + budget
 │   │   ├── memory_pools/  # Named memory pools (.pool.rb) for shared strategy+embed
 │   │   ├── log_profiles/  # Named log profiles (.log_profile.rb) — trace fan-out config (RED-302)
@@ -141,6 +143,8 @@ output.json + trace.json
 │   │   ├── providers/         # Model + embed providers (oMLX, Ollama)
 │   │   ├── correctors/        # Built-in correctors (math, dates, currency, citations)
 │   │   │                      #   + app-loader.ts for RED-275 plugin discovery
+│   │   ├── inspect/           # `cambium inspect` trace viewer (RED-313): trace→graph
+│   │   │                      #   projection, runs index, node:http+SSE, SVG viewer
 │   │   ├── signals.ts         # Signal extraction
 │   │   ├── triggers.ts        # Trigger evaluation (tool_call + action_call)
 │   │   ├── compound.ts        # Review + consensus

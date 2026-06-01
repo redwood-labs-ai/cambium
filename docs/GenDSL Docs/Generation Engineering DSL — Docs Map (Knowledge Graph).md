@@ -31,6 +31,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[C - Signals, State, and Triggers]]
 - [[C - Schema Description (auto-generated)]]
 - [[C - Serve Mode]] — long-lived HTTP server hosting every gen in a workspace (RED-360); locked v1 wire format, closed `error.kind` enum, `--max-inflight` / `--run-timeout` / `--shutdown-timeout`
+- [[P - cambium replay]] — re-run a prior run's post-Generate tail from its candidate output, skipping the expensive Generate; trace-as-savepoint, `parent_run_id` lineage, `--edit` / `--from-step` (gen, RED-312); `--from-op` pipeline-operator resume reusing recorded outputs (RED-385 Phase B)
 
 ## Data + integrations
 - [[D - Schemas (JSON Schema)]]
@@ -58,6 +59,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[N - Scheduled Gens (RED-273)]] — shipped (RED-305): `cron :daily` declaration + `--fired-by` runtime semantics + compile-to-artifact (k8s CronJob / crontab / systemd / GH Actions / Render) for scheduled runs; framework owns semantics, operator owns lifecycle
 - [[N - Prior-Run State Accessors (RED-241)]] — settled as "no new primitive": existing memory + retro agents + `scope: :schedule` cover every forcing case; note documents the patterns and closes the ticket
 - [[N - Orchestration Layer]] — design note (RED-374): `Pipeline` primitive for multi-gen composition (sequential `step`, parallel `fan_out`, deterministic `branch_on :signal`) with rollup IR / trace / budget; load-bearing invariant is zero inference at the orchestration layer
+- [[N - Visual Trace Renderer]] — shipped read-only v1 (RED-313): `cambium inspect` local browser viewer over `runs/`; pure `projectTrace` (trace→graph), `node:http` API + SSE, vanilla SVG execution graph; zero deps, localhost-only. Replay-from-node is RED-406.
 
 ---
 

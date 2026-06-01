@@ -27,6 +27,18 @@ let memoryPools = {};    // name → { path, content }                  -- RED-2
 let modelAliases = {};   // alias → { path, line, value }             -- RED-237
 let logProfiles = {};    // name → { path, content }                  -- RED-302
 let pipelineDefs = {};   // className → { path, content, basename }   -- RED-381
+let providerDefs = {};   // prefix → { path }  (app/providers/*.ts)   -- RED-393
+
+// RED-393: framework built-in model providers, keyed by model-id prefix.
+// App providers under app/providers/*.ts extend this set; an app provider
+// with the same prefix shadows a built-in (matches the runtime registry
+// order). Feeds model-id completion / hover / go-to-def for the literal
+// `model "<prefix>:<name>"` (and `embed: "<prefix>:<name>"`) form.
+const BUILTIN_PROVIDERS = {
+  anthropic: 'claude-* via the Anthropic API (ANTHROPIC_API_KEY)',
+  omlx: 'OpenAI-compatible / oMLX endpoint (CAMBIUM_OMLX_BASEURL)',
+  ollama: 'local Ollama (the default when no prefix is given)',
+};
 
 // RED-286: inline Genfile shape detection. CommonJS LSP can't
 // easily import the .mjs helper in cli/workspace-shape.mjs; ~25 lines
@@ -178,6 +190,7 @@ function scanWorkspace() {
   modelAliases = {};
   logProfiles = {};
   pipelineDefs = {};
+  providerDefs = {};
 
   // App-mode scans gated on appPkgRoot being set. When workspaceRoot
   // is ITSELF an engine folder (e.g. user opened the engine dir
@@ -305,6 +318,19 @@ function scanWorkspace() {
     }
   }
 
+  // Scan custom providers (RED-393). Basename = model-id prefix; feeds the
+  // `model "<prefix>:..."` completion / hover / go-to-def below. App-mode
+  // only — the runner's provider discovery is app/providers-only (engine-mode
+  // providers are a follow-up), so there's no engine sibling scan here.
+  const providersDir = path.join(appPkgRoot, 'app/providers');
+  if (fs.existsSync(providersDir)) {
+    for (const f of fs.readdirSync(providersDir)) {
+      if (!f.endsWith('.ts') || f.endsWith('.d.ts') || f.endsWith('.test.ts')) continue;
+      const name = f.replace(/\.ts$/, '');
+      providerDefs[name] = { path: path.join(providersDir, f) };
+    }
+  }
+
   // Scan schema exports from contracts.ts
   const contractsPath = path.join(appPkgRoot, 'src/contracts.ts');
   if (fs.existsSync(contractsPath)) {
@@ -371,7 +397,7 @@ const PRIMITIVE_DOCS = {
   },
   corrects: {
     detail: 'Attaches deterministic correctors.',
-    doc: 'Run after validation, before triggers.\nBuilt-in: `:math`, `:dates`, `:currency`, `:citations`.\n\nRED-298: optional `max_attempts:` (1..3, default 1) loops repair-and-rerun for correctors that can verify but not auto-fix (e.g. regex synthesis).\n\n```ruby\ncorrects :math, :dates\ncorrects :regex_x, max_attempts: 3\n```',
+    doc: 'Run after validation, before triggers.\nBuilt-in: `:math`, `:dates`, `:currency`, `:citations`, `:field_values` (RED-392; cross-checks output values against the grounding document, auto-invoked by `grounded_in verify: :field_values`).\n\nRED-298: optional `max_attempts:` (1..3, default 1) loops repair-and-rerun for correctors that can verify but not auto-fix (e.g. regex synthesis).\n\n```ruby\ncorrects :math, :dates\ncorrects :regex_x, max_attempts: 3\n```',
   },
   constrain: {
     detail: 'Declares a runtime constraint.',
@@ -390,8 +416,8 @@ const PRIMITIVE_DOCS = {
     doc: 'A `generate` block is a transaction with validate/repair/trace.\nNot an opaque LLM call.\n\n```ruby\ngenerate "analyze this document" do\n  with context: document\n  returns AnalysisReport\nend\n```',
   },
   grounded_in: {
-    detail: 'Enforces citations grounded in a source document.',
-    doc: 'When `require_citations: true`, all claim items must include verbatim quotes.\nFabricated citations are flagged and repaired.\n\n```ruby\ngrounded_in :document, require_citations: true\n```',
+    detail: 'Enforces output grounded in a source document.',
+    doc: 'When `require_citations: true`, all claim items must include verbatim quotes.\nFabricated citations are flagged and repaired.\n\n`verify: :field_values` adds a value-level cross-check: each structured output field value must appear in the grounding document (RED-392).\n\n```ruby\ngrounded_in :document, require_citations: true\ngrounded_in :invoice, verify: :field_values\n```',
   },
   enrich: {
     detail: 'Pre-generate context enrichment via sub-agent.',
@@ -612,6 +638,21 @@ connection.onHover((params) => {
     }
   }
 
+  // Model provider prefix (RED-393) — inside a `model "<prefix>:..."` or
+  // `embed: "<prefix>:..."` literal, the prefix word is followed by `:`
+  // (not preceded by one), so it falls outside the symbol block above.
+  if ((BUILTIN_PROVIDERS[word] || providerDefs[word]) && /(?:\bmodel\s+|\bembed:\s*)"/.test(line)) {
+    const where = providerDefs[word]
+      ? `App provider — *${providerDefs[word].path}*`
+      : `Framework built-in — ${BUILTIN_PROVIDERS[word]}`;
+    return {
+      contents: {
+        kind: MarkupKind.Markdown,
+        value: `**${word}:** — Model provider prefix\n\n${where}`,
+      },
+    };
+  }
+
   // Check if hovering over a schema constant (PascalCase)
   if (word[0] === word[0].toUpperCase() && schemaExports[word]) {
     const se = schemaExports[word];
@@ -673,6 +714,12 @@ connection.onDefinition((params) => {
   if (modelAliases[word] && /\bmodel\s+:/.test(line)) {
     const ma = modelAliases[word];
     return { uri: 'file://' + ma.path, range: { start: { line: ma.line, character: 0 }, end: { line: ma.line, character: 0 } } };
+  }
+
+  // Model provider prefix → app/providers/<prefix>.ts (RED-393). Only app
+  // providers have a file; built-ins (anthropic / omlx / ollama) have none.
+  if (providerDefs[word] && /(?:\bmodel\s+|\bembed:\s*)"/.test(line)) {
+    return { uri: 'file://' + providerDefs[word].path, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } };
   }
 
   // Schema constant → contracts.ts line
@@ -789,6 +836,28 @@ connection.onCompletion((params) => {
       label: name,
       kind: CompletionItemKind.Value,
       detail: `→ ${ma.value}`,
+    }));
+  }
+
+  // Inside a `model "<prefix>:..."` (or `embed: "<prefix>:..."`) literal,
+  // before the colon → suggest provider prefixes: framework built-ins plus
+  // discovered app/providers/*.ts (RED-393). App providers shadow built-ins
+  // on prefix collision, matching the runtime registry order. Inserts
+  // `<prefix>:` so the model name can follow.
+  if (/(?:\bmodel\s+|\bembed:\s*)"[^":]*$/.test(line)) {
+    const prefixes = new Map();
+    for (const [name, desc] of Object.entries(BUILTIN_PROVIDERS)) {
+      prefixes.set(name, `Built-in provider — ${desc}`);
+    }
+    // App providers second so they win on prefix collision.
+    for (const name of Object.keys(providerDefs)) {
+      prefixes.set(name, `App provider — app/providers/${name}.ts`);
+    }
+    return [...prefixes].map(([name, detail]) => ({
+      label: name,
+      kind: CompletionItemKind.Value,
+      detail,
+      insertText: `${name}:`,
     }));
   }
 
