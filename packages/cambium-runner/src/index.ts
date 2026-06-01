@@ -18,6 +18,11 @@ export type { IR, RunGenOptions, RunGenResult } from './runner.js';
 export { runGenFromIr } from './runner.js';
 export type { RunGenFromIrOptions, RunGenFromIrResult } from './runner.js';
 
+// RED-312: replay loader. Resolves a prior run's artifacts into the
+// { ir, candidate, parentRunId } triple that runGenFromIr resumes from.
+export { resolveReplay, resolveRunDir } from './replay.js';
+export type { ResolvedReplay, ResolvedGenReplay, ResolvedPipelineReplay } from './replay.js';
+
 // RED-381 Phase B: Pipeline runtime. Mirrors runGenFromIr's shape but
 // for Pipeline IRs. CLI dispatches between gen + pipeline IRs based on
 // `ir.kind`. Engine-mode pipelines defer.
@@ -38,6 +43,27 @@ export type {
 // SSRF guard + permissions plumbing.
 export type { ToolContext } from './tools/tool-context.js';
 
+// RED-393 provider-plugin surface. External apps scaffold
+// `app/providers/<name>.ts` and `export default` a CambiumProvider built
+// via one of these factories (`openaiCompatible` / `anthropicCompatible`
+// for the common base-URL+auth swap; `defineProvider` for full control).
+// The basename becomes the model-id prefix.
+export { openaiCompatible, anthropicCompatible } from './providers/factories.js';
+export type { OpenAICompatibleConfig, AnthropicCompatibleConfig } from './providers/factories.js';
+export { defineProvider, normalizeModelName } from './providers/registry.js';
+export type { ModelNameTransform } from './providers/registry.js';
+// SSRF/egress posture helper: app providers fetch operator-supplied base
+// URLs. `validateProviderBaseUrl` is the same guard the built-ins use
+// (blocks private/metadata ranges unless CAMBIUM_ALLOW_PRIVATE_PROVIDER_BASEURL).
+export { validateProviderBaseUrl } from './providers/base-url-validator.js';
+export type {
+  CambiumProvider,
+  GenerateTextOpts,
+  GenerateResult,
+  GenerateWithToolsOpts,
+  GenerateWithToolsResult,
+} from './providers/types.js';
+
 // RED-360 serve mode: long-lived runner over HTTP. Exposed so the CLI
 // (`cambium serve`) and engine-mode hosts that want to embed the server
 // have the same entry point. Wire format is locked at v1 — see
@@ -51,3 +77,12 @@ export type {
 } from './serve/serve.js';
 export { parseBind, isLoopback } from './serve/bind.js';
 export type { BindTarget, ParseBindOptions } from './serve/bind.js';
+
+// RED-313 `cambium inspect`: local read-only trace viewer. `runInspect` starts
+// the HTTP server; `projectTrace` / `resolveRunsDir` are exposed for hosts
+// (and tests) that want the pure projection or runs-dir resolution directly.
+export { runInspect, DEFAULT_PUBLIC_DIR } from './inspect/server.js';
+export type { RunInspectOptions, InspectHandle } from './inspect/server.js';
+export { resolveRunsDir, listRuns, loadRun, isValidRunId } from './inspect/runs.js';
+export { projectTrace, summarizeTrace } from './inspect/projection.js';
+export type { GraphModel, GraphNode, GraphEdge, NodeStatus, TraceSummary } from './inspect/projection.js';

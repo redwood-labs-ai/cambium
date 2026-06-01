@@ -1085,6 +1085,116 @@ describe('${pascal} pipeline', () => {
   console.log(`  4. Run: cambium run ${PKG}/app/pipelines/${snake}.pipeline.rb --method run --arg <fixture>`);
 }
 
+// ── Provider scaffolder (RED-393, scaffolder added 0.6.0) ─────────────
+//
+// `cambium new provider <Name>` → app/providers/<snake>.ts
+//
+// A custom model provider is `app/providers/<name>.ts` that `export
+// default`s a CambiumProvider. The runner auto-discovers it (registry
+// loadFromDir, app-mode only) and registers it under the model-id prefix
+// matching the filename. A gen then dispatches with `model "<snake>:<id>"`.
+//
+// The filename basename IS the model-id prefix and is interpolated into a
+// File.join — same /^[a-z][a-z0-9_]*$/ path-traversal stance as packs
+// (RED-214), pools (RED-215), and app correctors (RED-275). The registry's
+// loadFromDir enforces the identical regex at load time; this is the
+// scaffold-side half.
+//
+// Engine-mode providers are not supported yet (runner discovery is
+// app/providers-only — engine siblings are plain `.ts`, indistinguishable
+// from schemas/correctors without a typed extension). Error like the
+// policy / memory_pool / log_profile scaffolders do.
+
+function generateProvider(name, ctx) {
+  validateName(name, 'provider name');
+  const snake = snakeCase(name);
+
+  // Defensive: the loader regex is /^[a-z][a-z0-9_]*$/ (the basename becomes
+  // the model-id prefix). snakeCase(validatedName) already produces a
+  // matching string, but assert in case the conversion ever drifts — same
+  // belt-and-suspenders the corrector / pool / policy scaffolders use.
+  if (!/^[a-z][a-z0-9_]*$/.test(snake)) {
+    console.error(`Provider name "${snake}" must match /^[a-z][a-z0-9_]*$/ (RED-393 — becomes the model-id prefix).`);
+    process.exit(2);
+  }
+
+  if (ctx.mode === 'engine') {
+    console.error(`\n'cambium new provider' is not supported in engine mode.`);
+    console.error(`Provider discovery is app-mode only (app/providers/). Engine-mode providers are a follow-up.`);
+    process.exit(2);
+  }
+
+  const ENV = `CAMBIUM_${snake.toUpperCase()}`;
+
+  // Import path differs by mode, matching the corrector/tool conventions:
+  //   - in-tree cambium workspace uses a deep relative to framework source
+  //     (it doesn't import itself as a package);
+  //   - external [package] apps import from the published runner package.
+  const factoryImport = ctx.shape === 'workspace'
+    ? '../../../cambium-runner/src/providers/factories.js'
+    : '@redwood-labs/cambium-runner';
+
+  const body = `\
+/**
+ * Custom model provider (RED-393). Auto-discovered by the runner — any
+ * \`app/providers/<name>.ts\` that \`export default\`s a CambiumProvider is
+ * registered under the model-id prefix matching its filename. A gen then
+ * dispatches to it with \`model "${snake}:<model-name>"\`.
+ *
+ * The filename basename IS the model-id prefix and MUST match
+ * /^[a-z][a-z0-9_]*$/. The \`name\` below must equal the basename "${snake}"
+ * (or drop it — the loader derives the name from the filename and rejects a
+ * mismatch).
+ *
+ * This template uses \`openaiCompatible\` — the Tier-1 factory for "an
+ * OpenAI-compatible POST /v1/chat/completions endpoint at a different base
+ * URL with a different auth header" (Bedrock/OpenRouter/Together/Azure
+ * gateways, self-hosted vLLM, ...). For an Anthropic-Messages endpoint use
+ * \`anthropicCompatible\`; for full control over the wire protocol use
+ * \`defineProvider\`. All three are exported from the runner package.
+ */
+import { openaiCompatible, validateProviderBaseUrl } from '${factoryImport}';
+
+export default openaiCompatible({
+  name: '${snake}',
+
+  // Resolve config at call time so secrets stay out of committed source.
+  // Point baseUrl at the gateway's OpenAI-compatible root — the factory
+  // appends \`/v1/chat/completions\`. \`validateProviderBaseUrl\` applies the
+  // framework SSRF guard (blocks private / metadata ranges) — the factory
+  // calls this callback verbatim and does NOT validate on your behalf, so
+  // keep this check or a misconfigured URL could reach an internal endpoint.
+  baseUrl: () => {
+    const url = process.env.${ENV}_BASEURL ?? 'https://your-gateway.example.com';
+    validateProviderBaseUrl('${snake} (${ENV}_BASEURL)', url);
+    return url;
+  },
+
+  // Bearer token. Return undefined to send no Authorization header (some
+  // local / self-hosted servers need none).
+  auth: () => process.env.${ENV}_API_KEY,
+
+  // --- optional knobs (uncomment as needed; defaults give a vanilla OpenAI gateway) ---
+  // modelName: (n) => n,                       // Cambium model name → wire id (Azure deployment sugar, etc.)
+  // supportsDocuments: false,                  // base64 PDF/image envelopes (generic OpenAI endpoints can't)
+  // fetchFailureHint: 'Is ${ENV}_BASEURL set and reachable?',
+});
+`;
+
+  const PKG = ctx.appPkgRoot;
+  writeFile(join(PKG, 'app/providers', `${snake}.ts`), body);
+
+  console.log(`\nNext steps:`);
+  console.log(`  1. Set baseUrl + auth in ${PKG}/app/providers/${snake}.ts (or via ${ENV}_BASEURL / ${ENV}_API_KEY env vars).`);
+  console.log(`  2. Use in a gen: model "${snake}:<model-name>"`);
+  console.log(`     (e.g. model "${snake}:anthropic.claude-3-5-sonnet" for a Bedrock-style gateway)`);
+  console.log(`\n  The file is auto-discovered — no registration step. The basename "${snake}" IS the`);
+  console.log(`  model-id prefix; it must match /^[a-z][a-z0-9_]*$/ (enforced at scaffold time and load).`);
+  console.log(`  An app provider shadows a same-named framework built-in (anthropic / omlx / ollama).`);
+  console.log(`\n  Anthropic-Messages endpoint instead? Swap openaiCompatible → anthropicCompatible.`);
+  console.log(`  Need full wire control? Use defineProvider. Both are exported from the runner package.`);
+}
+
 // ── Dispatch ──────────────────────────────────────────────────────────
 
 const GENERATORS = {
@@ -1099,6 +1209,9 @@ const GENERATORS = {
   log_profile: generateLogProfile,
   config: generateConfig,
   engine: generateEngine,
+  // RED-393: custom model providers under app/providers/<name>.ts. App-mode
+  // only (runner discovery is app/providers-only; engine-mode is a follow-up).
+  provider: generateProvider,
   // RED-381 Phase G.1: pipelines scaffold parallel to agents. App-mode
   // only in v1 — engine-mode pipelines (a pipeline as the engine's
   // execution unit) defer until a real forcing case appears.
@@ -1118,6 +1231,7 @@ export function runGenerate(type, name) {
     console.error(`  cambium new schema TradeSignal      # add a TypeBox export`);
     console.error(`  cambium new system crypto_analyst   # add a system prompt`);
     console.error(`  cambium new corrector regex_check   # add an app corrector (RED-275)`);
+    console.error(`  cambium new provider bedrock        # add a custom model provider (RED-393)`);
     console.error(`  cambium new policy research_caps    # add a security+budget pack (RED-214)`);
     console.error(`  cambium new memory_pool support     # add a memory pool (RED-215)`);
     console.error(`  cambium new log_profile app_default # add a log profile (RED-302)`);

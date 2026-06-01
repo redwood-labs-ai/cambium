@@ -22,6 +22,7 @@ import { spawnSync } from 'node:child_process';
 import { dirname, resolve, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync, statSync } from 'node:fs';
+import { readExplicitStdinArg } from './stdin-arg.mjs';
 import { runGenerate } from './generate.mjs';
 import { runLint } from './lint.mjs';
 import { runInit } from './init.mjs';
@@ -49,7 +50,9 @@ Usage:
   cambium new <type> <Name>
   cambium run <file.cmb.rb> --method <method> [--arg <path>|-] [--trace <path>] [--out <path>] [--mock] [--memory-key <name>=<value> ...] [--session-id <id>] [--profile <name>]
   cambium compile <file.cmb.rb> [--method <method>] [--arg <path>|-] [-o <output>]
+  cambium compile [--out-dir <dir>] [--write]   # (no file) recompile every gen/pipeline IR in the workspace
   cambium serve --workspace <path> --bind <uri> [--allow-remote]
+  cambium inspect [run-id] [--port <n>] [--runs-dir <path>] [--host <h>] [--allow-remote] [--no-open]
   cambium doctor
   cambium test
   cambium lint
@@ -58,9 +61,15 @@ Commands:
   init      Initialize a new Cambium workspace
   new       Scaffold a new engine, agent, tool, action, schema, system, corrector, policy, memory_pool, or config
   run       Compile and execute a GenModel
+  replay    Re-run a prior run's post-Generate tail from its candidate output,
+            skipping the expensive Generate. --edit / --from-step <type>.
   compile   Compile a GenModel to IR JSON (no execution; engine-mode build step).
             Without --method, emits a {method → IR} map for every public method.
+            With NO file, recompiles every gen/pipeline in the workspace:
+            engine mode writes each <base>.ir.json; app mode validates only
+            (--out-dir/--write to materialize). (RED-407)
   serve     Start a long-lived HTTP server hosting every gen in this workspace.
+  inspect   Start a local read-only trace viewer over this workspace's runs/.
   doctor    Check environment setup and dependencies
   test      Run the test suite
   lint      Validate package structure and declarations
@@ -82,9 +91,14 @@ Compile flags:
   --arg <path>|-            Optional fixture path. When omitted, an empty string is supplied
                             to the gen method — the runtime caller injects real input later.
 
+Compile-all flags (no file argument):
+  --out-dir <dir>           Write all IRs into <dir> (created if needed). Implies --write.
+  --write                   Materialize IRs next to each source even in app mode.
+
 Examples:
   cambium run packages/cambium/app/gens/analyst.cmb.rb --method analyze --arg document.txt
   cambium run gen.cmb.rb --method summarize --arg data.json --trace trace.json --out result.json
+  cambium replay run_20260422_114135_abc --edit
   cambium compile cambium/summarizer/summarizer.cmb.rb --method analyze
   cambium new engine Summarizer
   cambium new agent BtcAnalyst
@@ -149,8 +163,13 @@ if (cmd === 'test') {
 
 // ── cambium compile ──────────────────────────────────────────────────
 if (cmd === 'compile') {
-  const { runCompile } = await import('./compile.mjs');
-  await runCompile(args);
+  const mod = await import('./compile.mjs');
+  // No positional file → compile-all (recompile every gen/pipeline IR in the
+  // workspace, mode-aware: engine writes IRs, app validates). A leading flag
+  // (e.g. --out-dir, --help) also routes to compile-all. (RED-407)
+  const hasFile = args[0] && !args[0].startsWith('-');
+  if (hasFile) await mod.runCompile(args);
+  else await mod.runCompileAll(args);
   process.exit(0);
 }
 
@@ -166,6 +185,21 @@ if (cmd === 'serve') {
   const { runServeCli } = await import('./serve.mjs');
   await runServeCli(args);
   // runServeCli runs until a signal arrives; if it returns, exit cleanly.
+  process.exit(0);
+}
+
+// ── cambium inspect (RED-313) ───────────────────────────────────────
+if (cmd === 'inspect') {
+  const { runInspectCli } = await import('./inspect.mjs');
+  await runInspectCli(args);
+  // runInspectCli blocks until a signal arrives; if it returns, exit cleanly.
+  process.exit(0);
+}
+
+// ── cambium replay (RED-312) ────────────────────────────────────────
+if (cmd === 'replay') {
+  const { runReplay } = await import('./replay.mjs');
+  await runReplay(args);
   process.exit(0);
 }
 
@@ -207,6 +241,11 @@ if (!method) usage('Missing --method\nRun "cambium run --help" for usage.');
 // matching their input schema) and gens with all-optional inputs.
 // Documented behavior on line 82; the previous "Missing --arg" block
 // contradicted the docs.
+// RED-397: distinguish an OMITTED --arg (default to an empty JSON object
+// fed via stdin) from an EXPLICIT `--arg -` (forward the real piped stdin).
+// `argFromStdin = !arg` is true only when omitted; capture the explicit
+// dash BEFORE the default reassignment below.
+const explicitStdin = arg === '-';
 const argFromStdin = !arg;
 if (argFromStdin) arg = '-';
 
@@ -274,14 +313,29 @@ if (sessionId !== null) compileEnv.CAMBIUM_SESSION_ID = sessionId;
 // is the explicit override. The Ruby ModelAliases.load reads
 // CAMBIUM_PROFILE to pick the active profile.
 if (profile !== null) compileEnv.CAMBIUM_PROFILE = profile;
+// Resolve what to feed the Ruby child's stdin:
+//   - omitted --arg      → '{}' (empty JSON object; valid when every input
+//                          field is optional, and the shape pipelines expect)
+//   - explicit `--arg -` → the parent's real piped stdin (RED-397)
+//   - `--arg <file>`     → undefined; compile.rb reads the file itself
+let compileInput;
+if (argFromStdin) {
+  compileInput = '{}';
+} else if (explicitStdin) {
+  try {
+    compileInput = readExplicitStdinArg('cambium run');
+  } catch (err) {
+    console.error(err?.message ?? String(err));
+    process.exit(2);
+  }
+} else {
+  compileInput = undefined;
+}
 const compile = spawnSync('ruby', [RUBY_COMPILE_SCRIPT, file, '--method', method, '--arg', arg], {
   encoding: 'utf8',
   maxBuffer: 50 * 1024 * 1024,
   env: compileEnv,
-  // When --arg was omitted, feed an empty JSON object via stdin so
-  // pipeline input-schema validation sees `{}` (a valid value when
-  // every field is optional) rather than empty string.
-  input: argFromStdin ? '{}' : undefined,
+  input: compileInput,
 });
 if (compile.status !== 0) {
   console.error(compile.stdout || '');

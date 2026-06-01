@@ -77,6 +77,15 @@ try {
     assert(false, `Ruby stdlib-only audit FAILED (see output above): ${err.message ?? err}`);
   }
 
+  // ── Ruby surface — no removed-in-3.x patterns (RED-379) ──────────────
+  console.log('\n[0.6/6] Auditing Ruby 3.x compat (removed-in-3.x patterns)');
+  try {
+    sh('node scripts/check-ruby-compat.mjs', { cwd: ROOT, stdio: ['pipe', 'inherit', 'inherit'] });
+    assert(true, 'Ruby surface has no removed-in-3.x patterns');
+  } catch (err) {
+    assert(false, `Ruby 3.x compat audit FAILED (see output above): ${err.message ?? err}`);
+  }
+
   // ── Pack both packages — real pack, so prepack/postpack fire ─────────
   console.log('\n[1/6] Packing both tarballs (real pack — prepack/postpack fire)');
   sh(`npm pack --pack-destination "${packDir}"`, { cwd: ROOT });
@@ -190,6 +199,20 @@ try {
     'working-copy package.json has devDependencies restored');
   assert(!existsSync(join(ROOT, 'package.json.bak')),
     'no leftover package.json.bak (postpack cleaned up)');
+
+  // ── Run the full suite under Ruby 3.x on Alpine (RED-378) ────────────
+  // The heaviest gate, last so the cheap checks fail fast first. Reproduces
+  // the Alpine (Ruby 3.4) deploy target that RED-377 bit but the EOL-2.x dev
+  // interpreter masked. Needs Docker; if it's unavailable the step fails (a
+  // publish gate you can't run isn't a gate — run this on a Docker-capable
+  // machine before publishing).
+  console.log('\n[7/7] Running the full suite under Ruby 3.x on Alpine (Docker)');
+  try {
+    sh('node scripts/test-on-ruby.mjs', { cwd: ROOT, stdio: ['pipe', 'inherit', 'inherit'] });
+    assert(true, 'full suite passes under Ruby 3.x on Alpine (RED-377 class caught)');
+  } catch (err) {
+    assert(false, `Ruby 3.x suite run FAILED (see output above): ${err.message ?? err}`);
+  }
 } finally {
   rmSync(packDir, { recursive: true, force: true });
   rmSync(consumerDir, { recursive: true, force: true });

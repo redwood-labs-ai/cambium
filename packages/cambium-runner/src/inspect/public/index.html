@@ -1,0 +1,157 @@
+<!doctype html>
+<!-- RED-313 cambium inspect — vanilla, no build step, no dependencies.
+     Read-only trace viewer: runs list + SVG execution graph (vertical nested
+     lanes) + side panel + SSE auto-refresh. -->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>cambium inspect</title>
+<style>
+  :root { --ok:#1a7f37; --error:#cf222e; --warn:#9a6700; --info:#57606a; --skipped:#8c959f;
+          --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3; --sel:#388bfd; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--bg); color:var(--fg);
+         height:100vh; display:grid; grid-template-columns:248px 1fr 360px; }
+  h1 { font-size:12px; margin:0; padding:12px 14px; border-bottom:1px solid var(--line); letter-spacing:.04em; color:#aeb6c0; }
+  #runs, #graph, #panel { overflow:auto; height:100vh; }
+  #runs { border-right:1px solid var(--line); background:var(--panel); }
+  .run { padding:8px 14px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .run:hover { background:#1f2630; } .run.sel { background:#22303c; }
+  .run .lbl { font-weight:600; } .run .sub { color:var(--info); font-size:11px; }
+  .badge { display:inline-block; font-size:10px; padding:0 5px; border-radius:8px; border:1px solid var(--line); margin-left:6px; vertical-align:middle; color:#aeb6c0; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+  .ok{background:var(--ok)} .error{background:var(--error)} .warn{background:var(--warn)} .info{background:var(--info)} .skipped{background:var(--skipped)}
+  #lineage { padding:6px 14px; font-size:11px; color:var(--warn); }
+  #canvas { position:relative; }
+  #edges { position:absolute; top:0; left:0; pointer-events:none; }
+  .nbox { position:absolute; height:30px; display:flex; align-items:center; gap:7px; padding:0 12px;
+          background:var(--panel); border:1px solid var(--line); border-left-width:3px; border-radius:6px;
+          cursor:pointer; white-space:nowrap; overflow:hidden;
+          width:max-content; max-width:640px; }
+  .nbox:hover { background:#1f2630; } .nbox.sel { outline:2px solid var(--sel); }
+  .nbox.s-ok{border-left-color:var(--ok)} .nbox.s-error{border-left-color:var(--error)}
+  .nbox.s-warn{border-left-color:var(--warn)} .nbox.s-info{border-left-color:var(--info)} .nbox.s-skipped{border-left-color:var(--skipped)}
+  .nbox .t { font-weight:600; text-overflow:ellipsis; overflow:hidden; }
+  .nbox .m { color:var(--info); font-size:11px; }
+  #panel { border-left:1px solid var(--line); background:var(--panel); padding:14px; }
+  #panel h2 { font-size:12px; margin:14px 0 6px; color:#aeb6c0; } #panel h2:first-child { margin-top:0; }
+  pre { white-space:pre-wrap; word-break:break-word; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:8px; font-size:11px; max-height:38vh; overflow:auto; }
+  .muted { color:var(--info); }
+</style>
+</head>
+<body>
+  <div id="runs"><h1>runs</h1><div id="runlist"></div></div>
+  <div id="graph"><h1 id="graphtitle">— select a run —</h1><div id="lineage"></div><div id="canvas"></div></div>
+  <div id="panel"><h1>details</h1><div id="paneldetail" class="muted">Click a node.</div></div>
+<script>
+const $ = (id) => document.getElementById(id);
+const SVGNS = 'http://www.w3.org/2000/svg';
+let current = null, selectedRun = null;
+
+// ── runs list ────────────────────────────────────────────────────────────
+async function loadRuns() {
+  const r = await fetch('/api/runs').then((x) => x.json()).catch(() => ({ runs: [] }));
+  const el = $('runlist'); el.innerHTML = '';
+  for (const run of r.runs) {
+    const d = document.createElement('div');
+    d.className = 'run' + (run.id === selectedRun ? ' sel' : '');
+    d.innerHTML = `<div class="lbl"><span class="dot ${run.status}"></span>${esc(run.label)}<span class="badge">${run.kind}</span></div>`
+      + `<div class="sub">${esc(run.id)}${run.parentRunId ? ' ↩ replay' : ''}</div>`;
+    d.onclick = () => selectRun(run.id);
+    el.appendChild(d);
+  }
+}
+
+async function selectRun(id) {
+  selectedRun = id;
+  const data = await fetch('/api/runs/' + encodeURIComponent(id)).then((x) => x.ok ? x.json() : null).catch(() => null);
+  if (!data) return;
+  current = data;
+  $('graphtitle').textContent = data.model.runId + '  ·  ' + data.model.kind;
+  $('lineage').innerHTML = data.model.lineage ? `↩ replay of ${esc(data.model.lineage.parentRunId)}` : '';
+  renderGraph(data.model);
+  $('paneldetail').innerHTML = '<span class="muted">Click a node.</span>';
+  loadRuns();
+}
+
+// ── SVG execution graph: vertical nested lanes ─────────────────────────────
+// Nodes are emitted pre-order, so array index = row. x indents by depth.
+// Edges route as orthogonal elbows (down from source, then right into target);
+// branch/lineage edges draw dashed. Boxes are HTML (crisp text + clicks) over
+// an SVG connector layer.
+const ROW_H = 42, BOX_H = 30, INDENT = 26, PAD = 16, RAIL = 13;
+
+function renderGraph(model) {
+  const canvas = $('canvas');
+  canvas.innerHTML = '';
+  const pos = new Map();
+  model.nodes.forEach((n, i) => {
+    pos.set(n.id, { x: PAD + n.depth * INDENT, y: PAD + i * ROW_H, n });
+  });
+  const maxDepth = Math.max(0, ...model.nodes.map((n) => n.depth));
+  // Boxes hug their content (max-content, capped at 640px); reserve generous
+  // room so wide labels never clip and the column scrolls if needed.
+  const width = PAD * 2 + maxDepth * INDENT + 700;
+  const height = PAD * 2 + model.nodes.length * ROW_H;
+  canvas.style.height = height + 'px';
+
+  // edge layer
+  const svg = document.createElementNS(SVGNS, 'svg');
+  svg.id = 'edges'; svg.setAttribute('width', width); svg.setAttribute('height', height);
+  for (const e of model.edges) {
+    const s = pos.get(e.source), t = pos.get(e.target);
+    if (!s || !t) continue;
+    const x1 = s.x + RAIL, y1 = s.y + BOX_H;        // source bottom rail
+    const x2 = t.x, y2 = t.y + BOX_H / 2;            // target left-middle
+    const p = document.createElementNS(SVGNS, 'path');
+    p.setAttribute('d', `M ${x1} ${y1} V ${y2} H ${x2}`);
+    p.setAttribute('fill', 'none');
+    p.setAttribute('stroke', e.kind === 'branch' || e.kind === 'fanout' ? '#6e7681' : '#3d444d');
+    p.setAttribute('stroke-width', '1.5');
+    if (e.dashed) p.setAttribute('stroke-dasharray', '4 3');
+    svg.appendChild(p);
+  }
+  canvas.appendChild(svg);
+
+  // node boxes
+  for (const n of model.nodes) {
+    const { x, y } = pos.get(n.id);
+    const box = document.createElement('div');
+    box.className = `nbox s-${n.status}`;
+    box.style.left = x + 'px'; box.style.top = y + 'px';
+    const bits = [];
+    if (n.ms != null) bits.push(n.ms + 'ms');
+    if (n.tokens != null) bits.push(n.tokens + 'tok');
+    box.innerHTML = `<span class="dot ${n.status}"></span><span class="t">${esc(n.label)}</span>`
+      + `<span class="m">${esc(n.stepType)}${bits.length ? ' · ' + bits.join(' ') : ''}</span>`;
+    box.onclick = () => selectNode(n, box);
+    box.dataset.id = n.id;
+    canvas.appendChild(box);
+  }
+}
+
+function selectNode(n, dom) {
+  document.querySelectorAll('.nbox.sel').forEach((e) => e.classList.remove('sel'));
+  dom.classList.add('sel');
+  const head = [`<h2>${esc(n.label)} <span class="badge">${n.status}</span></h2>`,
+    `<div class="muted">${esc(n.stepType)}${n.ms != null ? ' · ' + n.ms + 'ms' : ''}${n.tokens != null ? ' · ' + n.tokens + ' tok' : ''}</div>`];
+  if (n.meta) head.push('<h2>meta</h2><pre>' + esc(JSON.stringify(n.meta, null, 2)) + '</pre>');
+  if (n.output !== undefined) head.push('<h2>output</h2><pre>' + esc(JSON.stringify(n.output, null, 2)) + '</pre>');
+  $('paneldetail').innerHTML = head.join('');
+}
+
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }
+
+// SSE auto-refresh
+try {
+  const es = new EventSource('/api/events');
+  es.addEventListener('runs-changed', () => { loadRuns(); if (selectedRun) selectRun(selectedRun); });
+} catch (e) { /* SSE unsupported → manual refresh */ }
+
+loadRuns();
+const dl = new URLSearchParams(location.search).get('run');
+if (dl) selectRun(dl);
+</script>
+</body>
+</html>

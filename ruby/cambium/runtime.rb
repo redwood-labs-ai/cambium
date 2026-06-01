@@ -1698,6 +1698,22 @@ module Cambium
       # Grounding: declare that outputs must be grounded in a source.
       #   grounded_in :document, require_citations: true
       #
+      # RED-392: add `verify:` kwarg to generalize grounding beyond
+      # citation-level checks. `verify: :field_values` runs a post-
+      # generation value-level cross-check: for each field in the
+      # output schema, the corrector verifies the extracted value
+      # appears (or is derivable) from the grounding document.
+      #
+      # Example:
+      #   grounded_in :invoice, verify: :field_values
+      #   grounded_in :receipt, from: "./receipt.pdf", verify: :field_values
+      #
+      #   Returns Invoice { total_cents: Integer; vendor_name: String }
+      #
+      # The value-level corrector checks that `total_cents` and
+      # `vendor_name` are present in the grounding document text.
+      # Fails into the repair loop when mismatches are found.
+      #
       # RED-283: the source symbol becomes the key under `ir.context`
       # (via RED-276) and the prompt's DOCUMENT: section. Enforce the
       # same `/^[a-z][a-z0-9_]*$/` regex every other named-symbol
@@ -1707,11 +1723,22 @@ module Cambium
       # `grounded_in :__proto__` is rejected at compile time instead of
       # producing a brittle IR.
       GROUNDING_SOURCE_REGEX = /\A[a-z][a-z0-9_]*\z/
-      def grounded_in(source, from: nil, require_citations: false)
+      GROUNDING_VERIFY_VALUES = %w[field_values].freeze
+      def grounded_in(source, from: nil, require_citations: false, verify: nil)
         source_str = source.to_s
         unless source_str.match?(GROUNDING_SOURCE_REGEX)
           raise ArgumentError,
                 "grounded_in source must match /^[a-z][a-z0-9_]*$/, got: #{source.inspect}"
+        end
+
+        # RED-392: `verify:` accepts symbols (or nil) naming value-level
+        # verification strategies. `:field_values` is the only supported
+        # strategy in v1; future strategies (e.g., `:schema_types`,
+        # `:semantic_similarity`) extend GROUNDING_VERIFY_VALUES.
+        unless verify.nil? || GROUNDING_VERIFY_VALUES.include?(verify.to_s)
+          raise ArgumentError,
+                "grounded_in #{source.inspect} verify: must be nil or one of " \
+                "#{GROUNDING_VERIFY_VALUES.map { |v| ":#{v}" }.join(', ')}, got #{verify.inspect}"
         end
 
         # RED-383 minimum-cut: `from:` accepts a file path; compile.rb
@@ -1734,6 +1761,7 @@ module Cambium
           'require_citations' => require_citations
         }
         entry['from'] = from unless from.nil?
+        entry['verify'] = verify.to_s unless verify.nil?
         _cambium_defaults[:grounding] = entry
       end
 

@@ -21,7 +21,21 @@ import * as sqliteVec from 'sqlite-vec';
 
 const FIXTURE_ARG = 'packages/cambium/examples/fixtures/incident.txt';
 
-describe('semantic memory runtime — spawn cambium run with --mock', () => {
+// RED-378/RED-408: sqlite-vec ships no musl prebuilt → its native extension
+// can't load on Alpine. Skip rather than hard-fail (optional native dep) so the
+// Ruby-3.x docker gate stays green; on glibc/macOS it loads and the test runs.
+const VEC_OK = (() => {
+  try {
+    const db = new Database(':memory:');
+    (sqliteVec as any).load(db);
+    db.close();
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+describe.skipIf(!VEC_OK)('semantic memory runtime — spawn cambium run with --mock', () => {
   const sessionIds: string[] = [];
 
   afterEach(() => {

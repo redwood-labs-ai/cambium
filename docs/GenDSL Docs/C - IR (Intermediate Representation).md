@@ -41,7 +41,7 @@ The CLI and `cambium serve` dispatch by `ir.kind`: pipeline IRs route through `r
 | `policies.log_profiles` | (derived) | `Array<string>` — profile names referenced by any `log :name` call. Metadata-only; runner doesn't branch on it. |
 | `policies.schedules` | `cron :daily, at: "9:00"` | `Array<{id, expression, method, tz, named?, at?}>` — scheduled-fire declarations (RED-273 / RED-305). Method defaults are resolved at compile time. IDs are stable `<snake_gen>.<method>.<slug>` shape and match `--fired-by schedule:<id>` at runtime. |
 | `policies.constraints` | `constrain :budget, …` | legacy/ergonomic container for budget, tone, etc. |
-| `policies.grounding` | `grounded_in :document` | citation enforcement config |
+| `policies.grounding` | `grounded_in :document` | citation enforcement config: `{ source, require_citations, from?, verify? }`. `verify` (optional string, RED-392) names the value-level verification strategy run after generation — `"field_values"` is the only supported value in v1; cross-checks each output field value against the grounding document. |
 | `policies.security` | `security network: {...}` or `security :pack` | per-slot mixing; `_packs` metadata for trace (RED-214) |
 | `policies.budget` | `budget per_run: {...}` | same per-slot mixing as security |
 | `policies.memory[]` | `memory :name, …` (one per decl) | pool-owned slots already merged in at compile (RED-215). Optional per-decl fields on `:semantic` strategy: `query` (literal string anchor) or `arg_field` (pluck a top-level field from JSON `ctx.input`) — RED-238, mutually exclusive. |

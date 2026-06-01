@@ -33,6 +33,7 @@ corrects :b, max_attempts: 3             # :a keeps 1, :b gets 3
 - `dates` — normalizes date strings to ISO 8601.
 - `currency` — normalizes currency amounts.
 - `citations` — verifies `grounded_in` quote fidelity (auto-registered when `grounded_in` is declared; also usable directly).
+- `field_values` — verification-only (RED-392). Cross-checks each structured output field value against the grounding document text (normalized substring match). Auto-invoked when `grounded_in verify: :field_values` is declared; also usable directly via `corrects :field_values`, but only does useful work when a grounding document is in context (otherwise every field fails). See [[P - grounded_in]] for the matcher's limitations.
 
 ## Custom app correctors (RED-275)
 
@@ -74,7 +75,7 @@ await runGen({
 
 Precedence (low → high, later wins on name collision):
 
-1. Framework `builtinCorrectors` (`math`, `dates`, `currency`, `citations`)
+1. Framework `builtinCorrectors` (`math`, `dates`, `currency`, `citations`, `field_values`)
 2. Legacy `registerAppCorrectors` map (deprecated; kept for back-compat)
 3. `opts.correctors` — the caller's map
 4. Engine-sibling correctors auto-discovered under `<engineDir>/*.corrector.ts`

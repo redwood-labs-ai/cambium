@@ -34,18 +34,19 @@ Roughly, the runner does this per IR:
 
 ## Model providers
 
-Agentic mode (`mode :agentic` + tool-use loop) supports:
+Since RED-393, every model call resolves the model-id prefix through a per-run **`ProviderRegistry`** (`packages/cambium-runner/src/providers/`). `runGen` builds it after the tool/action registries: framework built-ins first, then app-supplied `app/providers/*.ts` (filename = prefix), last-write-wins so an app provider shadows a built-in. The two dispatchers — `makeGenerateText` / `makeGenerateWithTools` in `runner.ts` — close over that registry and own the cross-cutting gates (native-document support, `--mock` short-circuit, fetch-failure hinting, inline tool-call markup parsing); a provider implements ONLY build-body → fetch → normalize.
 
-- **oMLX** (OpenAI-compatible). Config: `CAMBIUM_OMLX_BASEURL` (default `http://localhost:8080`), optional `CAMBIUM_OMLX_API_KEY`. Model id form: `"omlx:<name>"`.
-- **Ollama** (RED-208). Config: `CAMBIUM_OLLAMA_BASEURL` (default `http://localhost:11434`), no API key. Model id form: `"ollama:<name>"` or a bare name (Ollama is the default when no `provider:` prefix is given).
+Built-in providers (all support agentic `mode :agentic` and single-turn `generate`):
 
-Single-turn `generate` (no tool-use) also supports both providers via the same model-id convention.
+- **oMLX** (OpenAI-compatible). Config: `CAMBIUM_OMLX_BASEURL` (default `http://localhost:8080`), optional `CAMBIUM_OMLX_API_KEY`. Model id form: `"omlx:<name>"`. Built via the `openaiCompatible` factory.
+- **Ollama** (RED-208). Config: `CAMBIUM_OLLAMA_BASEURL` (default `http://localhost:11434`), no API key. Model id form: `"ollama:<name>"` or a bare name (Ollama is the default when no `provider:` prefix is given). Bespoke `defineProvider` (its API isn't OpenAI-shaped).
+- **Anthropic** (RED-321/323). Config: `ANTHROPIC_API_KEY` (or `CAMBIUM_ANTHROPIC_API_KEY`), optional `CAMBIUM_ANTHROPIC_BASEURL`. Model id form: `"anthropic:<name>"`. Built via `anthropicCompatible`; native document input + prompt caching.
 
-Request/response shaping for Ollama lives in `packages/cambium-runner/src/providers/ollama.ts` — small testable helpers that normalize Ollama's `/api/chat` shape to the canonical `{ message: { content, tool_calls }, usage }` the dispatch site expects (synthesizes missing tool-call IDs, stringifies object-shaped `function.arguments`).
+Custom providers are added without forking the runner — see [[N - Model Identifiers]] § Custom providers. Request/response shaping for the built-ins lives in `packages/cambium-runner/src/providers/` (e.g. `ollama.ts`, `anthropic.ts`) as small testable helpers that normalize each backend to the canonical `{ message: { content, tool_calls }, usage }` shape.
 
 ## The runner's own network calls
 
-The runner's calls to the model backend (oMLX or Ollama) — both `generateText` and `embedText` — use `globalThis.fetch` directly. This is intentional — the gen's `security` block is about *tool* egress, not the runner's backend call. If the gen's security policy could block the model API itself, the gen couldn't run at all.
+The runner's calls to the model backend (oMLX, Ollama, Anthropic, or any app-supplied provider) — both the provider `generateText`/`generateWithTools` and `embedText` — use `globalThis.fetch` directly. This is intentional — the gen's `security` block is about *tool* egress, not the runner's backend call. If the gen's security policy could block the model API itself, the gen couldn't run at all. App providers fetch operator-supplied base URLs on the same trust boundary; the Tier-1 factories run `validateProviderBaseUrl` (private/metadata-range guard) and Tier-2 authors are responsible for calling it themselves.
 
 Tool calls remain fully guarded: every tool dispatch builds a `ToolContext` with a policy-bound `ctx.fetch`, and the SSRF guard (DNS-resolve-all, IP pinning) runs at fetch time. See [[S - Tool Sandboxing (RED-137)]].
 

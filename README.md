@@ -43,6 +43,7 @@ npm install @redwood-labs/cambium-runner
   - **oMLX** (OpenAI-compatible): set `CAMBIUM_OMLX_BASEURL` (default `http://localhost:8080`), optional `CAMBIUM_OMLX_API_KEY`
   - **Ollama**: set `CAMBIUM_OLLAMA_BASEURL` (default `http://localhost:11434`)
   - **Anthropic**: set `ANTHROPIC_API_KEY` (or `CAMBIUM_ANTHROPIC_API_KEY`); optional `CAMBIUM_ANTHROPIC_BASEURL`. Use model ids like `"anthropic:claude-sonnet-4-6"`. Prompt caching is applied automatically to system prompts + tool definitions.
+  - **Custom** (RED-393): point at any other endpoint — Bedrock, Azure OpenAI, OpenRouter, a self-hosted gateway — by dropping a file at `app/providers/<name>.ts` that `export default`s a provider (the filename becomes the model-id prefix). Use the `openaiCompatible` / `anthropicCompatible` factories for the common base-URL+auth swap, or `defineProvider` for full control. Zero new dependencies. See [`N - Model Identifiers`](docs/GenDSL%20Docs/N%20-%20Model%20Identifiers.md) § Custom providers.
 
 Run `cambium doctor` to verify your environment.
 
@@ -69,7 +70,7 @@ CAMBIUM_OMLX_API_KEY=<key> cambium run \
   --arg fixture.txt
 
 # 5. Inspect the trace
-cat runs/<run_id>/trace.json | jq .
+cambium inspect            # local browser viewer over runs/ (or: cat runs/<run_id>/trace.json | jq .)
 ```
 
 ## Key features
@@ -81,7 +82,9 @@ cat runs/<run_id>/trace.json | jq .
 - **Agentic multi-turn** — Models that need mid-generation tool calls get a full conversation loop.
 - **Memory** — `memory :conversation, strategy: :sliding_window` (or `:log`, `:semantic`) persists across runs; SQLite-backed, vec-search capable, optional deps.
 - **Full tracing** — Every run produces a `trace.json` with every step, token counts, tool calls, and timing.
-- **Correctors** — Deterministic post-processing (math, dates, currency, citations) with automatic repair loops.
+- **Replay** — `cambium replay <run-id>` re-runs the validate / repair / correct / grounding tail against a prior run's candidate output, skipping the expensive Generate. Iterate on correctors and grounding without re-paying for model calls; `--edit` to hand-fix the candidate first. For **pipelines**, it resumes from the first incomplete operator (`--from-op <id>` to override), reusing outputs already recorded rather than re-running succeeded steps. The trace is the savepoint.
+- **Trace viewer** — `cambium inspect` starts a local browser UI over `runs/` — an SVG execution graph with nested pipeline lanes (step / fan_out / branch_on), status colors, per-node meta/output, and live SSE refresh when a new run lands. Read-only, localhost-only, zero dependencies. The trace is the data structure; the viewer is just a lens on it.
+- **Correctors** — Deterministic post-processing (math, dates, currency, citations, field_values) with automatic repair loops. `grounded_in verify: :field_values` cross-checks extracted output values against the source document.
 - **Signals + triggers** — Extract data from outputs and fire deterministic actions.
 - **Budget tracking** — Token limits, tool call caps, time limits. Exceeded budgets fail safely.
 - **Scheduled runs** — `cron :daily, at: "9:00"` declares the schedule; `cambium schedule compile` emits deploy manifests for your platform (k8s CronJob, crontab, systemd, GitHub Actions, Render Cron).

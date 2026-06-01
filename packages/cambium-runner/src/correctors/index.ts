@@ -3,6 +3,7 @@ import { math } from './math.js';
 import { dates } from './dates.js';
 import { currency } from './currency.js';
 import { citations } from './citations.js';
+import { fieldValues } from './field_values.js';
 
 export type { CorrectorFn, CorrectorResult, CorrectorIssue } from './types.js';
 
@@ -17,7 +18,7 @@ export type { CorrectorFn, CorrectorResult, CorrectorIssue } from './types.js';
 // `runCorrectorPipeline` now takes the correctors map as a parameter
 // rather than reading a module-global.
 export const builtinCorrectors: Readonly<Record<string, CorrectorFn>> = Object.freeze({
-  math, dates, currency, citations,
+  math, dates, currency, citations, field_values: fieldValues,
 });
 
 // RED-275 back-compat: `registerAppCorrectors` was the only way to
