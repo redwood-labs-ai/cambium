@@ -4,6 +4,14 @@ All notable changes to Cambium are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Cambium adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] — 2026-06-07
+
+Patch release. Fixes `README.md` missing from both published tarballs — both packages declare an explicit `files` allowlist, which overrides npm's default README-always-included behavior. `README.md` added to the `files` array in each `package.json`. No code changes.
+
+### Changed
+
+- **`@redwood-labs/cambium`** and **`@redwood-labs/cambium-runner`** bump to `0.7.1`. `README.md` added to `files` in both `package.json`s.
+
 ## [0.7.0] — 2026-06-07
 
 Minor release. Headliners: **grounding verification is end-to-end**, **the security surface is hardened**, and **the inspect viewer grows a replay shortcut**.
