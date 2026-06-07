@@ -58,11 +58,12 @@ describe('read_file — filesystem roots enforcement', () => {
     expect(out.content).toBe('secret');
   });
 
-  it('allows access when roots list is empty (policy present but unconstrained)', () => {
-    // Empty roots = no positive constraint declared; treat as unconstrained.
+  it('denies access when roots list is empty (policy present, fail-closed — AUD-002)', () => {
+    // Empty roots = "no permitted location" → deny all. Mirrors the network
+    // guard's fail-closed stance: an empty allowlist is deny-all.
     const ctx = makeCtxWithRoots();
-    const out = execute({ path: join(other, 'secret.txt') }, ctx);
-    expect(out.content).toBe('secret');
+    expect(() => execute({ path: join(other, 'secret.txt') }, ctx))
+      .toThrow(/filesystem policy declares no permitted roots/);
   });
 
   it('accepts a relative root by resolving it', () => {

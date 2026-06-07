@@ -242,6 +242,35 @@ describe('WASM substrate — escape tests (RED-250)', () => {
     expect(result.stdout).toContain('benign-ok:3');
   });
 
+  // AUD-003 regression: execute() must never block the host event loop.
+  // The pre-fix substrate ran evalCode synchronously on the main thread,
+  // so a guest busy-loop froze every concurrent request for the full
+  // timeout. The fix moved evaluation to a worker_thread; this canary
+  // pins the event-loop-free property the status-only escape tests
+  // above can't see — a regression back to synchronous evalCode makes
+  // the canary fire only after the 1 s deadline elapses.
+  it('AUD-003: host event loop stays responsive during a guest busy-loop', async () => {
+    let canaryFiredAt = -1;
+    const started = Date.now();
+    const canary = new Promise<void>(resolve => setTimeout(() => {
+      canaryFiredAt = Date.now() - started;
+      resolve();
+    }, 300));
+    const result = await sub.execute({
+      ...DEFAULT_OPTS,
+      language: 'js',
+      code: 'while (true) { Math.sqrt(Math.random()); }',
+      timeout: 1,
+    });
+    await canary;
+    expect(result.status).toBe('timeout');
+    // Blocked-loop behavior: the timer can't fire until execute()'s
+    // ~1000 ms deadline frees the loop. 900 ms keeps CI-jitter headroom
+    // while staying strictly below the deadline.
+    expect(canaryFiredAt).toBeGreaterThanOrEqual(0);
+    expect(canaryFiredAt).toBeLessThan(900);
+  });
+
   for (const category of CATEGORIES) {
     it(category.name, async () => {
       const result = await runCategory(sub, category);

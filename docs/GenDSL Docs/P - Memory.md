@@ -168,6 +168,8 @@ The pool is authoritative on `strategy`, `embed`, and `keyed_by` — those are t
 
 **No inline-on-first-use.** A gen referencing an undeclared pool is a compile-time error that names the missing pool and lists where the compiler looked. This keeps pool definitions discoverable and avoids ordering-dependent shape drift.
 
+**Pool names are regex-guarded.** `MemoryPool.load` requires `/\A[a-z][a-z0-9_]*\z/` before the name reaches `File.join(dir, "#{name}.pool.rb")` — the identical path-traversal guard as RED-214 pack names, for the identical reason (a symbol like `:"../foo"` would otherwise escape `app/memory_pools/`; `File.join` normalises `..` silently). Pool files are `instance_eval`'d inside `MemoryPoolBuilder` — same model as `PolicyPackBuilder`. New Ruby eval contexts loaded by symbol must copy both guards (the regex + `CompileError` wrapping around `ScriptError`/`StandardError`).
+
 **Out of scope for v1 pool files** (parsed in a later phase or never):
 - `backend` — phase 2 implicitly uses sqlite-vec for every pool; add the directive when a second backend exists.
 - `retain` — governance (TTL/caps) lands in the separate follow-up ticket.
@@ -284,11 +286,19 @@ Rules:
 
 A bucket's first semantic write records the model id + vector dim into the `meta` table. Later runs validate the pin matches; a different model or dim raises a clear `CompileError` ("bucket was initialized with embed_model X — cannot now use Y"). Model changes are destructive: delete the bucket (or use a new memory `name`) to start fresh. This is a correctness invariant, not a best-effort surface — a silent accept would scramble cosine-distance semantics across mixed-model vectors.
 
+### sqlite-vec extension loads are per-connection
+
+Every `SqliteMemoryBackend` instance that touches `entries_vec` must call `initSemantic` first. The module handle is cached via `loadSqliteVec()`, but the actual `sqliteVec.load(db)` runs once per `Database` instance, tracked by `_vecLoaded`. Meta pinning (embed_model, embed_dim) is one-time per bucket; the extension load is every-connection. This caught us during phase 5 integration testing — a second run opened the bucket, saw meta was already set, skipped the load, and then crashed on `SELECT ... FROM entries_vec`.
+
 ### The `remember` method — Cambium's `ActiveJob#perform`
 
 Every retro memory agent has `mode :retro` + `reads_trace_of :primary` + `returns MemoryWrites`, and the framework always invokes it via a method called `remember(ctx)`. This is deliberate convention-over-configuration: the agent is a specific *kind* of GenModel (like ActiveJob is a specific kind of Ruby class), and the entry method is standardized so the framework knows where to call. The agent's `ctx` is a JSON string with `primary_input`, `primary_output`, and `primary_trace`.
 
 Don't make the method name configurable. The standardization is the feature.
+
+### `mode :retro` suppresses memory machinery
+
+A retro agent never triggers its own memory reads/writes — the guard in `runner.ts` (`const memoryDecls = isRetroMode ? [] : ...`) empties the decl list for `:retro` gens. Both because it doesn't make sense semantically (the retro agent IS the write path) and because a retro agent accidentally declaring `write_memory_via` would otherwise recurse.
 
 ### Best-effort writes — the graceful-degradation invariant
 

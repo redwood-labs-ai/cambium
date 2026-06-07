@@ -17,6 +17,8 @@
 // for legitimate internal-VLAN proxy setups; the validator emits a
 // one-time stderr warning in that case so the choice is auditable.
 
+import { extractIPv4MappedV6 } from '../tools/ip-util.js';
+
 const _validatedUrls = new Set<string>();
 const _warnedEscapeHatches = new Set<string>();
 
@@ -88,27 +90,6 @@ function isPrivateIPv6(host: string): boolean {
   const v4Mapped = extractIPv4MappedV6(trimmed);
   if (v4Mapped !== null && isPrivateIPv4(v4Mapped)) return true;
   return false;
-}
-
-// Extract the embedded IPv4 from an IPv4-mapped IPv6 address. Accepts
-// both the dotted form (::ffff:192.168.1.1) and the hex-pair form that
-// Node's URL constructor produces (::ffff:c0a8:101). Returns null if
-// the input isn't an IPv4-mapped form.
-function extractIPv4MappedV6(s: string): string | null {
-  const lower = s.toLowerCase();
-  // Dotted form: ::ffff:a.b.c.d
-  const dottedMatch = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (dottedMatch) return dottedMatch[1];
-  // Hex-pair form: ::ffff:HHHH:HHHH (the two 16-bit groups encode the four IPv4 octets)
-  const hexMatch = lower.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-  if (hexMatch) {
-    const hi = parseInt(hexMatch[1], 16);
-    const lo = parseInt(hexMatch[2], 16);
-    if (Number.isFinite(hi) && Number.isFinite(lo)) {
-      return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
-    }
-  }
-  return null;
 }
 
 function isLocalhostHost(host: string): boolean {

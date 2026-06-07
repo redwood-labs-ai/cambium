@@ -145,10 +145,23 @@ function buildExecPolicy(
     }
     out.runtime = exec.runtime as ExecPolicy['runtime'];
   }
-  if (typeof exec.cpu === 'number') out.cpu = exec.cpu;
-  if (typeof exec.memory === 'number') out.memory = exec.memory;
-  if (typeof exec.timeout === 'number') out.timeout = exec.timeout;
-  if (typeof exec.max_output_bytes === 'number') out.maxOutputBytes = exec.max_output_bytes;
+  // Re-enforce the Ruby-side bounds on numeric exec fields so a hand-crafted
+  // or post-processed IR that bypasses the compile step can't smuggle out-of-
+  // range values (AUD-004). Ruby bounds: cpu 0.1–4.0, memory 16–4096 MB,
+  // timeout 1–600 s. max_output_bytes just needs to be a positive integer;
+  // we cap at 100 MB to bound temp-file / memory exposure.
+  if (typeof exec.cpu === 'number') {
+    out.cpu = Math.min(Math.max(exec.cpu, 0.1), 4.0);
+  }
+  if (typeof exec.memory === 'number') {
+    out.memory = Math.min(Math.max(Math.round(exec.memory), 16), 4096);
+  }
+  if (typeof exec.timeout === 'number') {
+    out.timeout = Math.min(Math.max(Math.round(exec.timeout), 1), 600);
+  }
+  if (typeof exec.max_output_bytes === 'number') {
+    out.maxOutputBytes = Math.min(Math.max(Math.round(exec.max_output_bytes), 1), 100_000_000);
+  }
 
   if (exec.network !== undefined) {
     out.network = resolveScopedNetwork(exec.network, outerNetwork);
@@ -259,6 +272,16 @@ export function validateToolPermissions(
       tool: def.name,
       permission: 'filesystem',
       message: `Tool "${def.name}" requires filesystem access but the gen's security policy has no filesystem: block`,
+    });
+  } else if (perms.filesystem && policy.filesystem!.roots.length === 0) {
+    // Empty roots means deny-all at runtime (AUD-002 fail-closed in
+    // read_file.tool.ts) — a filesystem tool under that policy can never
+    // succeed, so surface the misconfiguration at boot rather than on
+    // the first call. The runtime deny remains the load-bearing gate.
+    violations.push({
+      tool: def.name,
+      permission: 'filesystem',
+      message: `Tool "${def.name}" requires filesystem access but the gen's filesystem policy declares no roots (deny-all). Add at least one root to security filesystem: { roots: [...] }`,
     });
   }
 

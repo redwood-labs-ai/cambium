@@ -22,6 +22,7 @@ import { promisify } from 'node:util';
 import { Agent as UndiciAgent, fetch as undiciFetch, buildConnector } from 'undici';
 import type { NetworkPolicy } from './permissions.js';
 import { hostMatchesList } from './permissions.js';
+import { extractIPv4MappedV6 } from './ip-util.js';
 
 const dnsLookup = promisify(dnsLookupCb);
 
@@ -149,6 +150,16 @@ export function ipInCidr(ip: string, cidr: string, prefix: number): boolean {
 
 /** True if `ip` lies in any default-private range. */
 export function isPrivateIp(ip: string): boolean {
+  // IPv4-mapped IPv6 (::ffff:192.168.1.1 or ::ffff:c0a8:101): extract the
+  // embedded IPv4 and run the standard v4 private-range checks. Without this
+  // step, every ::ffff:<private-v4> was judged "not private" because the v6
+  // CIDR table (::1/128, fe80::/10, fc00::/7, ::/128) doesn't cover the
+  // ::ffff:0:0/96 block — an SSRF bypass confirmed in the 2026-06-06 audit
+  // (AUD-001). The fix lives here rather than in PRIVATE_CIDRS because a
+  // blanket ::ffff:0:0/96 block would wrongly deny legit ::ffff:8.8.8.8.
+  const embedded = extractIPv4MappedV6(ip);
+  if (embedded !== null) return isPrivateIp(embedded);
+
   for (const [cidr, prefix] of PRIVATE_CIDRS) {
     if (ipInCidr(ip, cidr, prefix)) return true;
   }
@@ -168,7 +179,17 @@ function isIpLiteral(host: string): boolean {
  * The async path handles full IP resolution.
  */
 export function checkHost(host: string, policy: NetworkPolicy): GuardDecision {
-  const h = host.toLowerCase();
+  // Canonicalize IPv4-mapped IPv6 ONCE at the entry so every check below
+  // (metadata, denylist, private-range, allowlist) sees the embedded v4
+  // form. The AUD-001 fix originally applied the canonicalizer at
+  // individual comparison sites and missed this function's metadata gate —
+  // under `block_private: false, block_metadata: true` the mapped IMDS
+  // literal ::ffff:a9fe:a9fe slipped past METADATA_HOSTNAMES (which holds
+  // the dotted-quad form only). Canonicalizing at the function boundary
+  // makes that class of omission structurally impossible for any check
+  // added here later (AUD-F1, 2026-06-06 fix-branch review).
+  const raw = host.toLowerCase();
+  const h = extractIPv4MappedV6(raw) ?? raw;
 
   // Metadata hostnames first — they're denied even if listed in allowlist.
   if (policy.block_metadata && METADATA_HOSTNAMES.has(h)) {
@@ -274,7 +295,10 @@ export async function checkAndResolve(
   }
   if (policy.block_metadata) {
     for (const a of addrs) {
-      if (a.address === '169.254.169.254') {
+      // Canonicalize IPv4-mapped IPv6 before checking so a hostile AAAA
+      // record returning ::ffff:169.254.169.254 doesn't bypass the check.
+      const canonical = extractIPv4MappedV6(a.address) ?? a.address;
+      if (METADATA_HOSTNAMES.has(canonical)) {
         return {
           allowed: false,
           host,

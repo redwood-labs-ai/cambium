@@ -480,6 +480,32 @@ export async function handleToolCall(
     );
   }
 
+  // AUD-007: validate the model-supplied input against the tool's declared
+  // inputSchema before dispatch. The validator is compiled at registration
+  // time (ToolRegistry.loadFromDir) so this is a fast synchronous call.
+  // Rejects malformed input before it reaches the handler — both for safety
+  // and to surface schema mismatches in the trace rather than as cryptic
+  // handler errors. testOverrideHandlers don't have registered validators
+  // (they bypass the .tool.json path), so absent validator = skip validation.
+  const inputValidator = registry.getInputValidator(toolName);
+  if (inputValidator) {
+    const valid = inputValidator(input);
+    if (!valid) {
+      // `!valid` alone is load-bearing — never gate the throw on
+      // `errors` being populated, or an AJV mode that returns false
+      // with empty errors would silently pass invalid input (AUD-F3).
+      const errors = inputValidator.errors ?? [];
+      throw new Error(
+        `Tool "${toolName}" input schema validation failed: ` +
+        (errors.length
+          ? errors.map((e: any) =>
+              `${e.instancePath || '/'} ${e.message ?? 'invalid'}`,
+            ).join('; ')
+          : 'input does not match the tool inputSchema'),
+      );
+    }
+  }
+
   // Build the ToolContext (policy-bound fetch for network tools +
   // exec policy for execute_code-class tools that dispatch through
   // the substrate registry, RED-248 + emitStep for tools that push

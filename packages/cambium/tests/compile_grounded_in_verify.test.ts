@@ -99,4 +99,73 @@ end
     expect(ir).toBeNull();
     expect(stderr).toMatch(/verify: must be nil or one of :field_values/);
   });
+
+  // RED-399: `fields:` allowlist (AUD-003 — the Ruby validation + IR
+  // emission were previously untested at the compile layer).
+  it('bakes fields: into policies.grounding.fields as strings', () => {
+    writeFileSync(join(scratch, 'app/gens/report.txt'), 'body');
+    const gen = writeGen(`
+class Grounded < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  grounded_in :report, from: "report.txt", verify: :field_values, fields: [:vendor, :total]
+  def analyze(input); generate "go" do; with context: input; returns AnalysisReport; end; end
+end
+`);
+    const { ir, stderr } = compile(gen, 'analyze');
+    expect(stderr).toBe('');
+    expect(ir.policies.grounding.fields).toEqual(['vendor', 'total']);
+  });
+
+  it('rejects a non-symbol fields: element at compile time', () => {
+    const gen = writeGen(`
+class Grounded < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  grounded_in :doc, verify: :field_values, fields: ["vendor"]
+  def analyze(input); generate "go" do; with context: input; returns AnalysisReport; end; end
+end
+`);
+    const arg = join(scratch, 'arg.txt');
+    writeFileSync(arg, 'doc body');
+    const { ir, stderr } = compile(gen, 'analyze', ['--arg', arg]);
+    expect(ir).toBeNull();
+    expect(stderr).toMatch(/fields: must be an Array of Symbols/);
+  });
+
+  it('rejects an empty fields: array at compile time', () => {
+    const gen = writeGen(`
+class Grounded < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  grounded_in :doc, verify: :field_values, fields: []
+  def analyze(input); generate "go" do; with context: input; returns AnalysisReport; end; end
+end
+`);
+    const arg = join(scratch, 'arg.txt');
+    writeFileSync(arg, 'doc body');
+    const { ir, stderr } = compile(gen, 'analyze', ['--arg', arg]);
+    expect(ir).toBeNull();
+    expect(stderr).toMatch(/fields: must be non-empty when provided/);
+  });
+
+  it('rejects fields: without verify: :field_values at compile time', () => {
+    const gen = writeGen(`
+class Grounded < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  grounded_in :doc, fields: [:vendor]
+  def analyze(input); generate "go" do; with context: input; returns AnalysisReport; end; end
+end
+`);
+    const arg = join(scratch, 'arg.txt');
+    writeFileSync(arg, 'doc body');
+    const { ir, stderr } = compile(gen, 'analyze', ['--arg', arg]);
+    expect(ir).toBeNull();
+    expect(stderr).toMatch(/fields: is only valid with verify: :field_values/);
+  });
 });

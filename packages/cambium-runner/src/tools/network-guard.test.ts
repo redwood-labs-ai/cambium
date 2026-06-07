@@ -65,6 +65,87 @@ describe('isPrivateIp', () => {
     expect(isPrivateIp('1.1.1.1')).toBe(false);
     expect(isPrivateIp('2606:4700::1111')).toBe(false);
   });
+  // AUD-001 regression: IPv4-mapped IPv6 forms of private addresses were not
+  // detected before the 2026-06-06 fix, allowing SSRF via ::ffff:<private-v4>.
+  it('AUD-001: flags IPv4-mapped IPv6 loopback (::ffff:127.0.0.1)', () => {
+    expect(isPrivateIp('::ffff:127.0.0.1')).toBe(true);       // dotted form
+    expect(isPrivateIp('::ffff:7f00:1')).toBe(true);           // hex-pair form
+  });
+  it('AUD-001: flags IPv4-mapped IPv6 IMDS (::ffff:169.254.169.254)', () => {
+    expect(isPrivateIp('::ffff:169.254.169.254')).toBe(true);  // dotted form
+    expect(isPrivateIp('::ffff:a9fe:a9fe')).toBe(true);        // hex-pair form (Node URL canonical)
+  });
+  it('AUD-001: flags IPv4-mapped IPv6 RFC1918 (::ffff:192.168.1.1)', () => {
+    expect(isPrivateIp('::ffff:192.168.1.1')).toBe(true);      // dotted form
+    expect(isPrivateIp('::ffff:c0a8:101')).toBe(true);         // hex-pair form
+  });
+  it('AUD-001: passes IPv4-mapped IPv6 public addresses', () => {
+    expect(isPrivateIp('::ffff:8.8.8.8')).toBe(false);         // public dotted form
+    expect(isPrivateIp('::ffff:808:808')).toBe(false);          // public hex-pair form
+  });
+});
+
+describe('AUD-001: checkHost blocks IPv4-mapped IPv6 SSRF literals', () => {
+  it('blocks ::ffff:169.254.169.254 (IMDS hex-pair form) with wildcard allowlist', () => {
+    // This was the exact bypass: Node URL parses http://[::ffff:a9fe:a9fe]/ →
+    // hostname = ::ffff:a9fe:a9fe, which isPrivateIp previously returned false for.
+    const d = checkHost('::ffff:a9fe:a9fe', policy());
+    expect(d.allowed).toBe(false);
+    if (!d.allowed) expect(['block_private', 'block_metadata']).toContain(d.reason);
+  });
+  it('blocks ::ffff:127.0.0.1 (loopback hex-pair form) with wildcard allowlist', () => {
+    const d = checkHost('::ffff:7f00:1', policy());
+    expect(d.allowed).toBe(false);
+    if (!d.allowed) expect(d.reason).toBe('block_private');
+  });
+  it('blocks ::ffff:192.168.1.1 (RFC1918 dotted form) with wildcard allowlist', () => {
+    const d = checkHost('::ffff:192.168.1.1', policy());
+    expect(d.allowed).toBe(false);
+    if (!d.allowed) expect(d.reason).toBe('block_private');
+  });
+  it('blocks http://[::ffff:a9fe:a9fe]/ URL via checkAndResolve (end-to-end SSRF path)', async () => {
+    // No DNS resolver needed: the host is an IP literal, so checkAndResolve
+    // delegates to checkHost and returns without DNS lookup.
+    const d = await checkAndResolve('http://[::ffff:a9fe:a9fe]/', policy());
+    expect(d.allowed).toBe(false);
+  });
+});
+
+describe('AUD-F1: metadata gate canonicalizes mapped literals when block_private is off', () => {
+  // The AUD-001 fix canonicalized isPrivateIp and the post-DNS metadata loop
+  // but missed checkHost's synchronous metadata gate. Under the default
+  // policy, block_private incidentally caught the mapped IMDS literal and
+  // masked the gap; with block_private:false (an internal agent that needs
+  // LAN reach but must stay off cloud metadata) the metadata gate is the
+  // ONLY line of defense — and it compared the raw mapped form against
+  // METADATA_HOSTNAMES, which holds only the dotted quad.
+  const noPriv = policy({ block_private: false, block_metadata: true });
+  it('blocks ::ffff:a9fe:a9fe (IMDS hex-pair form, Node URL canonical)', () => {
+    const d = checkHost('::ffff:a9fe:a9fe', noPriv);
+    expect(d.allowed).toBe(false);
+    if (!d.allowed) expect(d.reason).toBe('block_metadata');
+  });
+  it('blocks ::ffff:169.254.169.254 (IMDS dotted form)', () => {
+    const d = checkHost('::ffff:169.254.169.254', noPriv);
+    expect(d.allowed).toBe(false);
+    if (!d.allowed) expect(d.reason).toBe('block_metadata');
+  });
+  it('blocks http://[::ffff:169.254.169.254]/ URL via checkAndResolve (end-to-end SSRF path)', async () => {
+    const d = await checkAndResolve('http://[::ffff:169.254.169.254]/', noPriv);
+    expect(d.allowed).toBe(false);
+    if (!d.allowed) expect(d.reason).toBe('block_metadata');
+  });
+  it('still allows a mapped public literal under wildcard', () => {
+    const d = checkHost('::ffff:8.8.8.8', noPriv);
+    expect(d.allowed).toBe(true);
+  });
+  it('denylist entries match the canonical v4 form of a mapped literal', () => {
+    // Side benefit of entry-point canonicalization: an operator denylisting
+    // the dotted quad now also catches the mapped form.
+    const d = checkHost('::ffff:1.2.3.4', policy({ denylist: ['1.2.3.4'], block_private: false }));
+    expect(d.allowed).toBe(false);
+    if (!d.allowed) expect(d.reason).toBe('denylist');
+  });
 });
 
 describe('checkHost — IP literals', () => {

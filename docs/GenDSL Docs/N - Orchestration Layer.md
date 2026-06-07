@@ -2,8 +2,8 @@
 
 **Doc ID:** gen-dsl/note/orchestration-layer
 **Tracking ticket:** RED-374
-**Status:** DESIGN NOTE — load-bearing decisions locked through 2026-05-17 conversation. Not yet implemented.
-**Last edited:** 2026-05-17
+**Status:** SHIPPED — designed RED-374 (decisions locked 2026-05-17), implemented RED-381 (phases A–F), replay support RED-385 (release 0.6.0). Last verified against the implementation 2026-06-06.
+**Last edited:** 2026-06-06
 
 ---
 
@@ -284,6 +284,7 @@ Same pattern as named pools (RED-215):
   ```
 - The sub-gen can override **reader knobs** only (`size`, `top_k`). Strategy/embed/keyed_by/retain are pipeline-authoritative — attempting to set them on the sub-gen is a compile error, matching the pool-vs-decl stance.
 - The new scope keyword is `:pipeline_run`. Sits alongside `:session`, `:global`, `:schedule`, `:named_pool` as one of the closed set of scope vocabulary.
+- **Runtime plumbing — `injectPipelineMemorySlots` (`pipeline.ts`).** When the pipeline runtime invokes a sub-gen, it walks `subIr.policies.memory[]`, finds entries with `scope: 'pipeline_run'`, and merges the pipeline's matching slot config (strategy/embed/keyed_by/retain) into each entry BEFORE calling `runGen`. If a sub-gen declares `:pipeline_run` for a slot name the pipeline didn't declare, the helper throws with a pointer to the missing pipeline slot. Don't remove this guard — a silent missing-slot would produce a memory plan with no strategy and crash inside `planMemory`.
 
 ### Cross-run sharing
 

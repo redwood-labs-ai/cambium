@@ -174,6 +174,39 @@ describe('SqliteMemoryBackend.prune (RED-239)', () => {
   });
 });
 
+describe('SqliteMemoryBackend.initSemantic musl error (RED-408)', () => {
+  function freshBucket(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'cambium-musl-'));
+    return join(dir, 'musl.sqlite');
+  }
+
+  it('throws a musl-specific message when sqlite-vec fails on a musl host', async () => {
+    const path = freshBucket();
+    const b = await SqliteMemoryBackend.open(path);
+    await expect(
+      b.initSemantic('test-model', 384, {
+        loadVec: () => { throw new Error('cannot open shared object file'); },
+        detectMusl: () => true,
+      }),
+    ).rejects.toThrow(/musl/);
+    b.close();
+    rmSync(path, { force: true });
+  });
+
+  it('throws a platform-error message when sqlite-vec fails on a non-musl host', async () => {
+    const path = freshBucket();
+    const b = await SqliteMemoryBackend.open(path);
+    await expect(
+      b.initSemantic('test-model', 384, {
+        loadVec: () => { throw new Error('invalid ELF header'); },
+        detectMusl: () => false,
+      }),
+    ).rejects.toThrow(/platform\/environment issue/);
+    b.close();
+    rmSync(path, { force: true });
+  });
+});
+
 describe.skipIf(!VEC_OK)('SqliteMemoryBackend semantic (RED-215 phase 5)', () => {
   function freshBucket(): string {
     const dir = mkdtempSync(join(tmpdir(), 'cambium-sem-'));

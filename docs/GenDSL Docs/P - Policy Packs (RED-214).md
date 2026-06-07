@@ -147,6 +147,7 @@ surface `_pack` in their output.
 
 ## Compile-time errors
 
+- Pack name doesn't match `/\A[a-z][a-z0-9_]*\z/` — rejected before any file lookup. This is a path-traversal guard, not a style rule: a symbol like `:"../foo"` would otherwise interpolate into `File.join` and escape `app/policies/` (Ruby's `File.join` normalises `..` silently). The check lives in `PolicyPack.load`. Don't relax it.
 - Pack referenced by a gen but no `<name>.policy.rb` file exists:
   `Policy pack 'research_defaults' not found. Looked for: app/policies/research_defaults.policy.rb`
 - Pack file declares an unknown top-level directive (typo for `network`):
