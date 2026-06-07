@@ -1,6 +1,6 @@
 {
   "name": "@redwood-labs/cambium-runner",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "TS runtime for Cambium — executes compiled IR produced by the Cambium Ruby DSL.",
   "license": "MIT",
   "author": {
@@ -38,7 +38,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.mjs",
