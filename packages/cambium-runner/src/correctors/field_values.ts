@@ -36,7 +36,7 @@ export const fieldValues: CorrectorFn = (data, context): CorrectorResult => {
     allValid: true,
   };
 
-  walkAndCheck(output, '', document, issues, fieldResult);
+  walkAndCheck(output, '', document, issues, fieldResult, context.fields);
 
   return {
     corrected: false,
@@ -52,6 +52,7 @@ function walkAndCheck(
   document: string,
   issues: CorrectorIssue[],
   fieldResult: FieldValuesResult,
+  fields?: string[],
 ): void {
   if (obj == null) return;
 
@@ -72,6 +73,15 @@ function walkAndCheck(
   // Objects: skip citations fields (already verified by citations corrector),
   // then recurse into all other fields
   for (const key of Object.keys(obj)) {
+    // DEC-006: top-level fields allowlist — skip keys not named when fields is set.
+    if (fields && fields.length > 0 && basePath === '' && !fields.includes(key)) {
+      fieldResult.skipped.push({
+        path: key,
+        reason: 'not in fields allowlist',
+      });
+      continue;
+    }
+
     if (key === 'citations') {
       fieldResult.skipped.push({
         path: basePath ? `${basePath}.${key}` : key,
@@ -114,6 +124,16 @@ function checkLeafValue(
 
   // Convert to string for grounding check
   const valueStr = String(value);
+
+  // DEC-004: skip values too short for reliable substring match. Length is
+  // measured on the trimmed string so the guard agrees with the matcher,
+  // which normalizes/trims before comparing (AUD-004) — otherwise a padded
+  // "  x" would clear the guard yet match on a 1-char substring.
+  if (valueStr.trim().length < 3) {
+    fieldResult.skipped.push({ path, reason: 'too short for reliable match' });
+    return;
+  }
+
   fieldResult.totalChecked++;
 
   if (valueExistsInDocument(valueStr, document)) {

@@ -79,32 +79,42 @@ export function execute(
   // { roots: [...] }`, verify that the realpath of the target falls within at
   // least one declared root. realpathSync resolves symlinks so a link pointing
   // outside the root can't be used to escape it.
+  //
+  // Fail-closed on empty roots (AUD-002): a policy block with zero roots
+  // means "no permitted location" — deny everything. The previous code read
+  // `roots.length > 0` as the gate, so an empty-roots policy silently fell
+  // through to the BLOCKED_PATHS denylist only, allowing unrestricted read.
+  // This mirrors the network guard's stance: an empty allowlist → deny-all.
   if (ctx?.filesystemPolicy) {
     const { roots } = ctx.filesystemPolicy;
-    if (roots.length > 0) {
-      let real: string;
-      try {
-        real = realpathSync(absPath);
-      } catch {
-        throw new Error(`read_file: file not found — "${path}"`);
-      }
-      const permitted = roots.some((root) => {
-        const absRoot = isAbsolute(root) ? root : resolve(root);
-        // Resolve the root too so symlinked tmp dirs on macOS (/var →
-        // /private/var) compare against the same canonical form as `real`.
-        let realRoot: string;
-        try { realRoot = realpathSync(absRoot); } catch { return false; }
-        // Normalise the root with a trailing separator so /foo doesn't
-        // accidentally match /foobar.
-        const rootWithSep = realRoot.endsWith('/') ? realRoot : realRoot + '/';
-        return real === realRoot || real.startsWith(rootWithSep);
-      });
-      if (!permitted) {
-        throw new Error(
-          `read_file: access denied — "${path}" is outside the declared filesystem roots ` +
-          `(${roots.join(', ')})`,
-        );
-      }
+    if (roots.length === 0) {
+      throw new Error(
+        'read_file: access denied — filesystem policy declares no permitted roots (deny-all). ' +
+        'Add at least one root to security filesystem: { roots: [...] }.',
+      );
+    }
+    let real: string;
+    try {
+      real = realpathSync(absPath);
+    } catch {
+      throw new Error(`read_file: file not found — "${path}"`);
+    }
+    const permitted = roots.some((root) => {
+      const absRoot = isAbsolute(root) ? root : resolve(root);
+      // Resolve the root too so symlinked tmp dirs on macOS (/var →
+      // /private/var) compare against the same canonical form as `real`.
+      let realRoot: string;
+      try { realRoot = realpathSync(absRoot); } catch { return false; }
+      // Normalise the root with a trailing separator so /foo doesn't
+      // accidentally match /foobar.
+      const rootWithSep = realRoot.endsWith('/') ? realRoot : realRoot + '/';
+      return real === realRoot || real.startsWith(rootWithSep);
+    });
+    if (!permitted) {
+      throw new Error(
+        `read_file: access denied — "${path}" is outside the declared filesystem roots ` +
+        `(${roots.join(', ')})`,
+      );
     }
   }
 

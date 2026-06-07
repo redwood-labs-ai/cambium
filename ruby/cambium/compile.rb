@@ -206,6 +206,15 @@ if defs[:system]
   raw = defs[:system]
   if raw.is_a?(Symbol) || raw.is_a?(Cambium::ConstRef)
     name = raw.to_s.downcase
+    # Path-traversal guard: the name is interpolated into File.join directly.
+    # Every sibling symbol→path site uses this regex; system: was the lone
+    # omission — confirmed as an invariant gap in the 2026-06-06 audit (AUD-005).
+    unless name =~ /\A[a-z][a-z0-9_]*\z/
+      raise Cambium::CompileError,
+            "system: '#{raw}' is not a valid system prompt name. " \
+            "Must match /\\A[a-z][a-z0-9_]*\\z/ (lowercase letters, digits, underscores). " \
+            "Use a string literal for inline prompts."
+    end
     gen_dir = File.dirname(File.expand_path(file))
     candidates =
       if File.exist?(File.join(gen_dir, 'cambium.engine.json'))

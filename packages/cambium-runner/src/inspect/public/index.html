@@ -56,7 +56,7 @@ async function loadRuns() {
   for (const run of r.runs) {
     const d = document.createElement('div');
     d.className = 'run' + (run.id === selectedRun ? ' sel' : '');
-    d.innerHTML = `<div class="lbl"><span class="dot ${run.status}"></span>${esc(run.label)}<span class="badge">${run.kind}</span></div>`
+    d.innerHTML = `<div class="lbl"><span class="dot ${esc(run.status)}"></span>${esc(run.label)}<span class="badge">${esc(run.kind)}</span></div>`
       + `<div class="sub">${esc(run.id)}${run.parentRunId ? ' ↩ replay' : ''}</div>`;
     d.onclick = () => selectRun(run.id);
     el.appendChild(d);
@@ -123,7 +123,7 @@ function renderGraph(model) {
     const bits = [];
     if (n.ms != null) bits.push(n.ms + 'ms');
     if (n.tokens != null) bits.push(n.tokens + 'tok');
-    box.innerHTML = `<span class="dot ${n.status}"></span><span class="t">${esc(n.label)}</span>`
+    box.innerHTML = `<span class="dot ${esc(n.status)}"></span><span class="t">${esc(n.label)}</span>`
       + `<span class="m">${esc(n.stepType)}${bits.length ? ' · ' + bits.join(' ') : ''}</span>`;
     box.onclick = () => selectNode(n, box);
     box.dataset.id = n.id;
@@ -134,11 +134,54 @@ function renderGraph(model) {
 function selectNode(n, dom) {
   document.querySelectorAll('.nbox.sel').forEach((e) => e.classList.remove('sel'));
   dom.classList.add('sel');
-  const head = [`<h2>${esc(n.label)} <span class="badge">${n.status}</span></h2>`,
+  const head = [`<h2>${esc(n.label)} <span class="badge">${esc(n.status)}</span></h2>`,
     `<div class="muted">${esc(n.stepType)}${n.ms != null ? ' · ' + n.ms + 'ms' : ''}${n.tokens != null ? ' · ' + n.tokens + ' tok' : ''}</div>`];
   if (n.meta) head.push('<h2>meta</h2><pre>' + esc(JSON.stringify(n.meta, null, 2)) + '</pre>');
   if (n.output !== undefined) head.push('<h2>output</h2><pre>' + esc(JSON.stringify(n.output, null, 2)) + '</pre>');
+
+  // RED-406: replay-from-step button. Only for gen runs (not pipeline),
+  // and only for steps that recorded a resumable output value.
+  const canReplay = current?.model?.kind === 'gen' && n.output !== undefined;
+  if (canReplay && selectedRun) {
+    const cmd = `cambium replay ${selectedRun} --from-step ${n.stepType}`;
+    head.push(
+      '<h2>replay</h2>',
+      `<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">`,
+      `<button id="replaybtn" style="font:inherit;background:#238636;color:#fff;border:none;border-radius:6px;padding:4px 10px;cursor:pointer">Replay from this step</button>`,
+      `<span id="replaystatus" class="muted" style="font-size:11px"></span>`,
+      `</div>`,
+      `<pre id="replaycmd">${esc(cmd)}</pre>`,
+    );
+    // AUD-002: `--from-step` addresses by step TYPE and resolves to the LAST
+    // node of that type. When this type repeats (e.g. one `Correct` per
+    // corrector) and the selected node isn't the last, the command would
+    // replay from a different node than the one clicked — say so.
+    const sameType = (current.model.nodes || []).filter((x) => x.stepType === n.stepType);
+    if (sameType.length > 1 && sameType[sameType.length - 1].id !== n.id) {
+      head.push(
+        `<div class="muted" style="font-size:11px;color:var(--warn)">Note: <code>${esc(n.stepType)}</code> appears ${sameType.length}× in this run; <code>--from-step</code> resolves to the <b>last</b> one, not the node selected here.</div>`,
+      );
+    }
+  }
+
   $('paneldetail').innerHTML = head.join('');
+
+  // Wire the button after setting innerHTML.
+  const btn = $('replaybtn');
+  if (btn) {
+    btn.onclick = () => {
+      const cmdEl = btn.closest ? btn.closest('#panel').querySelector('#replaycmd') : null;
+      const cmdText = cmdEl ? cmdEl.textContent : null;
+      if (!cmdText) return;
+      navigator.clipboard?.writeText(cmdText.trim()).then(() => {
+        const s = $('replaystatus');
+        if (s) { s.textContent = 'copied!'; setTimeout(() => { s.textContent = ''; }, 1500); }
+      }).catch(() => {
+        const s = $('replaystatus');
+        if (s) s.textContent = '(copy manually)';
+      });
+    };
+  }
 }
 
 function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }

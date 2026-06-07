@@ -13,6 +13,7 @@ Enforce that outputs are grounded in a source document with verifiable citations
 - Missing citations (items without any citations) are flagged as errors.
 - The runtime auto-registers the `citations` corrector — the author does not need to also declare `corrects :citations`.
 - Grounding rules are injected into the system prompt, instructing the model to use exact verbatim quotes.
+- **Source name must match `/^[a-z][a-z0-9_]*$/` (RED-283).** `ruby/cambium/runtime.rb#grounded_in` raises `ArgumentError` on any source symbol that doesn't match — joining the regex-guard list that already covers pack names (RED-214), pool names (RED-215), memory keys + `CAMBIUM_SESSION_ID` (RED-215 phase 3), scaffolded tool names (RED-216), and app-corrector basenames (RED-275). The source flows into `ir.context[<source>]` (RED-276) and into the prompt's DOCUMENT: section; rejecting oddly-shaped keys at compile time prevents brittle IRs (`__proto__`, `"has space"`, `CamelCase`).
 
 ## Example
 ```ruby
@@ -122,22 +123,38 @@ This is for **structured-extraction** gens (invoice parsers, contract extraction
 
 **Limitations (v1, deterministic substring matcher).** This is an exact-presence check, not a semantic judge:
 - **Derived / normalized / enum values may false-fail.** A value the model correctly normalized (`vendor_name: "Acme Corporation"` when the doc says "ACME CORP.", or a currency code, or a computed total) isn't verbatim in the doc and will be flagged → a wasted (and possibly output-degrading) repair. If your schema has such fields, prefer not enabling `verify:` on the whole output yet.
-- **Very short values may false-pass.** A short number or code (`5`, `2024`, a 2-char status) can substring-match incidentally; treat field-value grounding as a strong signal, not a proof, for short leaves.
-- It checks **all** leaves — there's no per-field allowlist yet. A `fields:`-scoped form and a semantic/LLM-judge strategy (`verify: :semantic_similarity`) are the natural follow-ups; the kwarg's allowlist (`GROUNDING_VERIFY_VALUES`) is built to extend.
+- **Very short values are skipped.** Values with fewer than 3 characters after trimming surrounding whitespace (`"5"`, `"US"`, `"  x"`) are skipped automatically — they appear as incidental substrings in nearly any document and would produce near-100% false-positives.
+- Use `fields:` to scope to specific output fields when only a subset is safe to cross-check (see below). A semantic/LLM-judge strategy (`verify: :semantic_similarity`) is the natural follow-up; deferred post-0.7.0.
 
 An empty grounding document is caught earlier by the `GroundingMissing` pre-flight (it fires for any `grounded_in` source), so `verify:` never runs against an empty doc on a real run.
 
-### `verify:` IR output
+### `fields:` — scope the check to specific top-level keys
+
+When only a subset of output fields is safe to cross-check (e.g., some fields are derived or normalized and would false-fail), use `fields:` to name them explicitly:
+
+```ruby
+grounded_in :invoice, verify: :field_values, fields: [:vendor, :total]
+```
+
+This skips all top-level output keys not in the list (they appear in the trace as `skipped` with reason `"not in fields allowlist"`). Nested keys inside an allowed top-level key are always checked.
+
+- `fields:` accepts an Array of Symbols. A non-symbol element, an empty array, or using `fields:` without `verify: :field_values` raises `ArgumentError` at compile time.
+- Top-level names only. Dot-notation paths (`fields: ["billing.vendor"]`) are not supported in v1.
+
+### `verify:` and `fields:` IR output
 
 ```json
 "policies": {
   "grounding": {
     "source": "invoice",
     "require_citations": false,
-    "verify": "field_values"
+    "verify": "field_values",
+    "fields": ["vendor", "total"]
   }
 }
 ```
+
+When `fields:` is omitted, the `fields` key is absent from the IR and all leaves are checked.
 
 Invalid strategies are rejected at compile time: `grounded_in :doc, verify: :bogus` raises a `CompileError` ("verify: must be nil or one of :field_values").
 

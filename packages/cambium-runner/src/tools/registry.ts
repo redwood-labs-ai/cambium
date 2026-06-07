@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { ToolPermissions } from './permissions.js';
 import type { ToolContext } from './tool-context.js';
+import type { ValidateFunction } from 'ajv';
 
 export type ToolDefinition = {
   name: string;
@@ -32,8 +33,19 @@ export type ToolHandler = (input: any, ctx?: ToolContext) => any;
 export class ToolRegistry {
   private defs = new Map<string, ToolDefinition>();
   private handlers = new Map<string, ToolHandler>();
+  private inputValidators = new Map<string, ValidateFunction>();
+  private _ajv: any = null;
 
   async loadFromDir(dirPath: string): Promise<void> {
+    // AUD-007: compile input validators at registration. Lazy-init AJV on the
+    // first loadFromDir call (dynamic import keeps the module load cost out of
+    // the cold path for callers that never load tools).
+    if (!this._ajv) {
+      const AjvMod = await import('ajv');
+      const Ajv = AjvMod.default ?? AjvMod;
+      this._ajv = new Ajv({ allErrors: true, strict: false });
+    }
+
     let entries: string[];
     try {
       entries = readdirSync(dirPath);
@@ -49,6 +61,17 @@ export class ToolRegistry {
         throw new Error(`Invalid tool definition in ${f}: missing name, inputSchema, or outputSchema`);
       }
       this.defs.set(def.name, def);
+      // Compile the input validator. A schema-compilation failure degrades to
+      // no-validation for that tool (same as pre-AUD-007 baseline). Warn so
+      // tool authors discover malformed schemas at dev time rather than silently.
+      try {
+        this.inputValidators.set(def.name, this._ajv.compile(def.inputSchema) as ValidateFunction);
+      } catch (err: any) {
+        process.stderr.write(
+          `[cambium] WARNING: tool "${def.name}" inputSchema failed AJV compilation — ` +
+          `input will not be validated: ${err?.message ?? String(err)}\n`,
+        );
+      }
 
       // RED-209: look for a sibling handler module. Prefer .tool.ts for
       // dev (the CLI and vitest both load tsx); fall back to .tool.js
@@ -74,6 +97,12 @@ export class ToolRegistry {
 
   get(name: string): ToolDefinition | undefined {
     return this.defs.get(name);
+  }
+
+  /** AJV-compiled validator for the tool's inputSchema, or undefined if the
+   *  schema couldn't be compiled (safe fallback — no validation rather than crash). */
+  getInputValidator(name: string): ValidateFunction | undefined {
+    return this.inputValidators.get(name);
   }
 
   /** Handler registered by a plugin tool (not a framework builtin). */

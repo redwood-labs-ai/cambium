@@ -201,7 +201,7 @@ Parametric extension of the existing test file:
 - [[P - corrects (correctors)]] — document the kwarg and the new terminal-state step.
 - [[C - Trace (observability)]] — add `CorrectAfterRepair` and `CorrectAcceptedWithErrors` rows.
 - [[C - Repair Loop]] — update the loop description.
-- `CLAUDE.md` "Pipeline structure" invariant for RED-275 gets an amendment: "Corrector re-run after repair is a correctness invariant; a `CorrectAfterRepair` step MUST follow every `ValidateAfterCorrectorRepair` that passed schema validation."
+- `CLAUDE.md` "Pipeline structure" invariant (cluster since renamed to "Gen-side compile + runtime invariants") for RED-275 gets an amendment: "Corrector re-run after repair is a correctness invariant; a `CorrectAfterRepair` step MUST follow every `ValidateAfterCorrectorRepair` that passed schema validation."
 
 ---
 

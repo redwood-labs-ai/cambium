@@ -60,7 +60,7 @@ The CLI (`cli/`) and VS Code extension (`vscode/cambium-syntax/`) are documentat
 
     A new `app/<type>/` directory without updates to each is the RED-284/285 class of drift.
 
-15. **A new trace step type MUST appear in `C - Trace (observability).md` AND (if it's emitted by a repair-driven path in `runner.ts`) must go through `pushRepairStep`.** Repair sites without `pushRepairStep` leak token spend past the budget gate — see the CLAUDE.md invariant under "Pipeline structure." Flag any new `trace.steps.push(repair.result)` that bypasses the helper.
+15. **A new trace step type MUST appear in `C - Trace (observability).md` AND (if it's emitted by a repair-driven path in `runner.ts`) must go through `pushRepairStep`.** Repair sites without `pushRepairStep` leak token spend past the budget gate — see the CLAUDE.md invariant under "Gen-side compile + runtime invariants." Flag any new `trace.steps.push(repair.result)` that bypasses the helper.
 
 ## Calibration — things you do NOT flag
 

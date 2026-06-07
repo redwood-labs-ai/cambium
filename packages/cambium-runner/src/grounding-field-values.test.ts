@@ -84,6 +84,52 @@ describe('grounded_in verify: :field_values — runner step 5b (RED-392)', () =>
     expect(types).toContain('ValidateAfterGroundingValues');
   });
 
+  // RED-398: after a field-values repair passes schema revalidation, the
+  // corrector re-runs and emits GroundingFieldValueCheckAfterRepair. These
+  // tests pin that branch (AUD-001 — it shipped with no committed coverage).
+  it('emits GroundingFieldValueCheckAfterRepair ok:false when the repair leaves a value ungrounded', async () => {
+    process.env.CAMBIUM_ALLOW_MOCK = '1';
+    const result = await runGen({
+      ir: baseIR(),
+      schemas: { Extract: PermissiveSchema },
+      mock: true,
+      // "Globex" is ungrounded → repair fires; the deterministic mock repair
+      // emits a summary string that is itself not in the doc → re-verify fails.
+      resumeCandidate: { vendor: 'Globex', total: 12345 },
+      parentRunId: 'run_src',
+    });
+
+    const after = result.trace.steps.find(
+      (s: any) => s.type === 'GroundingFieldValueCheckAfterRepair',
+    );
+    expect(after).toBeDefined();
+    expect(after.ok).toBe(false);
+    expect(after.meta.failed).toBeGreaterThan(0);
+  });
+
+  it('emits GroundingFieldValueCheckAfterRepair ok:true when the repair lands a grounded value', async () => {
+    process.env.CAMBIUM_ALLOW_MOCK = '1';
+    const ir = baseIR();
+    // Document contains the deterministic mock repair's summary string, so the
+    // post-repair candidate's only checked leaf is grounded → re-verify passes.
+    ir.context.document = 'Report. Mock analysis (model provider not available).';
+    const result = await runGen({
+      ir,
+      schemas: { Extract: PermissiveSchema },
+      mock: true,
+      // "Globex" is not in the doc → initial check fails → repair fires.
+      resumeCandidate: { vendor: 'Globex' },
+      parentRunId: 'run_src',
+    });
+
+    const after = result.trace.steps.find(
+      (s: any) => s.type === 'GroundingFieldValueCheckAfterRepair',
+    );
+    expect(after).toBeDefined();
+    expect(after.ok).toBe(true);
+    expect(after.meta.failed).toBe(0);
+  });
+
   it('does not run step 5b when verify is absent (citations-only / no verify)', async () => {
     const ir = baseIR();
     ir.policies.grounding = { source: 'document', require_citations: false }; // no verify

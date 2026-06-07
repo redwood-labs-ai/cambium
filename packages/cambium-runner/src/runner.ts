@@ -844,6 +844,17 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   // ── Security: validate tool permissions ─────────────────────────────
   const { buildSecurityPolicy, validateAllToolPermissions } = await import('./tools/permissions.js');
   const securityPolicy = buildSecurityPolicy(ir.policies);
+
+  // AUD-008: probe the declared exec substrate at startup so a gen that
+  // requires :firecracker on a non-KVM host fails fast rather than running
+  // until the first execute_code call and returning 'crashed'. The
+  // checkRuntime() call is cheap — each substrate caches its available()
+  // result after the first probe.
+  if (securityPolicy.exec?.runtime) {
+    const { checkRuntime } = await import('./exec-substrate/registry.js');
+    checkRuntime(securityPolicy.exec.runtime);
+  }
+
   const permViolations = validateAllToolPermissions(toolRegistry, toolsAllowed, securityPolicy);
   if (permViolations.length > 0) {
     for (const v of permViolations) {
@@ -1077,13 +1088,13 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   /**
    * Append a `handleRepair` result to the trace AND track its token
    * usage against the budget (RED-280). Use this instead of a bare
-   * `trace.steps.push(repair.result)` anywhere in runGen — five repair
+   * `trace.steps.push(repair.result)` anywhere in runGen — six repair
    * call sites exist (schema repair, Review, Consensus, corrector
-   * feedback, grounding) and hand-maintained pairs had drifted:
-   * Review and the schema loop called both, Consensus and grounding
-   * silently lacked the budget track. Keeping the pair behind one
-   * helper makes a future sixth call site structurally impossible to
-   * get wrong.
+   * feedback, grounding citations, grounding field-values RED-392)
+   * and hand-maintained pairs had drifted: Review and the schema loop
+   * called both, Consensus and grounding silently lacked the budget
+   * track. Keeping the pair behind one helper makes a future seventh
+   * call site structurally impossible to get wrong.
    */
   function pushRepairStep(repair: { result: any }): void {
     trace.steps.push(repair.result);
@@ -1594,6 +1605,23 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
           if (revalidate.ok) {
             parsed = repair.parsed;
             trace.steps.push(revalidate);
+            // RED-398: re-verify citations after repair, before accepting output.
+            const citRerun = handleCorrect(parsed, ['citations'], { document: getGroundingDocument(ir, groundingTextByKey) }, correctors);
+            const citRerunResult = citRerun.meta?.citationResult;
+            const citStillErrors = (citRerun.meta?.issues ?? []).filter((i: any) => i.severity === 'error');
+            trace.steps.push({
+              ...citRerun,
+              type: 'GroundingCheckAfterRepair',
+              ok: citRerunResult ? citRerunResult.allValid : citStillErrors.length === 0,
+              meta: {
+                ...citRerun.meta,
+                passed: citRerunResult?.passed?.length ?? 0,
+                failed: citRerunResult?.failed?.length ?? 0,
+                missing: citRerunResult?.missing?.length ?? 0,
+                totalChecked: citRerunResult?.totalChecked ?? 0,
+                details: citRerunResult?.failed ?? [],
+              },
+            });
           } else {
             trace.steps.push(revalidate);
             // Grounding repair failed — continue with original
@@ -1604,7 +1632,14 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
 
     // 5b. RED-392: Field-values verification (when grounded_in verify: :field_values)
     if (grounding?.verify === 'field_values') {
-      const fvResult = handleCorrect(parsed, ['field_values'], { document: getGroundingDocument(ir, groundingTextByKey) }, correctors);
+      const fvContext: { document: string; fields?: string[] } = {
+        document: getGroundingDocument(ir, groundingTextByKey),
+      };
+      const gf = grounding as { fields?: string[] };
+      if (Array.isArray(gf.fields) && gf.fields.length > 0) {
+        fvContext.fields = gf.fields.map(String);
+      }
+      const fvResult = handleCorrect(parsed, ['field_values'], fvContext, correctors);
       const fieldValuesResult = fvResult.meta?.fieldValuesResult;
       const fvIssues = fvResult.meta?.issues ?? [];
 
@@ -1642,6 +1677,23 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
           if (revalidate.ok) {
             parsed = repair.parsed;
             trace.steps.push(revalidate);
+            // RED-398: re-verify field-values after repair, before accepting output.
+            const fvRerun = handleCorrect(parsed, ['field_values'], fvContext, correctors);
+            const fvRerunResult = fvRerun.meta?.fieldValuesResult;
+            const fvStillErrors = (fvRerun.meta?.issues ?? []).filter((i: any) => i.severity === 'error');
+            trace.steps.push({
+              ...fvRerun,
+              type: 'GroundingFieldValueCheckAfterRepair',
+              ok: fvRerunResult ? fvRerunResult.allValid : fvStillErrors.length === 0,
+              meta: {
+                ...fvRerun.meta,
+                passed: fvRerunResult?.passed?.length ?? 0,
+                failed: fvRerunResult?.failed?.length ?? 0,
+                skipped: fvRerunResult?.skipped?.length ?? 0,
+                totalChecked: fvRerunResult?.totalChecked ?? 0,
+                details: fvRerunResult?.failed ?? [],
+              },
+            });
           } else {
             trace.steps.push(revalidate);
           }

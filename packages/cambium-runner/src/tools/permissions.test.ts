@@ -73,6 +73,18 @@ describe('validateToolPermissions', () => {
     expect(v).toHaveLength(0);
   });
 
+  // AUD-002 secondary: empty roots is deny-all at runtime, so a filesystem
+  // tool under that policy can never succeed — fail at boot, not first call.
+  it('blocks filesystem tools when policy declares empty roots (deny-all)', () => {
+    const v = validateToolPermissions(
+      tool('reader', { filesystem: true }),
+      { filesystem: { roots: [] } },
+    );
+    expect(v).toHaveLength(1);
+    expect(v[0].permission).toBe('filesystem');
+    expect(v[0].message).toContain('deny-all');
+  });
+
   it('blocks exec tools by default', () => {
     expect(validateToolPermissions(tool('shell', { exec: true }), DEFAULT_POLICY)).toHaveLength(1);
   });

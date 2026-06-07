@@ -417,7 +417,7 @@ const PRIMITIVE_DOCS = {
   },
   grounded_in: {
     detail: 'Enforces output grounded in a source document.',
-    doc: 'When `require_citations: true`, all claim items must include verbatim quotes.\nFabricated citations are flagged and repaired.\n\n`verify: :field_values` adds a value-level cross-check: each structured output field value must appear in the grounding document (RED-392).\n\n```ruby\ngrounded_in :document, require_citations: true\ngrounded_in :invoice, verify: :field_values\n```',
+    doc: 'When `require_citations: true`, all claim items must include verbatim quotes.\nFabricated citations are flagged and repaired.\n\n`verify: :field_values` adds a value-level cross-check: each structured output field value must appear in the grounding document (RED-392).\n\n`fields:` is an allowlist of top-level output field names to cross-check; omit to check all fields. Only valid with `verify: :field_values` (RED-399).\n\n```ruby\ngrounded_in :document, require_citations: true\ngrounded_in :invoice, verify: :field_values\ngrounded_in :invoice, verify: :field_values, fields: [:vendor, :total]\n```',
   },
   enrich: {
     detail: 'Pre-generate context enrichment via sub-agent.',

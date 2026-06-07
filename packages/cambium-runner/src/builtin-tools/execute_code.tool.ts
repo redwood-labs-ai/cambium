@@ -75,13 +75,14 @@ const DEFAULTS = {
   maxOutputBytes: 50_000,
 } as const;
 
-// The DSL's `language:` field accepts 'python' or 'node' (legacy) — the
-// substrate interface uses 'python' or 'js'. Map the legacy value through.
+// The DSL's `language:` field accepts python | py | node | js | javascript
+// (the enum in execute_code.tool.json) — the substrate interface uses only
+// 'python' or 'js'. Map the accepted aliases through.
 function normalizeLanguage(l: string): 'js' | 'python' {
   if (l === 'node' || l === 'js' || l === 'javascript') return 'js';
   if (l === 'python' || l === 'py') return 'python';
   throw new Error(
-    `execute_code: unsupported language "${l}". Supported: python, node.`,
+    `execute_code: unsupported language "${l}". Supported: python, py, node, js, javascript.`,
   );
 }
 

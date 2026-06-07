@@ -1724,7 +1724,7 @@ module Cambium
       # producing a brittle IR.
       GROUNDING_SOURCE_REGEX = /\A[a-z][a-z0-9_]*\z/
       GROUNDING_VERIFY_VALUES = %w[field_values].freeze
-      def grounded_in(source, from: nil, require_citations: false, verify: nil)
+      def grounded_in(source, from: nil, require_citations: false, verify: nil, fields: nil)
         source_str = source.to_s
         unless source_str.match?(GROUNDING_SOURCE_REGEX)
           raise ArgumentError,
@@ -1756,12 +1756,28 @@ module Cambium
           end
         end
 
+        unless fields.nil?
+          unless fields.is_a?(Array) && fields.all? { |f| f.is_a?(Symbol) }
+            raise ArgumentError,
+                  "grounded_in #{source.inspect} fields: must be an Array of Symbols, got #{fields.inspect}"
+          end
+          if fields.empty?
+            raise ArgumentError,
+                  "grounded_in #{source.inspect} fields: must be non-empty when provided (omit it to check all fields)"
+          end
+          if verify.to_s != 'field_values'
+            raise ArgumentError,
+                  "grounded_in #{source.inspect} fields: is only valid with verify: :field_values"
+          end
+        end
+
         entry = {
           'source' => source_str,
           'require_citations' => require_citations
         }
         entry['from'] = from unless from.nil?
         entry['verify'] = verify.to_s unless verify.nil?
+        entry['fields'] = fields.map(&:to_s) unless fields.nil?
         _cambium_defaults[:grounding] = entry
       end
 

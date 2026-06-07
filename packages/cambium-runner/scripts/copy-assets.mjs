@@ -41,8 +41,12 @@ walk(SRC, (path) => {
   // Viewer static assets, but only under inspect/public/ (not stray .js, which
   // tsc emits itself — those aren't ours to copy).
   const isViewerAsset = path.includes(PUBLIC_FRAGMENT) && VIEWER_ASSET_EXT.has(extname(path));
+  // .mjs worker files: plain JavaScript workers (e.g. wasm-worker.mjs) that
+  // are referenced at runtime via `new URL('./wasm-worker.mjs', import.meta.url)`.
+  // tsc doesn't compile them; they must be copied manually (AUD-003).
+  const isMjsWorker = path.endsWith('.mjs') && !path.includes(PUBLIC_FRAGMENT);
 
-  if (!isJson && !isViewerAsset) return;
+  if (!isJson && !isViewerAsset && !isMjsWorker) return;
   const rel = relative(SRC, path);
   const out = join(DEST, rel);
   mkdirSync(dirname(out), { recursive: true });

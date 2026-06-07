@@ -57,7 +57,7 @@ corrects :regex_compiles_and_tests_pass
 
 Scaffold the boilerplate via `cambium new corrector <Name>` (RED-284) — the generated file lands in `app/correctors/` with the right filename convention and export shape.
 
-The name must match `/^[a-z][a-z0-9_]*$/` (traversal guard). The export name must match the file basename. App correctors override same-named built-ins with a one-time stderr warning per process (mirrors the RED-209 tool-plugin precedence rule).
+The name must match `/^[a-z][a-z0-9_]*$/` (traversal guard). The export name must match the file basename. `loadAppCorrectors` additionally `realpath`s each file and rejects any target that escapes the correctors dir (`relative(realDir, realFile).startsWith('..')`) — so a symlink dropped into `app/correctors/` can't pull in code from outside the workspace. App correctors override same-named built-ins with a one-time stderr warning per process (mirrors the RED-209 tool-plugin precedence rule).
 
 ## Engine-mode hosts: `RunGenOptions.correctors` (RED-299)
 

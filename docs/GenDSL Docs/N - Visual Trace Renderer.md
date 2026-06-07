@@ -1,7 +1,7 @@
 # Note: Visual Trace Renderer (`cambium inspect`)
 
 **Doc ID:** gen-dsl/note/visual-trace-renderer
-**Status:** read-only v1 shipped (RED-313). Replay-from-node is a follow-up (RED-406).
+**Status:** read-only v1 shipped (RED-313). Replay-from-step button shipped (RED-406).
 
 ## What it is
 
@@ -62,13 +62,15 @@ Three layers, all in `packages/cambium-runner/src/inspect/`:
   runs` (engine mode) → `<cwd>/runs`. Operator contract: cwd is the workspace or
   an ancestor. Multi-root aggregation is out of scope for v1.
 
-## Out of scope (v1)
+## Implemented features
 
-- **Replay-from-node button** — splits to RED-406; it turns the viewer into an
-  *exec* surface (a browser request triggers `cambium replay`), a different risk
-  class that needs its own security pass.
+- **Replay-from-step button (RED-406)**: when a gen-run node with a recorded output is selected, the side panel shows a "Replay from this step" button and a copyable `cambium replay <run-id> --from-step <stepType>` command. Clicking copies to clipboard. No server execution — copy-to-clipboard only (DEC-002: no new server-side surface). The button does not appear for pipeline runs (those use `--from-op`).
+
+## Out of scope
+
 - Hosted / multi-user / auth, live in-flight run streaming, two-run diff view,
   telemetry export (the `log` primitive already owns trace fan-out).
+- `--from-op` replay button for pipeline run operators — requires surfacing `operator.id` values in the node model; deferred.
 
 ## Related
 

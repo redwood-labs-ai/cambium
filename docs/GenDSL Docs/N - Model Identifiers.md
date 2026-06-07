@@ -268,7 +268,7 @@ memory :facts, strategy: :semantic, top_k: 5, embed: :embedding  # also resolves
 - Symbols and bare-name strings are treated as alias references; they must be defined in `app/config/models.rb`.
 - An undefined alias raises `CompileError` listing the available names and pointing at the config file.
 - Aliases names MUST match `/\A[a-z][a-z0-9_]*\z/` (same safety regex as policy-pack and memory-pool names).
-- The IR never carries symbols — the runner only sees resolved literal strings. This keeps the runtime layer blissfully unaware of the alias mechanism.
+- The IR never carries symbols — the runner only sees resolved literal strings. This keeps the runtime layer blissfully unaware of the alias mechanism. Don't add runtime alias resolution — it would split the source of truth across two layers and break the "IR is truth" stance. If you need runtime model selection (env override, A/B), do it at IR-post-processing or add a separate mechanism; don't reuse aliases.
 
 **Why aliases:** before RED-237 every gen hard-coded its model string, and switching models across a fleet of gens was find-and-replace. Memory pools compounded the pain by repeating the embed model. Aliases collapse that to a single edit per workspace.
 

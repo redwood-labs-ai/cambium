@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { MemoryEntry } from './types.js';
 
@@ -44,12 +44,23 @@ async function loadSqliteVec(): Promise<any> {
     _sqliteVec = await import('sqlite-vec');
     return _sqliteVec;
   } catch (e: any) {
+    const msg = String(e?.message ?? e);
+    if (msg.includes('musl') || msg.includes('/lib/ld-musl')) {
+      throw new Error(
+        "Cambium :semantic memory requires 'sqlite-vec', but this appears to be a musl libc host (Alpine). " +
+          'sqlite-vec has no prebuilt musl binary. See https://github.com/asg017/sqlite-vec for build instructions.',
+      );
+    }
     throw new Error(
       "Cambium :semantic memory requires 'sqlite-vec'. Install with:\n" +
         '  npm install sqlite-vec\n' +
-        `(underlying error: ${e?.message ?? e})`,
+        `(underlying error: ${msg})`,
     );
   }
+}
+
+function detectMuslHost(): boolean {
+  return existsSync('/lib/ld-musl-x86_64.so.1') || existsSync('/lib/ld-musl-aarch64.so.1');
 }
 
 export class SqliteMemoryBackend {
@@ -107,7 +118,11 @@ export class SqliteMemoryBackend {
    * into `meta`. On subsequent calls: validates the pin matches and
    * errors clearly on mismatch — you can't mix dims in one bucket.
    */
-  async initSemantic(embedModel: string, embedDim: number): Promise<void> {
+  async initSemantic(
+    embedModel: string,
+    embedDim: number,
+    _testOverrides?: { loadVec?: (sv: any, db: any) => void; detectMusl?: () => boolean },
+  ): Promise<void> {
     // Extension loads are per-connection, so we always call sqliteVec.load
     // — even if the meta pinning was done on a prior run. Skipping this
     // leaves the connection without the vec0 module, which would then
@@ -115,7 +130,23 @@ export class SqliteMemoryBackend {
     // validate second.
     if (!this._vecLoaded) {
       const sqliteVec = await loadSqliteVec();
-      sqliteVec.load(this.db);
+      try {
+        (_testOverrides?.loadVec ?? ((sv: any, db: any) => sv.load(db)))(sqliteVec, this.db);
+      } catch (e: any) {
+        const isMusl = (_testOverrides?.detectMusl ?? detectMuslHost)();
+        if (isMusl) {
+          throw new Error(
+            'sqlite-vec native extension failed to load on a musl libc host (Alpine). ' +
+              'sqlite-vec has no prebuilt musl binary — semantic memory is not supported without ' +
+              'building from source. See https://github.com/asg017/sqlite-vec for build instructions.',
+          );
+        }
+        throw new Error(
+          `sqlite-vec native extension failed to load: ${e.message}. ` +
+            'This is a platform/environment issue, not a missing package — sqlite-vec is installed ' +
+            "but its .node binary can't load in this process.",
+        );
+      }
       this._vecLoaded = true;
     }
 

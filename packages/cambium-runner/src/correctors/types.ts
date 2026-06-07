@@ -13,4 +13,4 @@ export type CorrectorResult = {
   meta?: Record<string, any>;
 };
 
-export type CorrectorFn = (data: any, context: { document?: string }) => CorrectorResult;
+export type CorrectorFn = (data: any, context: { document?: string; fields?: string[] }) => CorrectorResult;

@@ -22,12 +22,15 @@
  *     the time you're worrying about CPU cap, you're past engine
  *     mode"). Recorded in trace meta for observability.
  *
- * The handler path is: import module lazily → new runtime → set caps
- * → new context → inject console stubs → evalCode → collect result
- * and stdout/stderr → dispose all handles. Synchronous evaluation via
- * the release-sync variant of QuickJS.
+ * The handler path: spawn a worker_threads Worker (wasm-worker.mjs) with
+ * opts passed via workerData → worker runs evalCode synchronously inside its
+ * own thread → worker posts one ExecResult message → parent resolves. The
+ * main event loop is never blocked (AUD-003). The parent's kill timer fires
+ * opts.timeout + 500 ms after spawn and calls worker.terminate() as a
+ * backstop in case the QuickJS interrupt handler doesn't trip in time.
  */
 import { createRequire } from 'node:module';
+import { Worker } from 'node:worker_threads';
 import type { ExecSubstrate, ExecOpts, ExecResult } from './types.js';
 
 // `require.resolve` is the cheap synchronous "is this package installed"
@@ -40,24 +43,9 @@ import type { ExecSubstrate, ExecOpts, ExecResult } from './types.js';
 // could silently mis-report the WASM substrate unavailable in prod.
 const esmRequire = createRequire(import.meta.url);
 
-// Cached import. Lazy-loaded on first `execute()` call; `available()`
-// probes without actually loading the WASM module (fast + cheap).
-let _quickjsModule: any = null;
+// `available()` availability cache — cached after the first probe.
 let _quickjsAvailable: 'yes' | 'no' | 'unknown' = 'unknown';
 let _unavailableReason: string | null = null;
-
-async function loadQuickJS(): Promise<any> {
-  if (_quickjsModule) return _quickjsModule;
-  const mod: any = await import('quickjs-emscripten');
-  _quickjsModule = await mod.getQuickJS();
-  return _quickjsModule;
-}
-
-function truncate(s: string, maxBytes: number): { text: string; truncated: boolean } {
-  if (Buffer.byteLength(s, 'utf8') <= maxBytes) return { text: s, truncated: false };
-  const slice = s.slice(0, maxBytes);
-  return { text: `${slice}\n[truncated at ${maxBytes} bytes]`, truncated: true };
-}
 
 export class WasmSubstrate implements ExecSubstrate {
   available(): string | null {
@@ -94,157 +82,85 @@ export class WasmSubstrate implements ExecSubstrate {
     }
 
     const startedAt = Date.now();
-    const deadline = startedAt + opts.timeout * 1000;
 
-    // Load the module lazily. Failure = substrate infra crash.
-    let quickjs: any;
-    try {
-      quickjs = await loadQuickJS();
-    } catch (e: any) {
-      return {
-        status: 'crashed',
-        stdout: '',
-        stderr: '',
-        truncated: { stdout: false, stderr: false },
-        durationMs: Date.now() - startedAt,
-        reason: `Failed to load quickjs-emscripten: ${e?.message ?? String(e)}`,
+    // AUD-003: run evalCode in a worker_threads Worker so the main Node
+    // event loop is never blocked. The synchronous evalCode path previously
+    // froze the host event loop for the full timeout window in serve mode —
+    // a single request could stall all concurrent requests and health checks.
+    //
+    // The Worker calls the same QuickJS code (via wasm-worker.mjs) and
+    // posts one ExecResult message. The parent sets a kill timer: if the
+    // worker's interrupt handler doesn't trip in time (the interrupt fires
+    // every few hundred bytecode ops, so it usually wins), the parent
+    // terminates the worker from the main thread and returns a timeout result.
+    // The +500 ms buffer gives the interrupt handler room to fire and post its
+    // message before the parent's timer fires; it's invisible in the result
+    // because the result's durationMs comes from the worker's own timestamp.
+    return new Promise<ExecResult>((resolve) => {
+      let settled = false;
+      const settle = (result: ExecResult) => {
+        if (settled) return;
+        settled = true;
+        resolve(result);
       };
-    }
 
-    // Runtime + context lifecycle.
-    const runtime = quickjs.newRuntime();
-    let context: any;
-    const stdoutBuf: string[] = [];
-    const stderrBuf: string[] = [];
-
-    // Canonical signal for "this run hit the wall-clock timeout" —
-    // set inside the interrupt handler so we don't have to re-check
-    // Date.now() after evalCode returns (which would race with GC +
-    // dispose time per cambium-security review). If this flag is set
-    // AND the error is "interrupted", we classify as timeout; no
-    // clock-reread needed.
-    let timedOut = false;
-    try {
-      runtime.setMemoryLimit(opts.memory * 1024 * 1024);
-      // Periodic interrupt — returns true to abort evalCode when the
-      // wall-clock deadline has passed. QuickJS calls this every few
-      // hundred bytecode ops, so it's a quick poll; overhead is tiny.
-      runtime.setInterruptHandler(() => {
-        if (Date.now() > deadline) {
-          timedOut = true;
-          return true;
-        }
-        return false;
-      });
-
-      context = runtime.newContext();
-
-      // Inject `console.log` / `console.error` — QuickJS has no native
-      // console. Guests without these would silently lose output.
-      const consoleObj = context.newObject();
-      const logFn = context.newFunction('log', (...args: any[]) => {
-        stdoutBuf.push(args.map((h) => context.dump(h)).map(formatDumped).join(' '));
-      });
-      const errFn = context.newFunction('error', (...args: any[]) => {
-        stderrBuf.push(args.map((h) => context.dump(h)).map(formatDumped).join(' '));
-      });
-      context.setProp(consoleObj, 'log', logFn);
-      context.setProp(consoleObj, 'error', errFn);
-      context.setProp(context.global, 'console', consoleObj);
-      logFn.dispose();
-      errFn.dispose();
-      consoleObj.dispose();
-
-      const evalResult = context.evalCode(opts.code);
-      const durationMs = Date.now() - startedAt;
-
-      if (evalResult.error) {
-        // Extract the error message BEFORE disposing the handle.
-        const err: any = context.dump(evalResult.error);
-        evalResult.error.dispose();
-        const errString = formatError(err);
-
-        // Timeout surfaces as an "interrupted" InternalError. Use the
-        // closure-scoped `timedOut` flag rather than re-reading the
-        // clock — see the flag's declaration for why.
-        if (timedOut && /interrupted/i.test(errString)) {
-          return wasmResult('timeout', stdoutBuf, stderrBuf, opts, durationMs,
-            `wall-clock timeout (${opts.timeout}s)`);
-        }
-        // OOM surfaces as a QuickJS-specific out-of-memory error.
-        if (/out of memory/i.test(errString)) {
-          return wasmResult('oom', stdoutBuf, stderrBuf, opts, durationMs,
-            `memory limit reached (${opts.memory} MB)`);
-        }
-        // Stack overflow, reference error, syntax error, etc. — guest
-        // code failed. Collapses to `completed` with exit_code: 1 and
-        // the error message appended to stderr; matches Node/Python
-        // behavior where a script crash is an exit, not a "crashed
-        // substrate."
-        stderrBuf.push(errString);
-        return wasmResult('completed', stdoutBuf, stderrBuf, opts, durationMs, undefined, 1);
+      let worker: Worker;
+      try {
+        // Pass only the fields the worker uses — do not leak policy objects
+        // (opts.network / opts.filesystem) into the worker context (Finding 3
+        // from the 2026-06-06 audit review: policy fields in workerData would
+        // look usable to a future contributor adding network/fs injection, but
+        // guardedFetch / ctx.fetch are not available inside a worker thread).
+        worker = new Worker(
+          new URL('./wasm-worker.mjs', import.meta.url),
+          {
+            workerData: {
+              code: opts.code,
+              memory: opts.memory,
+              timeout: opts.timeout,
+              maxOutputBytes: opts.maxOutputBytes,
+            },
+          },
+        );
+      } catch (e: any) {
+        settle({
+          status: 'crashed',
+          stdout: '', stderr: '',
+          truncated: { stdout: false, stderr: false },
+          durationMs: Date.now() - startedAt,
+          reason: `Failed to spawn WASM worker: ${e?.message ?? String(e)}`,
+        });
+        return;
       }
 
-      evalResult.value.dispose();
-      return wasmResult('completed', stdoutBuf, stderrBuf, opts, durationMs, undefined, 0);
-    } catch (e: any) {
-      // Anything thrown from the host side (runtime setup, context
-      // creation, etc.) → crashed.
-      return {
-        status: 'crashed',
-        stdout: truncate(stdoutBuf.join('\n'), opts.maxOutputBytes).text,
-        stderr: truncate(stderrBuf.join('\n'), opts.maxOutputBytes).text,
-        truncated: { stdout: false, stderr: false },
-        durationMs: Date.now() - startedAt,
-        reason: e?.message ?? String(e),
-      };
-    } finally {
-      try { context?.dispose(); } catch {}
-      try { runtime.dispose(); } catch {}
-    }
+      const killTimer = setTimeout(() => {
+        worker.terminate().catch(() => { /* ignore */ });
+        settle({
+          status: 'timeout',
+          stdout: '', stderr: '',
+          truncated: { stdout: false, stderr: false },
+          durationMs: Date.now() - startedAt,
+          reason: `wall-clock timeout (${opts.timeout}s)`,
+        });
+      }, opts.timeout * 1000 + 500);
+
+      worker.on('message', (result: ExecResult) => {
+        clearTimeout(killTimer);
+        worker.terminate().catch(() => { /* ignore */ });
+        settle(result);
+      });
+
+      worker.on('error', (err: Error) => {
+        clearTimeout(killTimer);
+        settle({
+          status: 'crashed',
+          stdout: '', stderr: '',
+          truncated: { stdout: false, stderr: false },
+          durationMs: Date.now() - startedAt,
+          reason: err.message,
+        });
+      });
+    });
   }
 }
 
-/** Turn QuickJS-dumped values into printable strings. Arrays/objects
- *  get JSON.stringify; primitives get String(). */
-function formatDumped(v: any): string {
-  if (typeof v === 'string') return v;
-  if (v === undefined) return 'undefined';
-  if (v === null) return 'null';
-  if (typeof v === 'object') {
-    try { return JSON.stringify(v); } catch { return String(v); }
-  }
-  return String(v);
-}
-
-/** Format a QuickJS-dumped error object into a single-line message. */
-function formatError(e: any): string {
-  if (e && typeof e === 'object' && (e.message || e.name)) {
-    return `${e.name ?? 'Error'}: ${e.message ?? ''}`.trim();
-  }
-  return formatDumped(e);
-}
-
-/** Shared result builder. Applies truncation to both streams and
- *  populates the ExecResult shape. */
-function wasmResult(
-  status: ExecResult['status'],
-  stdoutBuf: string[],
-  stderrBuf: string[],
-  opts: ExecOpts,
-  durationMs: number,
-  reason?: string,
-  exitCode?: number,
-): ExecResult {
-  const stdoutCap = truncate(stdoutBuf.join('\n'), opts.maxOutputBytes);
-  const stderrCap = truncate(stderrBuf.join('\n'), opts.maxOutputBytes);
-  return {
-    status,
-    exitCode: status === 'completed' ? (exitCode ?? 0) : undefined,
-    stdout: stdoutCap.text,
-    stderr: stderrCap.text,
-    truncated: { stdout: stdoutCap.truncated, stderr: stderrCap.truncated },
-    durationMs,
-    reason,
-  };
-}

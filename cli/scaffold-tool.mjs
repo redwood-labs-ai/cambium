@@ -143,6 +143,41 @@ export async function runAgenticToolScaffold(description) {
     console.log(result.handler_typescript);
     console.log(`\n${'─'.repeat(60)}`);
 
+    // Red-flag scan (AUD-006): check the generated handler for patterns that
+    // conflict with its declared permissions. A prompt-injected scaffolder
+    // could emit `permissions: { pure: true }` with a body that does execs.
+    // This scan runs BEFORE the y/N confirm so the user sees flags in the
+    // preview area, not silently after they've already said yes.
+    const handlerTs = result.handler_typescript;
+    const redFlags = [];
+    const DANGEROUS_PATTERNS = [
+      { re: /\bchild_process\b/, label: 'child_process import (exec capability)' },
+      { re: /\bspawnSync\b|\bspawn\b|\bexecSync\b|\bexec\b/, label: 'process-spawn call' },
+      { re: /\beval\s*\(/, label: 'eval() call' },
+      { re: /\bnew\s+Function\s*\(/, label: 'new Function() call' },
+      { re: /\brequire\s*\(\s*[^'"`]/, label: 'dynamic require() with non-literal argument' },
+    ];
+    for (const { re, label } of DANGEROUS_PATTERNS) {
+      if (re.test(handlerTs)) redFlags.push(`  ⚠  ${label}`);
+    }
+    // Permission-vs-body cross-check: if permissions claim 'pure' or omit
+    // network/exec/filesystem, flag any body patterns that would need those capabilities.
+    const perms = result.permissions ?? {};
+    if (!perms.network && /\bfetch\b|\bctx\.fetch\b|\bhttp\b/.test(handlerTs)) {
+      redFlags.push('  ⚠  body uses fetch/http but permissions.network is not declared');
+    }
+    if (!perms.exec && /\bexecute_code\b|\bchild_process\b|\bspawn/.test(handlerTs)) {
+      redFlags.push('  ⚠  body uses exec patterns but permissions.exec is not declared');
+    }
+    if (!perms.filesystem && /readFile|writeFile|import ['"](?:node:)?fs|createReadStream|createWriteStream/.test(handlerTs)) {
+      redFlags.push('  ⚠  body uses filesystem patterns but permissions.filesystem is not declared');
+    }
+    if (redFlags.length > 0) {
+      console.log(`\n⚠  Red-flag scan found ${redFlags.length} concern(s) in the generated handler:\n`);
+      for (const f of redFlags) console.log(f);
+      console.log('\nReview the handler carefully before writing.\n');
+    }
+
     // Existence check
     if (existsSync(jsonPath) || existsSync(tsPath)) {
       const existing = [jsonPath, tsPath].filter(p => existsSync(p));

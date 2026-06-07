@@ -8,8 +8,8 @@
     "type": "object",
     "required": ["language", "code"],
     "properties": {
-      "language": { "type": "string", "enum": ["python", "node"], "description": "Language to execute" },
-      "code": { "type": "string", "description": "Code to execute" }
+      "language": { "type": "string", "enum": ["python", "py", "node", "js", "javascript"], "description": "Language to execute" },
+      "code": { "type": "string", "description": "Code to execute", "maxLength": 1000000 }
     }
   },
   "outputSchema": {
