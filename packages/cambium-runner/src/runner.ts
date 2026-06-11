@@ -1,4 +1,5 @@
 import { readFileSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import process from 'node:process';
@@ -523,6 +524,12 @@ export interface RunGenOptions {
    *  by runPipelineFromIr; direct library callers running a gen that
    *  declares :pipeline_run memory must pass this themselves. */
   pipelineRunId?: string;
+  /** RED-420: When true, persist run artifacts (ir.json, trace.json,
+   *  output.json) under runs/<runId>/ before returning. Default false
+   *  (opt-in). Write failures emit a trace warning and never fail the
+   *  run — same stance as log sink failures. Library callers that want
+   *  artifact persistence without the full runGenFromIr wrapper use this. */
+  persistRun?: boolean;
 }
 
 export interface RunGenResult {
@@ -570,6 +577,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     firedBy: optsFiredBy,
     runId: optsRunId,
     pipelineRunId: optsPipelineRunId,
+    persistRun: optsPersistRun = false,
   } = opts;
 
   // Plumb opts.mock through to the deterministic-mock branch in
@@ -1856,6 +1864,32 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
       sinks: logSinks,
       pushStep: (step: any) => trace.steps.push(step),
     });
+  }
+
+  // ── Optional run persistence (RED-420) ─────────────────────────────
+  // Write-failure is non-fatal: emit a trace warning and continue, same
+  // stance as log sink failures. Compute runsRoot inline so this block
+  // works whether or not memory decls were present (memory's runsRoot is
+  // scoped to the if-block above).
+  if (optsPersistRun) {
+    try {
+      const runsRoot = runsRootOpt ?? (engineDir
+        ? join(engineDir, 'runs')
+        : join(process.cwd(), 'runs'));
+      const runDir = join(runsRoot, runId);
+      await mkdir(runDir, { recursive: true });
+      await Promise.all([
+        writeFile(join(runDir, 'ir.json'), JSON.stringify(ir, null, 2)),
+        writeFile(join(runDir, 'trace.json'), JSON.stringify(trace, null, 2)),
+        writeFile(join(runDir, 'output.json'), JSON.stringify(finalParsed ?? null, null, 2)),
+      ]);
+    } catch (e: any) {
+      trace.steps.push({
+        type: 'PersistRunFailed',
+        ok: false,
+        errors: [{ message: String(e?.message ?? e) }],
+      });
+    }
   }
 
   return {

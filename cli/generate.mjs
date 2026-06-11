@@ -851,7 +851,7 @@ function generateLogProfile(name, ctx) {
 # Typical production shape: ship structured events to DD, with a local
 # mirror for dev runs.
 destination :datadog,
-  endpoint: ENV["DD_LOG_INTAKE_URL"] || "https://http-intake.logs.datadoghq.com/api/v2/logs",
+  endpoint: ENV["DD_LOG_INTAKE_URL"],
   api_key_env: "CAMBIUM_DATADOG_API_KEY"
 # destination :stdout
 
