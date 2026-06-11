@@ -17,18 +17,24 @@
 //    lands as the DD default (`info`), breaking severity facets and
 //    monitor queries like `status:error`. See `mapDatadogStatus`.
 //
-// Endpoint default: `https://http-intake.logs.datadoghq.com/api/v2/logs`
-// (US1 region). Non-US operators set `endpoint:` in the profile.
+// Endpoint: must be set via `endpoint:` in the DSL declaration (e.g.
+// `endpoint: ENV["DD_LOG_INTAKE_URL"]`). US1 intake is the standard value;
+// non-US operators use their region's intake URL. No default is provided —
+// an explicit endpoint is required so the destination is always intentional.
 // Credential env var defaults to `CAMBIUM_DATADOG_API_KEY`.
 
 import type { LogEvent, LogSink } from '../event.js';
 import { guardLogEndpoint } from '../guard.js';
 
-const DEFAULT_ENDPOINT = 'https://http-intake.logs.datadoghq.com/api/v2/logs';
 const DEFAULT_API_KEY_ENV = 'CAMBIUM_DATADOG_API_KEY';
 
 export const datadog: LogSink = async (event, dest) => {
-  const endpoint = dest.endpoint ?? DEFAULT_ENDPOINT;
+  const endpoint = dest.endpoint;
+  if (!endpoint) {
+    throw new Error(
+      'log :datadog: endpoint is required. Set `endpoint: ENV["DD_LOG_INTAKE_URL"]` in your log profile.',
+    );
+  }
   const apiKeyEnv = dest.api_key_env ?? DEFAULT_API_KEY_ENV;
   const apiKey = process.env[apiKeyEnv];
 

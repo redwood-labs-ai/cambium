@@ -98,6 +98,87 @@ try {
   assert(!!runnerTarball, `Runner tarball produced: ${runnerTarball ?? '(missing)'}`);
   if (!cliTarball || !runnerTarball) throw new Error('Missing tarball — cannot continue');
 
+  // ── Dist/source parity — catch stale dist (0.6.0 divergence class) ──
+  console.log('\n[1.5/6] Checking dist/source parity (divergence guard)');
+  {
+    // Extract export names from a .ts source file using simple regexes over
+    // `export function/const/class/async function`, `export type Name`,
+    // `export { Name }`, and `export type { Name }` (including `as Alias` forms).
+    // No full AST — sufficient to catch "added to source, dist not rebuilt."
+    // Not captured: `export * from` (no named export) or `export default`.
+    function extractTsExports(srcPath) {
+      if (!existsSync(srcPath)) return [];
+      const src = readFileSync(srcPath, 'utf8');
+      const names = [];
+      // export function / export const / export class / export async function
+      for (const m of src.matchAll(/^export\s+(?:async\s+)?(?:function|const|class)\s+([A-Za-z_$][A-Za-z0-9_$]*)/gm)) {
+        names.push(m[1]);
+      }
+      // export type Name (standalone — not export type { ... })
+      for (const m of src.matchAll(/^export\s+type\s+(?!\{)([A-Za-z_$][A-Za-z0-9_$]*)/gm)) {
+        names.push(m[1]);
+      }
+      // export { Name } / export { Name as Alias } / export type { Name } / export type { Name as Alias }
+      // Capture the local name (before any `as`). Skip `export * from` and `export default`.
+      for (const m of src.matchAll(/^export\s+(?:type\s+)?\{([^}]+)\}/gm)) {
+        for (const entry of m[1].split(',')) {
+          const local = entry.trim().split(/\s+as\s+/)[0].trim();
+          if (local && local !== 'default') names.push(local);
+        }
+      }
+      return names;
+    }
+
+    const RUNNER_ROOT = join(ROOT, 'packages', 'cambium-runner');
+    const criticalPairs = [
+      {
+        label: 'field_values',
+        src: join(RUNNER_ROOT, 'src', 'correctors', 'field_values.ts'),
+        dist: join(RUNNER_ROOT, 'dist', 'correctors', 'field_values.js'),
+      },
+      {
+        label: 'network-guard',
+        src: join(RUNNER_ROOT, 'src', 'tools', 'network-guard.ts'),
+        dist: join(RUNNER_ROOT, 'dist', 'tools', 'network-guard.js'),
+      },
+      {
+        label: 'registry',
+        src: join(RUNNER_ROOT, 'src', 'tools', 'registry.ts'),
+        dist: join(RUNNER_ROOT, 'dist', 'tools', 'registry.js'),
+      },
+      {
+        label: 'wasm',
+        src: join(RUNNER_ROOT, 'src', 'exec-substrate', 'wasm.ts'),
+        dist: join(RUNNER_ROOT, 'dist', 'exec-substrate', 'wasm.js'),
+      },
+    ];
+
+    let parityOk = true;
+    for (const { label, src, dist } of criticalPairs) {
+      const exports = extractTsExports(src);
+      if (exports.length === 0) {
+        console.log(`  ✓ ${label}: no exports to check (or file absent)`);
+        continue;
+      }
+      if (!existsSync(dist)) {
+        console.log(`  ✗ ${label}: dist file missing — ${dist}`);
+        failures.push(`dist diverged: ${label} dist file missing`);
+        parityOk = false;
+        continue;
+      }
+      const distSrc = readFileSync(dist, 'utf8');
+      const missing = exports.filter((name) => !distSrc.includes(name));
+      if (missing.length === 0) {
+        console.log(`  ✓ ${label}: ${exports.length}/${exports.length} exports present in dist`);
+      } else {
+        console.log(`  ✗ ${label}: missing in dist — ${missing.join(', ')}`);
+        failures.push(`dist diverged: ${label}: missing — ${missing.join(', ')}`);
+        parityOk = false;
+      }
+    }
+    assert(parityOk, 'dist matches source exports across all critical files');
+  }
+
   // ── Inspect CLI tarball contents — catch shrinkwrap, workspace-source leaks ──
   console.log('\n[2/6] Inspecting CLI tarball contents');
   const cliTarballPath = join(packDir, cliTarball);

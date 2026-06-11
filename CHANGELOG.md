@@ -4,6 +4,24 @@ All notable changes to Cambium are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Cambium adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] — 2026-06-08
+
+Patch release. Four fixes surfaced by engine-mode dogfood (`cambium-lnd` v0 on runner 0.6.0→0.7.0) plus a socket.dev hardening item.
+
+### Added
+
+- **`RunGenOptions.persistRun?: boolean` — opt-in run artifact persistence (RED-420 Issue 5).** When `true`, `runGen` writes `runs/<id>/{ir,trace,output}.json` to disk before returning — the same layout the CLI and `cambium inspect` already consume. Defaults to `false`; existing library callers are unaffected. Write failures push a `PersistRunFailed` trace step and never fail the run (same stance as log-sink failures). Eliminates the boilerplate every engine-mode library host was reimplementing to get observable runs.
+- **Pre-publish dist/source parity check (`[1.5/6]` in `scripts/pre-publish-check.mjs`).** A new step between pack and install extraction extracts the named exports from four critical `.ts` source files (`field_values`, `network-guard`, `registry`, `wasm`) and verifies each appears in the corresponding `.js` dist file. Catches the 0.6.0 class of divergence where a source fix is present but the committed dist was not rebuilt. Covers `export function/const/class`, `export { Name }` re-exports, and `export type` forms.
+
+### Fixed
+
+- **`smol-toml` missing from `cambium-runner` declared dependencies (RED-420 Issue 2).** `smol-toml` was imported in `dist/genfile.js` and `dist/serve/gen-catalog.js` but absent from `packages/cambium-runner/package.json`'s `dependencies`. Hosts installing the runner without separately vendoring `smol-toml` hit `Cannot find module 'smol-toml'` at runtime. Declared at `1.6.1` (already locked in the monorepo).
+- **`log :datadog` endpoint is now required — no silent default (socket.dev hardening).** The runner's `DEFAULT_ENDPOINT` constant (`https://http-intake.logs.datadoghq.com/api/v2/logs`) was hardcoded as a runtime fallback, flagged by socket.dev as a potential telemetry signal. Removed. A `log :datadog` destination without an explicit `endpoint:` now throws a clear error at run time. The `cambium new log_profile` scaffolder already generates `endpoint: ENV["DD_LOG_INTAKE_URL"]` — no template change needed for new projects. **Migration for existing users:** add `endpoint: ENV["DD_LOG_INTAKE_URL"]` (or your region's intake URL) to your `:datadog` destination declaration.
+
+### Changed
+
+- **`@redwood-labs/cambium`** and **`@redwood-labs/cambium-runner`** bump to `0.7.2`. No CLI surface removals.
+
 ## [0.7.1] — 2026-06-07
 
 Patch release. Fixes `README.md` missing from both published tarballs — both packages declare an explicit `files` allowlist, which overrides npm's default README-always-included behavior. `README.md` added to the `files` array in each `package.json`. No code changes.
