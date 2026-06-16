@@ -5,16 +5,20 @@
       "class ${1:ModelName} < GenModel",
       "  model \"${2|omlx:gemma-3-27b-it,omlx:Qwen3.5-27B-4bit,ollama:gemma3|}\"",
       "  system :${3:system_prompt}",
-      "  returns ${4:SchemaName}",
       "",
-      "  def ${5:method_name}(input)",
-      "    generate \"${6:prompt}\" do",
+      "  returns do",
+      "    field :${4:summary}, String",
+      "    # field :${5:count}, Integer, optional: true",
+      "  end",
+      "",
+      "  def ${6:method_name}(input)",
+      "    generate \"${7:prompt}\" do",
       "      with context: input",
       "    end",
       "  end",
       "end"
     ],
-    "description": "Cambium GenModel class with generate block"
+    "description": "Cambium GenModel class with inline returns do block (RED-419). Use `returns :SchemaName` as escape hatch for complex schemas."
   },
   "Constrain block": {
     "prefix": "constrain",
@@ -28,10 +32,9 @@
     "body": [
       "generate \"${1:prompt}\" do",
       "  with context: ${2:input}",
-      "  returns ${3:SchemaName}",
       "end"
     ],
-    "description": "Generate transaction block"
+    "description": "Generate transaction block. Per-step `returns` is not used by the runner; schema is declared at the class level via `returns do`."
   },
   "Extract signal": {
     "prefix": "signal",

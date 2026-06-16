@@ -50,6 +50,13 @@
           }
         },
         {
+          "comment": "field declaration inside a `returns do … end` schema block (RED-419)",
+          "match": "^\\s*(field)\\b",
+          "captures": {
+            "1": { "name": "keyword.other.primitive.cambium support.function.cambium" }
+          }
+        },
+        {
           "comment": "Contract + policy primitives",
           "match": "^\\s*(uses|corrects|constrain|extract|grounded_in|enrich|repair|mode|security|budget|log|cron)\\b",
           "captures": {
@@ -79,7 +86,7 @@
         },
         {
           "comment": "Keyword arguments for primitives (RED-215 memory, RED-239 retain, RED-248/254/258/259 exec, RED-238 semantic query, RED-381 pipeline)",
-          "match": "\\b(to|type|path|strategy|passes|unit|target|operation|store_as|max_attempts|stop_on_no_improvement|network|filesystem|exec|allowlist|allowlist_paths|denylist|block_private|block_metadata|roots|allowed|per_tool|per_run|max_calls|size|top_k|scope|keyed_by|embed|ttl|max_entries|runtime|language|cpu|memory|timeout|query|arg_field|require_keyed_by_for|max_ttl|default_ttl|ban_scope|allowed_pools|require_citations|verify|include|granularity|endpoint|api_key_env|at|tz|id|method|gen|collect_into|on_branch_failure|pass_context|concurrency|over|as|schema|tokens|tool_calls|with):",
+          "match": "\\b(to|type|path|strategy|passes|unit|target|operation|store_as|max_attempts|stop_on_no_improvement|network|filesystem|exec|allowlist|allowlist_paths|denylist|block_private|block_metadata|roots|allowed|per_tool|per_run|max_calls|size|top_k|scope|keyed_by|embed|ttl|max_entries|runtime|language|cpu|memory|timeout|query|arg_field|require_keyed_by_for|max_ttl|default_ttl|ban_scope|allowed_pools|require_citations|verify|include|granularity|endpoint|api_key_env|at|tz|id|method|gen|collect_into|on_branch_failure|pass_context|concurrency|over|as|schema|tokens|tool_calls|enum|optional|description|with):",
           "captures": {
             "1": { "name": "variable.parameter.cambium" }
           }

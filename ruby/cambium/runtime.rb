@@ -41,6 +41,142 @@ module Cambium
     end
   end
 
+  # RED-419 C1: collects `field` declarations from a `returns do … end`
+  # block into a JSON Schema (Draft-07) object Hash, recursively. The
+  # resulting Hash *is* a JSON Schema and is emitted inline into the IR
+  # under `returnSchema` (DEC-001). The closed type vocabulary is DEC-008.
+  #
+  # Type-token resolution (OQ-1): under compile.rb's `const_missing` hook,
+  # `String`/`Integer`/`Float` resolve to real Ruby Class objects while
+  # `Boolean` (no Ruby core class) arrives as a ConstRef. Both are mapped
+  # uniformly by name, so the four scalar tokens take one code path.
+  class ReturnSchemaCollector
+    # Maps a resolved-by-name scalar token to its Draft-07 type.
+    SCALAR_TYPES = {
+      'String'  => 'string',
+      'Integer' => 'integer',
+      'Float'   => 'number',
+      'Boolean' => 'boolean',
+    }.freeze
+
+    def self.build(&block)
+      collector = new
+      collector.instance_eval(&block)
+      collector.to_schema
+    end
+
+    def initialize
+      @properties = {}
+      @required = []
+      @order = []
+    end
+
+    # field :name, String
+    # field :tags, [String]                  # array of scalar
+    # field :score, Float, optional: true
+    # field :status, String, enum: %w[a b]   # enum on String only
+    # field :details do … end                # nested object
+    # field :items, [] do … end              # array of object (OQ-4)
+    def field(name, type = nil, optional: false, enum: nil, description: nil, &block)
+      key = name.to_s
+      if @properties.key?(key)
+        raise CompileError, "returns: duplicate field name '#{key}'."
+      end
+
+      @order << key
+      @properties[key] = build_field(key, type, enum, description, &block)
+      @required << key unless optional
+    end
+
+    def to_schema
+      if @order.empty?
+        raise CompileError, 'returns do … end block declares no fields.'
+      end
+      {
+        'type'       => 'object',
+        'properties' => @order.each_with_object({}) { |k, h| h[k] = @properties[k] },
+        'required'   => @order.reject { |k| !@required.include?(k) },
+        'additionalProperties' => false,
+      }
+    end
+
+    private
+
+    # Resolve a scalar/array/nested type into a JSON Schema fragment.
+    def build_field(field_name, type, enum, description, &block)
+      schema =
+        if block && (type.nil? || (type.is_a?(Array) && type.empty?))
+          # Nested object (`field :x do … end`) or array-of-object
+          # (`field :x, [] do … end`, OQ-4): the block defines the object
+          # shape; an empty `[]` in type position wraps it in an array.
+          object = self.class.build(&block)
+          if type.is_a?(Array)
+            { 'type' => 'array', 'items' => object }
+          else
+            object
+          end
+        elsif type.is_a?(Array)
+          # Array of scalar/nested-type: `[T]` — exactly one element token.
+          unless type.length == 1
+            raise CompileError,
+                  "returns: field '#{field_name}' array literal must have exactly one " \
+                  "element type (e.g. [String]); for an array of objects use " \
+                  "`field :#{field_name}, [] do … end`."
+          end
+          { 'type' => 'array', 'items' => scalar_schema(field_name, type[0]) }
+        elsif type.nil?
+          raise CompileError,
+                "returns: field '#{field_name}' has no type. Give it a type token " \
+                "(String/Integer/Float/Boolean), an array (`[String]`), or a nested " \
+                "block (`field :#{field_name} do … end`)."
+        else
+          scalar_schema(field_name, type)
+        end
+
+      apply_enum!(field_name, schema, enum) unless enum.nil?
+      schema['description'] = description.to_s unless description.nil?
+      schema
+    end
+
+    # Map a single scalar token (Class or ConstRef) to its Draft-07 type.
+    def scalar_schema(field_name, token)
+      type_name = token_name(token)
+      json_type = SCALAR_TYPES[type_name]
+      unless json_type
+        raise CompileError,
+              "returns: field '#{field_name}' has unknown type '#{type_name}'. " \
+              "Supported: #{SCALAR_TYPES.keys.join(', ')}, [T] arrays, and nested blocks. " \
+              "For anything else, use `returns :Symbol` with a hand-written contract."
+      end
+      { 'type' => json_type }
+    end
+
+    # enum: %w[...] is allowed on String only (DEC-008).
+    def apply_enum!(field_name, schema, enum)
+      unless schema['type'] == 'string'
+        raise CompileError,
+              "returns: field '#{field_name}' uses `enum:` but is not a String. " \
+              "`enum:` is supported on String fields only."
+      end
+      values = Array(enum).map(&:to_s)
+      if values.empty?
+        raise CompileError, "returns: field '#{field_name}' has an empty `enum:`."
+      end
+      schema['enum'] = values
+    end
+
+    # Resolve a token to its name: real Class → Class#name; ConstRef →
+    # its captured name. Anything else stringifies (and will fail the
+    # SCALAR_TYPES lookup with a clear message).
+    def token_name(token)
+      case token
+      when Class then token.name
+      when ConstRef then token.name
+      else token.to_s
+      end
+    end
+  end
+
   # Shared validation/normalization for security and budget shapes.
   # Used by the gen-side DSL methods AND by the policy-pack builder so
   # the two paths can never drift on what's accepted.
@@ -1152,14 +1288,27 @@ module Cambium
       # Cleaner than the brittle /no_think user-prompt directive.
       MODEL_KWARGS = %i[disable_thinking].freeze
 
-      def model(id, **opts)
+      # RED-421: `model` accepts varargs for multi-provider fallback.
+      #
+      #   model "anthropic:claude-opus"                    # single — unchanged
+      #   model "anthropic:claude-opus", "bedrock:claude-opus"  # primary + fallbacks
+      #
+      # The primary (first arg) becomes `model.id`; remaining args become
+      # `model.fallbacks`. Each id is alias-resolved at compile time (RED-237).
+      # The single-arg form emits byte-identically to pre-RED-421 (no
+      # `fallbacks` key in the IR).
+      def model(*ids, **opts)
+        if ids.empty?
+          raise ArgumentError, 'model: at least one model id is required.'
+        end
         unknown = opts.keys - MODEL_KWARGS
         unless unknown.empty?
           raise ArgumentError,
                 "model: unknown kwargs: #{unknown.join(', ')}. " \
                 "Allowed: #{MODEL_KWARGS.join(', ')}."
         end
-        _cambium_defaults[:model] = id
+        _cambium_defaults[:model] = ids[0]
+        _cambium_defaults[:model_fallbacks] = ids[1..] unless ids.length == 1
         _cambium_defaults[:model_options] = opts unless opts.empty?
       end
 
@@ -1182,9 +1331,27 @@ module Cambium
         _cambium_defaults[:max_tokens] = v
       end
 
-      def returns(schema_const)
-        # schema_const might be a constant; we store the symbol name
-        _cambium_defaults[:returnSchema] = schema_const.to_s
+      # Two forms (RED-419 C1):
+      #   returns :Symbol / returns SomeContract  → name-ref into contracts.ts
+      #     (the escape hatch; emits returnSchemaId, unchanged).
+      #   returns do … end                        → inline field block; the
+      #     collected JSON Schema is emitted into the IR under returnSchema
+      #     (DEC-001). Symbol and block forms are mutually exclusive.
+      def returns(schema_const = nil, &block)
+        if block
+          unless schema_const.nil?
+            raise CompileError,
+                  'returns: pass either a schema name (`returns :Foo`) or a ' \
+                  'block (`returns do … end`), not both.'
+          end
+          _cambium_defaults[:returnSchemaInline] = Cambium::ReturnSchemaCollector.build(&block)
+        else
+          if schema_const.nil?
+            raise CompileError, 'returns: needs a schema name or a `do … end` block.'
+          end
+          # schema_const might be a constant; we store the symbol name
+          _cambium_defaults[:returnSchema] = schema_const.to_s
+        end
       end
 
       def uses(*tools)

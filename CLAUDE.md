@@ -15,13 +15,18 @@ Ask what they want to build, then:
 ```bash
 cambium new agent <AgentName>
 ```
-This creates the `.cmb.rb` file, system prompt, and test.
+This creates the `.cmb.rb` file, system prompt, and test — including a golden regression test (fixture + snapshot, deterministic via `--mock`; see `P - Golden Tests`).
 
 ### Step 2: Define the schema
-```bash
-cambium new schema <SchemaName>
+The scaffolded `.cmb.rb` already has a `returns do … end` block. Edit the `field` declarations inside it to match the output you want:
+```ruby
+returns do
+  field :summary, String
+  field :score, Float, optional: true
+  field :tags, [String]
+end
 ```
-In app mode this prints TypeBox boilerplate for `<app>/src/contracts.ts`; in engine mode it appends to the sibling `schemas.ts`. Help them define the fields their agent should return.
+No hand-written TypeScript needed — the block compiles to an inline schema. If the block vocabulary (`String`/`Integer`/`Float`/`Boolean`, arrays, nested objects, `enum:` on String) doesn't cover your schema, run `cambium new schema <SchemaName>` as the escape hatch and switch to `returns :SchemaName`.
 
 ### Step 3: Edit the system prompt
 Open `<app>/app/systems/<agent_name>.system.md` and help them write a focused role description.
@@ -40,7 +45,7 @@ Look at the trace (`runs/<run_id>/trace.json`) and help them tune the agent — 
 ## Key concepts
 
 - **GenModel**: a Ruby class that declares an LLM program with contracts
-- **`returns`**: typed output schema (TypeBox → JSON Schema → AJV validation)
+- **`returns`**: typed output schema. Two forms — an inline `returns do … end` field block (closed vocabulary → Draft-07 JSON Schema inline in the IR, RED-419) or `returns :Symbol` referencing hand-written TypeBox in `contracts.ts` (the escape hatch). Both → AJV validation. See [`P - returns`](docs/GenDSL%20Docs/P%20-%20returns.md).
 - **`uses`**: tool access (deny-by-default, logged, typed)
 - **`corrects`**: deterministic post-validation transforms (built-ins: math, dates, currency, citations, field_values); error-severity issues feed the repair loop, healed concerns are re-verified, exhaustion emits `CorrectAcceptedWithErrors`. App overrides in `app/correctors/`. See [`P - corrects (correctors)`](docs/GenDSL%20Docs/P%20-%20corrects%20%28correctors%29.md) and [`C - Repair Loop`](docs/GenDSL%20Docs/C%20-%20Repair%20Loop.md).
 - **`log`**: per-gen trace fan-out to observability backends (`:stdout`, `:http_json`, `:datadog`, app plugins under `app/logs/`); framework-owned event vocabulary; sink failures never fail the run. See [`P - log`](docs/GenDSL%20Docs/P%20-%20log.md).
@@ -207,6 +212,9 @@ One line per invariant; full text behind each pointer.
 - **Correctors are per-`runGen`, never module-global (RED-299)**: the registry is built fresh per call; `handleCorrect` / `runCorrectorPipeline` take it as a parameter. A module-global read re-opens silent cross-app overrides. [`P - corrects (correctors)`](docs/GenDSL%20Docs/P%20-%20corrects%20%28correctors%29.md)
 - **Every repair-step push goes through `pushRepairStep` (RED-280)** — six sites; the helper pairs the trace push with budget tracking so a new site can't leak spend. [`C - Repair Loop`](docs/GenDSL%20Docs/C%20-%20Repair%20Loop.md)
 - **Model aliases resolve at compile time only (RED-237)**: the TS runner never sees a Symbol; don't add runtime alias resolution. [`N - Model Identifiers`](docs/GenDSL%20Docs/N%20-%20Model%20Identifiers.md)
+- **Multi-provider fallback (RED-421)**: `model "primary", "fallback1", …` emits `model.fallbacks[]` in the IR; fallback ids resolve at compile time (RED-237) — the runner sees only literal `provider:name` strings, never a Symbol. Transient errors walk the chain in order: HTTP 5xx / 408 / 425 / 429 (`ProviderHttpError`, DEC-A/DEC-C), and connection-level failures — ECONNREFUSED / DNS / TLS / no HTTP response — (`ProviderConnectionError` status 0, DEC-D; built-in providers emit this automatically). Deterministic 4xx fail immediately — a bad request fails on every provider. Custom providers: throw `ProviderHttpError` (typed HTTP status, exported from the runner) for server-error responses; throw `ProviderConnectionError` (also exported; subclasses `ProviderHttpError` with `status: 0`) for pre-response connection failures. A plain `Error` or `TypeError` — any non-`ProviderHttpError` — is classified deterministic (DEC-A unchanged) — prevents a cost-blowing fan-out. The native-document gate fires against the primary provider BEFORE the `--mock` short-circuit. Single-`model` IRs are byte-identical to pre-RED-421 (no `fallbacks` key). [`N - Model Identifiers`](docs/GenDSL%20Docs/N%20-%20Model%20Identifiers.md) § Multi-provider fallback; [`C - IR`](docs/GenDSL%20Docs/C%20-%20IR%20%28Intermediate%20Representation%29.md) § `model.fallbacks`
+- **`returns` block → inline `returnSchema`, additive and self-contained (RED-419)**: `returns do … end` emits a Draft-07 schema **inline** in the IR (`returnSchema`, `$id: "<ClassName>Output"`); the runner resolves `ir.returnSchema ?? contractsMod[ir.returnSchemaId]` — inline wins. `returns :Symbol` stays byte-identical (parallel branch, never a rewrite of the symbol path — that's the additive-only constraint). The type vocabulary is a **closed enum** (String/Integer/Float/Boolean, `[T]`, nested/array-of-object blocks, `enum:` on String, `optional:`, `description:`); anything else stays on `returns :Symbol`. Widening the vocab touches the Ruby collector AND the TS emitter AND `P - returns`/`C - IR`. [`P - returns`](docs/GenDSL%20Docs/P%20-%20returns.md)
+- **Generated-contracts sentinel: never clobber a non-sentinel file (RED-419/RED-222)**: `cambium compile --write` regenerates `src/contracts.generated.ts` (types-only — runtime uses the inline IR schema, not this file) only in **app mode**, only under **`--write`**, behind the RED-222 guard family: fixed filename anchored on `appPkgRoot` (no symbol-into-path join), `relative()` escape check, and a first-line `@generated by cambium` marker check that **hard-errors** rather than overwrite a hand-authored file. The marker string is a one-way-door contract — changing it orphans existing generated files. [`P - returns`](docs/GenDSL%20Docs/P%20-%20returns.md)
 - **Log events: framework-owned vocabulary, fire-and-forget emission (RED-282/302)**: a new event type requires extending the runner AND `C - Trace`; sink errors emit `LogFailed` and never fail the run; profile references inline at compile time. [`P - log`](docs/GenDSL%20Docs/P%20-%20log.md)
 - **Cron: Cambium owns semantics, NOT the lifecycle (RED-273/305)**: no in-process scheduler, ever — external schedulers invoke `cambium run ... --fired-by schedule:<id>`, validated against `ir.policies.schedules[]` at startup; `memory scope: :schedule` needs both the compile-time cron pairing and the runtime fired-by guard. [`P - cron (schedule)`](docs/GenDSL%20Docs/P%20-%20cron%20%28schedule%29.md), [`N - Scheduled Gens (RED-273)`](docs/GenDSL%20Docs/N%20-%20Scheduled%20Gens%20%28RED-273%29.md)
 

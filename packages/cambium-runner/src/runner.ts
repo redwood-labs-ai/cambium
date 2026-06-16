@@ -32,6 +32,8 @@ import {
 } from './inline-tool-calls.js';
 import { buildBuiltinRegistry } from './providers/builtins.js';
 import { ProviderRegistry } from './providers/registry.js';
+import { ProviderHttpError } from './providers/types.js';
+import type { CambiumProvider } from './providers/types.js';
 import {
   planMemory,
   readMemoryForRun,
@@ -174,56 +176,161 @@ function resolveDisableThinking(modelName: string, modelOptions?: { disable_thin
 // per-run (not once at module scope) gives long-lived engine-mode hosts the
 // same App-A-can't-leak-into-App-B isolation the corrector registry has
 // (RED-299).
-function makeGenerateText(providerRegistry: ProviderRegistry) {
- return async function generateText(opts: { model: string; system: string; prompt: string; max_tokens?: number; temperature?: number; jsonSchema?: any; documents?: any[]; modelOptions?: { disable_thinking?: boolean }; }): Promise<GenerateResult> {
-  const { provider: prefix, name } = parseModelId(opts.model);
+
+// RED-421 (DEC-C/D): the transient HTTP status set. 5xx (server-side), 429
+// (rate limited), 408 (Request Timeout — server-side connection timeout) and
+// 425 (Too Early — server refused to risk replaying early-data TLS) are all
+// retry-worthy on the next candidate. Status 0 is the DEC-D sentinel for a
+// connection-level failure (ECONNREFUSED / DNS / TLS — no HTTP response
+// received); built-in providers wrap those in `ProviderConnectionError` which
+// hardcodes `super(0, message)`. Every other status (4xx bad request, auth,
+// not-found) is deterministic: the same request fails on every provider.
+function isTransientStatus(status: number): boolean {
+  return (
+    status === 0 ||
+    status === 408 ||
+    status === 425 ||
+    status === 429 ||
+    (status >= 500 && status <= 599)
+  );
+}
+
+// RED-421 (DEC-A): classify a provider error as transient (trigger fallback)
+// or deterministic (fail fast). Built-in providers throw a typed
+// `ProviderHttpError` carrying the HTTP status, so the classifier reads the
+// status directly instead of regex-sniffing the message string.
+//
+// CRITICAL (DEC-A sub-decision): an untyped error — a plain `Error`,
+// `TypeError`, anything that is NOT a `ProviderHttpError` — is classified
+// DETERMINISTIC (returns false, no fan-out). This is the safe default: a
+// custom-provider author who doesn't know about `ProviderHttpError` produces
+// controlled failure rather than a cost-blowing fan-out to every fallback.
+// Custom providers that want retry-on-transient must throw `ProviderHttpError`.
+export function isTransientProviderError(err: unknown): boolean {
+  if (err instanceof ProviderHttpError) return isTransientStatus(err.status);
+  return false;
+}
+
+function makeGenerateText(providerRegistry: ProviderRegistry, traceSteps: any[]) {
+ return async function generateText(opts: { model: string; system: string; prompt: string; max_tokens?: number; temperature?: number; jsonSchema?: any; documents?: any[]; modelOptions?: { disable_thinking?: boolean }; fallbacks?: string[]; }): Promise<GenerateResult & { modelUsed?: string }> {
   const documents = opts.documents ?? [];
-  const disableThinking = resolveDisableThinking(name, opts.modelOptions);
 
-  const provider = providerRegistry.get(prefix);
-  if (!provider) {
-    throw new Error(
-      `Unknown model provider "${prefix}". Known providers: ${providerRegistry.names().join(', ')}.`,
-    );
-  }
-
-  // RED-323: fail fast if a gen with native document input hits a
-  // provider that doesn't support it. Silently JSON.stringifying a
-  // 30 KB+ base64 blob into the prompt would be a token bomb and
-  // produce a useless response. This gate runs BEFORE the mock check
-  // so `--mock` can't green-light a configuration that would fail in
-  // production (cambium-security RED-323 review finding).
-  if (documents.length > 0 && !provider.supportsDocuments) {
-    const kinds = [...new Set(documents.map(d => d.kind))].join(', ');
-    throw new Error(
-      `Provider "${prefix}" does not support native document input (kinds: ${kinds}). ` +
-      `Switch to an anthropic: model, or pre-extract text and pass it as a plain string.`
-    );
+  // RED-323 / RED-421 (DEC-B / AUD-421-3): the native-document gate runs for
+  // the PRIMARY provider BEFORE the mock short-circuit, so `--mock` can't
+  // green-light a document-bearing config that would fail in production (the
+  // cambium-security RED-323 finding). Mock bypasses provider dispatch
+  // entirely, so this primary gate must run here, not inside the loop. The
+  // per-candidate gate below covers fallback providers.
+  if (documents.length > 0) {
+    const { provider: primaryPrefix } = parseModelId(opts.model);
+    const primaryProvider = providerRegistry.get(primaryPrefix);
+    // Only gate a resolvable provider. An unknown prefix is left for the
+    // candidate loop to surface as the "unknown provider" error as before.
+    if (primaryProvider && !primaryProvider.supportsDocuments) {
+      const kinds = [...new Set(documents.map(d => d.kind))].join(', ');
+      throw new Error(
+        `Provider "${primaryPrefix}" does not support native document input (kinds: ${kinds}). ` +
+        `Switch to an anthropic: model, or pre-extract text and pass it as a plain string.`
+      );
+    }
   }
 
   // Force-mock path: `--mock` on the CLI sets CAMBIUM_ALLOW_MOCK=1, which
   // MUST mean "use the deterministic stub, do not contact any model
-  // backend." This runs after the doc-gate (above) so a bad config still
-  // fails, but before any provider fetch.
+  // backend." Runs after the primary document gate above so `--mock`
+  // short-circuits the fallback chain — no real providers are consulted,
+  // no fallback trace steps are emitted.
   if (process.env.CAMBIUM_ALLOW_MOCK === '1') {
     return { text: mockGenerate(opts.prompt, opts.jsonSchema) };
   }
 
-  try {
-    return await provider.generateText({
-      model: name,
-      system: opts.system,
-      prompt: opts.prompt,
-      max_tokens: opts.max_tokens,
-      temperature: opts.temperature,
-      jsonSchema: opts.jsonSchema,
-      documents,
-      modelOptions: { disable_thinking: disableThinking },
-    });
-  } catch (err: any) {
-    const hint = provider.fetchFailureHint ?? `${prefix} fetch failed.`;
-    throw new Error(`${hint}\nOriginal error: ${err?.message ?? String(err)}`);
+  // RED-421: build the ordered list of model ids to try: primary first,
+  // then fallbacks. On each attempt, dispatch through the same per-run
+  // ProviderRegistry. No stickiness — each generation attempt walks fresh.
+  const candidates = [opts.model, ...(opts.fallbacks ?? [])];
+  let lastErr: unknown;
+
+  for (let i = 0; i < candidates.length; i++) {
+    const modelId = candidates[i];
+    const { provider: prefix, name } = parseModelId(modelId);
+    const disableThinking = resolveDisableThinking(name, opts.modelOptions);
+
+    const provider = providerRegistry.get(prefix);
+    if (!provider) {
+      throw new Error(
+        `Unknown model provider "${prefix}". Known providers: ${providerRegistry.names().join(', ')}.`,
+      );
+    }
+
+    // RED-323: fail fast if a gen with native document input hits a
+    // provider that doesn't support it. Silently JSON.stringifying a
+    // 30 KB+ base64 blob into the prompt would be a token bomb and
+    // produce a useless response.
+    //
+    // RED-421: this per-candidate gate covers the FALLBACK providers. A
+    // fallback that also doesn't support documents fails the same way — we
+    // don't silently drop documents to enable fallback. The PRIMARY provider
+    // is gated earlier (before the mock short-circuit, DEC-B); the i === 0
+    // case here is redundant with that gate but harmless.
+    if (documents.length > 0 && !provider.supportsDocuments) {
+      const kinds = [...new Set(documents.map(d => d.kind))].join(', ');
+      throw new Error(
+        `Provider "${prefix}" does not support native document input (kinds: ${kinds}). ` +
+        `Switch to an anthropic: model, or pre-extract text and pass it as a plain string.`
+      );
+    }
+
+    // RED-421: emit a ModelFallback trace step BEFORE trying a fallback so
+    // the trace is readable in order: ModelFallback(primary failed) → success
+    // on fallback. Not emitted for the primary attempt (i === 0).
+    if (i > 0) {
+      traceSteps.push({
+        type: 'ModelFallback',
+        ok: true,
+        meta: {
+          attempted: candidates[i - 1],
+          fallback_to: modelId,
+          error_class: isTransientProviderError(lastErr) ? 'transient' : 'deterministic',
+          reason: lastErr instanceof Error ? lastErr.message.slice(0, 300) : String(lastErr),
+        },
+      });
+    }
+
+    try {
+      const result = await provider.generateText({
+        model: name,
+        system: opts.system,
+        prompt: opts.prompt,
+        max_tokens: opts.max_tokens,
+        temperature: opts.temperature,
+        jsonSchema: opts.jsonSchema,
+        documents,
+        modelOptions: { disable_thinking: disableThinking },
+      });
+      // Surface which model actually produced the result so Generate meta can
+      // reflect the fallback (model_used != ir.model.id when a fallback ran).
+      return { ...result, modelUsed: modelId };
+    } catch (err: any) {
+      lastErr = err;
+      // Only try the next fallback on transient errors. A deterministic 4xx
+      // (bad request, auth failure, etc.) will fail on every provider — fail
+      // fast rather than wasting calls. Connection errors (ProviderConnectionError,
+      // status 0) and 5xx/429/408/425 are worth retrying on the next candidate.
+      if (i < candidates.length - 1 && isTransientProviderError(err)) {
+        // Continue to the next candidate.
+        continue;
+      }
+      // No more candidates or deterministic error: surface the error.
+      // AUD-F2: preserve the typed error as `cause` so callers can still
+      // `instanceof ProviderHttpError` to read the status — matches
+      // generateWithTools which re-throws err raw.
+      const hint = provider.fetchFailureHint ?? `${prefix} fetch failed.`;
+      throw new Error(`${hint}\nOriginal error: ${err?.message ?? String(err)}`, { cause: err });
+    }
   }
+
+  // Should not be reachable: the loop always throws or returns.
+  throw new Error('[cambium] generateText: exhausted all model candidates without returning');
  };
 }
 
@@ -235,7 +342,7 @@ type GenerateWithToolsResult = {
   usage?: TokenUsage;
 };
 
-function makeGenerateWithTools(providerRegistry: ProviderRegistry) {
+function makeGenerateWithTools(providerRegistry: ProviderRegistry, traceSteps: any[]) {
  return async function generateWithTools(opts: {
   model: string;
   messages: Message[];
@@ -244,31 +351,30 @@ function makeGenerateWithTools(providerRegistry: ProviderRegistry) {
   temperature?: number;
   documents?: any[];
   modelOptions?: { disable_thinking?: boolean };
-}): Promise<GenerateWithToolsResult> {
-  const { provider: prefix, name } = parseModelId(opts.model);
+  fallbacks?: string[];
+}): Promise<GenerateWithToolsResult & { modelUsed?: string }> {
   const documents = opts.documents ?? [];
-  const disableThinking = resolveDisableThinking(name, opts.modelOptions);
 
-  const provider = providerRegistry.get(prefix);
-  if (!provider) {
-    throw new Error(
-      `Agentic mode: unknown provider "${prefix}". Known providers: ${providerRegistry.names().join(', ')}.`,
-    );
+  // RED-323 / RED-421 (DEC-B / AUD-421-3): primary-provider native-document
+  // gate, BEFORE the mock short-circuit (same posture as generateText). Mock
+  // bypasses provider dispatch, so the primary gate must run here; the
+  // per-candidate gate below covers fallback providers.
+  if (documents.length > 0) {
+    const { provider: primaryPrefix } = parseModelId(opts.model);
+    const primaryProvider = providerRegistry.get(primaryPrefix);
+    if (primaryProvider && !primaryProvider.supportsDocuments) {
+      const kinds = [...new Set(documents.map(d => d.kind))].join(', ');
+      throw new Error(
+        `Provider "${primaryPrefix}" does not support native document input (kinds: ${kinds}). ` +
+        `Switch to an anthropic: model, or pre-extract text and pass it as a plain string.`
+      );
+    }
   }
 
-  // RED-323: fail fast if a gen with native document input hits a
-  // provider that doesn't support it. Same posture as generateText.
-  if (documents.length > 0 && !provider.supportsDocuments) {
-    const kinds = [...new Set(documents.map(d => d.kind))].join(', ');
-    throw new Error(
-      `Provider "${prefix}" does not support native document input (kinds: ${kinds}). ` +
-      `Switch to an anthropic: model, or pre-extract text and pass it as a plain string.`
-    );
-  }
-
-  // RED-375: Force-mock path. Return a single turn of mock text with no
-  // tool_calls so the agentic loop terminates immediately with the mock
-  // content as the final answer — same semantic as the non-agentic mock path.
+  // RED-375 / RED-421: Force-mock path. Return a single turn of mock text
+  // with no tool_calls so the agentic loop terminates immediately — short-
+  // circuits the entire fallback chain (same reasoning as generateText mock).
+  // Runs after the primary document gate above.
   if (process.env.CAMBIUM_ALLOW_MOCK === '1') {
     const lastUser = [...opts.messages].reverse().find(m => m.role === 'user');
     const promptText = typeof lastUser?.content === 'string' ? lastUser.content : '';
@@ -277,35 +383,89 @@ function makeGenerateWithTools(providerRegistry: ProviderRegistry) {
     };
   }
 
-  const result = await provider.generateWithTools({
-    model: name,
-    messages: opts.messages,
-    tools: opts.tools,
-    max_tokens: opts.max_tokens,
-    temperature: opts.temperature,
-    documents,
-    modelOptions: { disable_thinking: disableThinking },
-  });
+  // RED-421: walk candidates in order (primary then fallbacks).
+  const candidates = [opts.model, ...(opts.fallbacks ?? [])];
+  let lastErr: unknown;
 
-  // RED-393: inline tool-call markup parsing, lifted out of the per-provider
-  // branches (all three built-ins applied it identically). Some models emit
-  // tool calls as markup in `content` rather than structured tool_calls
-  // (RED-142 for Gemma on oMLX, same for Ollama/Anthropic). Triggers only
-  // when the provider returned no structured tool_calls.
-  let content = result.message.content;
-  let toolCalls = result.message.tool_calls;
-  if ((!toolCalls || toolCalls.length === 0) && content) {
-    const parsed = parseInlineToolCalls(content);
-    if (parsed.length > 0) {
-      toolCalls = parsed;
-      content = stripInlineToolCalls(content);
+  for (let i = 0; i < candidates.length; i++) {
+    const modelId = candidates[i];
+    const { provider: prefix, name } = parseModelId(modelId);
+    const disableThinking = resolveDisableThinking(name, opts.modelOptions);
+
+    const provider = providerRegistry.get(prefix);
+    if (!provider) {
+      throw new Error(
+        `Agentic mode: unknown provider "${prefix}". Known providers: ${providerRegistry.names().join(', ')}.`,
+      );
+    }
+
+    // RED-323: fail fast if a gen with native document input hits a
+    // provider that doesn't support it. Same posture as generateText.
+    // RED-421: this per-candidate gate covers the FALLBACK providers; the
+    // PRIMARY is gated before the mock short-circuit above (DEC-B).
+    if (documents.length > 0 && !provider.supportsDocuments) {
+      const kinds = [...new Set(documents.map(d => d.kind))].join(', ');
+      throw new Error(
+        `Provider "${prefix}" does not support native document input (kinds: ${kinds}). ` +
+        `Switch to an anthropic: model, or pre-extract text and pass it as a plain string.`
+      );
+    }
+
+    // RED-421: emit ModelFallback trace step before trying a fallback.
+    if (i > 0) {
+      traceSteps.push({
+        type: 'ModelFallback',
+        ok: true,
+        meta: {
+          attempted: candidates[i - 1],
+          fallback_to: modelId,
+          error_class: isTransientProviderError(lastErr) ? 'transient' : 'deterministic',
+          reason: lastErr instanceof Error ? lastErr.message.slice(0, 300) : String(lastErr),
+        },
+      });
+    }
+
+    try {
+      const result = await provider.generateWithTools({
+        model: name,
+        messages: opts.messages,
+        tools: opts.tools,
+        max_tokens: opts.max_tokens,
+        temperature: opts.temperature,
+        documents,
+        modelOptions: { disable_thinking: disableThinking },
+      });
+
+      // RED-393: inline tool-call markup parsing, lifted out of the per-provider
+      // branches (all three built-ins applied it identically). Some models emit
+      // tool calls as markup in `content` rather than structured tool_calls
+      // (RED-142 for Gemma on oMLX, same for Ollama/Anthropic). Triggers only
+      // when the provider returned no structured tool_calls.
+      let content = result.message.content;
+      let toolCalls = result.message.tool_calls;
+      if ((!toolCalls || toolCalls.length === 0) && content) {
+        const parsed = parseInlineToolCalls(content);
+        if (parsed.length > 0) {
+          toolCalls = parsed;
+          content = stripInlineToolCalls(content);
+        }
+      }
+
+      return {
+        message: { content, tool_calls: toolCalls },
+        usage: result.usage,
+        modelUsed: modelId,
+      };
+    } catch (err: any) {
+      lastErr = err;
+      if (i < candidates.length - 1 && isTransientProviderError(err)) {
+        continue;
+      }
+      throw err;
     }
   }
 
-  return {
-    message: { content, tool_calls: toolCalls },
-    usage: result.usage,
-  };
+  throw new Error('[cambium] generateWithTools: exhausted all model candidates without returning');
  };
 }
 
@@ -530,6 +690,14 @@ export interface RunGenOptions {
    *  run — same stance as log sink failures. Library callers that want
    *  artifact persistence without the full runGenFromIr wrapper use this. */
   persistRun?: boolean;
+  /** RED-421, TEST-ONLY: provider instances to inject into the per-run
+   *  registry AFTER the built-ins and AFTER app-provider discovery (so an
+   *  injected provider wins — same precedence as an app provider shadowing
+   *  a built-in). Keys are model-id prefixes. Used by the multi-provider
+   *  fallback integration tests to drive real ordered-failover coverage
+   *  without a live network target. NOT part of the public contract and may
+   *  be removed without notice; deliberately not exported in index.ts. */
+  _testProviders?: Map<string, CambiumProvider>;
 }
 
 export interface RunGenResult {
@@ -578,6 +746,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     runId: optsRunId,
     pipelineRunId: optsPipelineRunId,
     persistRun: optsPersistRun = false,
+    _testProviders: optsTestProviders,
   } = opts;
 
   // Plumb opts.mock through to the deterministic-mock branch in
@@ -670,7 +839,12 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   const isReplay = resumeCandidateOpt !== undefined;
 
   // ── Load contracts (caller-injected, RED-243) ───────────────────────
-  const schema = contractsMod[ir.returnSchemaId];
+  // RED-419 C2: a block-form `returns do … end` gen carries its schema
+  // inline in the IR (`ir.returnSchema`); the symbol form name-refs into
+  // the injected contracts module (`ir.returnSchemaId`). Inline wins when
+  // present — the two are mutually exclusive (compile.rb emits one or the
+  // other). The inline schema carries its own `$id` (stamped by compile.rb).
+  const schema = ir.returnSchema ?? contractsMod[ir.returnSchemaId];
   if (!schema) {
     throw new Error(
       `Schema not found in injected schemas for id: ${ir.returnSchemaId}. ` +
@@ -747,8 +921,19 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   // (RED-299 stance), and the dispatchers close over THIS registry.
   const providerRegistry = buildBuiltinRegistry();
   await providerRegistry.loadFromDir(join(appPkgRoot, 'app/providers'));
-  const generateText = makeGenerateText(providerRegistry);
-  const generateWithTools = makeGenerateWithTools(providerRegistry);
+  // RED-421, TEST-ONLY: merge injected fake providers last so they win
+  // (same precedence as an app provider shadowing a built-in). The map key
+  // is the model-id prefix; register() keys on provider.name, so force the
+  // name to the key (mirrors loadFromDir's `{ ...provider, name: base }`).
+  if (optsTestProviders) {
+    for (const [prefix, provider] of optsTestProviders) {
+      providerRegistry.register({ ...provider, name: prefix });
+    }
+  }
+  // RED-421: pass trace.steps so the dispatchers can push ModelFallback steps
+  // inline (the array reference is stable for the lifetime of this runGen call).
+  const generateText = makeGenerateText(providerRegistry, trace.steps);
+  const generateWithTools = makeGenerateWithTools(providerRegistry, trace.steps);
 
   // ── Build per-`runGen` corrector map (RED-275, RED-287, RED-299) ─────
   // Precedence (low → high; later entries win on name collision):

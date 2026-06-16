@@ -5,7 +5,7 @@
  * and support for tolerances/normalizers (dates, currency, citations).
  *
  * Usage:
- *   import { goldenTest, normalizeForComparison } from './golden.js';
+ *   import { goldenTest, normalizeStrings } from './golden.js';
  *
  *   it('analyst produces expected output', () => {
  *     const actual = runAnalyst(fixture);

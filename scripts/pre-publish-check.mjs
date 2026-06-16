@@ -101,32 +101,49 @@ try {
   // ── Dist/source parity — catch stale dist (0.6.0 divergence class) ──
   console.log('\n[1.5/6] Checking dist/source parity (divergence guard)');
   {
-    // Extract export names from a .ts source file using simple regexes over
-    // `export function/const/class/async function`, `export type Name`,
-    // `export { Name }`, and `export type { Name }` (including `as Alias` forms).
-    // No full AST — sufficient to catch "added to source, dist not rebuilt."
-    // Not captured: `export * from` (no named export) or `export default`.
+    // Extract export names from a .ts source file and classify each as a
+    // runtime VALUE or a TYPE. The distinction is load-bearing: `tsc` erases
+    // types from the emitted .js, so a type-only export can NEVER appear in
+    // dist/*.js — it lives in dist/*.d.ts. The AUD-001 regex extension folded
+    // `export type` into the .js comparison, which made every type-only export
+    // a guaranteed false "missing in dist" (0.8.0 publish gate). Values are
+    // checked against the .js; types against the .d.ts.
+    //
+    // Regexes cover `export function/const/class/async function`,
+    // `export type|interface Name`, `export { Name }`, `export type { Name }`,
+    // and inline `export { value, type Foo }` (TS type modifiers), all with
+    // optional `as Alias`. No full AST — sufficient to catch "added to source,
+    // dist not rebuilt." Not captured: `export * from` or `export default`.
     function extractTsExports(srcPath) {
-      if (!existsSync(srcPath)) return [];
+      if (!existsSync(srcPath)) return { values: [], types: [] };
       const src = readFileSync(srcPath, 'utf8');
-      const names = [];
+      const values = [];
+      const types = [];
       // export function / export const / export class / export async function
       for (const m of src.matchAll(/^export\s+(?:async\s+)?(?:function|const|class)\s+([A-Za-z_$][A-Za-z0-9_$]*)/gm)) {
-        names.push(m[1]);
+        values.push(m[1]);
       }
-      // export type Name (standalone — not export type { ... })
-      for (const m of src.matchAll(/^export\s+type\s+(?!\{)([A-Za-z_$][A-Za-z0-9_$]*)/gm)) {
-        names.push(m[1]);
+      // export type Name / export interface Name (standalone — not a { } block)
+      for (const m of src.matchAll(/^export\s+(?:type|interface)\s+(?!\{)([A-Za-z_$][A-Za-z0-9_$]*)/gm)) {
+        types.push(m[1]);
       }
-      // export { Name } / export { Name as Alias } / export type { Name } / export type { Name as Alias }
-      // Capture the local name (before any `as`). Skip `export * from` and `export default`.
-      for (const m of src.matchAll(/^export\s+(?:type\s+)?\{([^}]+)\}/gm)) {
-        for (const entry of m[1].split(',')) {
-          const local = entry.trim().split(/\s+as\s+/)[0].trim();
-          if (local && local !== 'default') names.push(local);
+      // export { Name } / export { Name as Alias } / export type { Name } / ...
+      // A leading `export type {` marks the whole block type-only; otherwise an
+      // entry may carry an inline `type` modifier. Route each name accordingly.
+      // Capture the local name (before any `as`); skip `export default`.
+      for (const m of src.matchAll(/^export\s+(type\s+)?\{([^}]+)\}/gm)) {
+        const blockIsType = !!m[1];
+        for (const entry of m[2].split(',')) {
+          let e = entry.trim();
+          if (!e) continue;
+          let isType = blockIsType;
+          if (/^type\s/.test(e)) { isType = true; e = e.replace(/^type\s+/, ''); }
+          const local = e.split(/\s+as\s+/)[0].trim();
+          if (!local || local === 'default') continue;
+          (isType ? types : values).push(local);
         }
       }
-      return names;
+      return { values, types };
     }
 
     const RUNNER_ROOT = join(ROOT, 'packages', 'cambium-runner');
@@ -154,27 +171,36 @@ try {
     ];
 
     let parityOk = true;
-    for (const { label, src, dist } of criticalPairs) {
-      const exports = extractTsExports(src);
-      if (exports.length === 0) {
-        console.log(`  ✓ ${label}: no exports to check (or file absent)`);
-        continue;
-      }
-      if (!existsSync(dist)) {
-        console.log(`  ✗ ${label}: dist file missing — ${dist}`);
-        failures.push(`dist diverged: ${label} dist file missing`);
+    // Compare a set of expected export names against a single dist artifact
+    // (.js for values, .d.ts for types). Records a failure for any name absent.
+    function checkArtifact(label, kind, names, artifactPath) {
+      if (names.length === 0) return;
+      if (!existsSync(artifactPath)) {
+        console.log(`  ✗ ${label}: dist ${kind} file missing — ${artifactPath}`);
+        failures.push(`dist diverged: ${label} ${kind} file missing`);
         parityOk = false;
-        continue;
+        return;
       }
-      const distSrc = readFileSync(dist, 'utf8');
-      const missing = exports.filter((name) => !distSrc.includes(name));
+      const artifactSrc = readFileSync(artifactPath, 'utf8');
+      const missing = names.filter((name) => !artifactSrc.includes(name));
       if (missing.length === 0) {
-        console.log(`  ✓ ${label}: ${exports.length}/${exports.length} exports present in dist`);
+        console.log(`  ✓ ${label}: ${names.length}/${names.length} ${kind} exports present in dist`);
       } else {
-        console.log(`  ✗ ${label}: missing in dist — ${missing.join(', ')}`);
+        console.log(`  ✗ ${label}: ${kind} exports missing in dist — ${missing.join(', ')}`);
         failures.push(`dist diverged: ${label}: missing — ${missing.join(', ')}`);
         parityOk = false;
       }
+    }
+
+    for (const { label, src, dist } of criticalPairs) {
+      const { values, types } = extractTsExports(src);
+      if (values.length === 0 && types.length === 0) {
+        console.log(`  ✓ ${label}: no exports to check (or file absent)`);
+        continue;
+      }
+      // Runtime values survive to .js; types are erased and live in .d.ts.
+      checkArtifact(label, 'value', values, dist);
+      checkArtifact(label, 'type', types, dist.replace(/\.js$/, '.d.ts'));
     }
     assert(parityOk, 'dist matches source exports across all critical files');
   }

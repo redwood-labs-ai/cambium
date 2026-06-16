@@ -25,6 +25,7 @@ import type {
   GenerateWithToolsOpts,
   GenerateWithToolsResult,
 } from './types.js';
+import { ProviderHttpError, ProviderConnectionError } from './types.js';
 import { normalizeModelName, type ModelNameTransform } from './registry.js';
 import {
   buildAnthropicMessagesRequest,
@@ -129,14 +130,23 @@ export function openaiCompatible(config: OpenAICompatibleConfig): CambiumProvide
         };
       }
 
-      const res = await fetch(url(), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', ...authHeaders() },
-        body: JSON.stringify(body),
-      });
+      const target = url();
+      const reqHeaders = { 'content-type': 'application/json', ...authHeaders() };
+      let res: Response;
+      try {
+        res = await fetch(target, {
+          method: 'POST',
+          headers: reqHeaders,
+          body: JSON.stringify(body),
+        });
+      } catch (fetchErr) {
+        throw new ProviderConnectionError(
+          `${errorLabel} connection failed: ${(fetchErr as Error).message ?? String(fetchErr)}`,
+        );
+      }
       if (!res.ok) {
         const errBody = await errBodyOf(res);
-        throw new Error(`${errorLabel} error: HTTP ${res.status}${errBody ? ` — ${errBody}` : ''}`);
+        throw new ProviderHttpError(res.status, `${errorLabel} error: HTTP ${res.status}${errBody ? ` — ${errBody}` : ''}`);
       }
       const json: any = await res.json();
       const message = json?.choices?.[0]?.message;
@@ -188,14 +198,23 @@ export function openaiCompatible(config: OpenAICompatibleConfig): CambiumProvide
         body.tool_choice = 'none';
       }
 
-      const res = await fetch(url(), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', ...authHeaders() },
-        body: JSON.stringify(body),
-      });
+      const target = url();
+      const reqHeaders = { 'content-type': 'application/json', ...authHeaders() };
+      let res: Response;
+      try {
+        res = await fetch(target, {
+          method: 'POST',
+          headers: reqHeaders,
+          body: JSON.stringify(body),
+        });
+      } catch (fetchErr) {
+        throw new ProviderConnectionError(
+          `${errorLabel} connection failed: ${(fetchErr as Error).message ?? String(fetchErr)}`,
+        );
+      }
       if (!res.ok) {
         const errBody = await errBodyOf(res);
-        throw new Error(`${errorLabel} error: HTTP ${res.status}${errBody ? ` — ${errBody}` : ''}`);
+        throw new ProviderHttpError(res.status, `${errorLabel} error: HTTP ${res.status}${errBody ? ` — ${errBody}` : ''}`);
       }
       const json: any = await res.json();
       const msg = json?.choices?.[0]?.message;
@@ -287,9 +306,17 @@ export function anthropicCompatible(config: AnthropicCompatibleConfig): CambiumP
         cache: config.cache,
         documents: opts.documents ?? [],
       });
+      const target = url();
       const h = headers();
-      const res = await fetch(url(), { method: 'POST', headers: h, body: JSON.stringify(body) });
-      if (!res.ok) throw new Error(`${errorLabel} error: HTTP ${res.status}`);
+      let res: Response;
+      try {
+        res = await fetch(target, { method: 'POST', headers: h, body: JSON.stringify(body) });
+      } catch (fetchErr) {
+        throw new ProviderConnectionError(
+          `${errorLabel} connection failed: ${(fetchErr as Error).message ?? String(fetchErr)}`,
+        );
+      }
+      if (!res.ok) throw new ProviderHttpError(res.status, `${errorLabel} error: HTTP ${res.status}`);
       const json: any = await res.json();
       const normalized = normalizeAnthropicMessagesResponse(json);
       return { text: normalized.message.content ?? '', usage: normalized.usage };
@@ -305,9 +332,17 @@ export function anthropicCompatible(config: AnthropicCompatibleConfig): CambiumP
         cache: config.cache,
         documents: opts.documents ?? [],
       });
+      const target = url();
       const h = headers();
-      const res = await fetch(url(), { method: 'POST', headers: h, body: JSON.stringify(body) });
-      if (!res.ok) throw new Error(`${errorLabel} error: HTTP ${res.status}`);
+      let res: Response;
+      try {
+        res = await fetch(target, { method: 'POST', headers: h, body: JSON.stringify(body) });
+      } catch (fetchErr) {
+        throw new ProviderConnectionError(
+          `${errorLabel} connection failed: ${(fetchErr as Error).message ?? String(fetchErr)}`,
+        );
+      }
+      if (!res.ok) throw new ProviderHttpError(res.status, `${errorLabel} error: HTTP ${res.status}`);
       const json: any = await res.json();
       const normalized = normalizeAnthropicMessagesResponse(json);
       // Inline tool-call markup parsing is applied by the dispatcher.

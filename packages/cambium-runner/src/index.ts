@@ -56,6 +56,14 @@ export type { ModelNameTransform } from './providers/registry.js';
 // URLs. `validateProviderBaseUrl` is the same guard the built-ins use
 // (blocks private/metadata ranges unless CAMBIUM_ALLOW_PRIVATE_PROVIDER_BASEURL).
 export { validateProviderBaseUrl } from './providers/base-url-validator.js';
+// RED-421 (DEC-A/D): typed provider errors — part of the provider-author
+// contract. A custom provider throws `new ProviderHttpError(status, msg)` to
+// participate in transient-failure fallback; a plain `Error` is deterministic.
+// `ProviderConnectionError` (DEC-D) is the typed signal for connection-level
+// failures (no HTTP response); built-in providers use it internally so that
+// ECONNREFUSED / DNS / TLS failures are transient. Custom providers may use it
+// too; plain `Error` / `TypeError` remain deterministic (DEC-A unchanged).
+export { ProviderHttpError, ProviderConnectionError } from './providers/types.js';
 export type {
   CambiumProvider,
   GenerateTextOpts,
@@ -86,3 +94,17 @@ export type { RunInspectOptions, InspectHandle } from './inspect/server.js';
 export { resolveRunsDir, listRuns, loadRun, isValidRunId } from './inspect/runs.js';
 export { projectTrace, summarizeTrace } from './inspect/projection.js';
 export type { GraphModel, GraphNode, GraphEdge, NodeStatus, TraceSummary } from './inspect/projection.js';
+
+// RED-140: golden-test engine — field-level snapshot comparison with
+// tolerances and built-in normalizers for dates, numbers, citations, and
+// strings. Deterministic via `--mock` / `cambium replay`; no tokens
+// consumed on regression runs. See `docs/GenDSL Docs/P - Golden Tests (RED-140).md`.
+export {
+  goldenTest,
+  formatGoldenFailure,
+  stripCitations,
+  normalizeNumbers,
+  normalizeStrings,
+  normalizeDates,
+} from './golden.js';
+export type { DiffEntry, GoldenTestOptions, GoldenTestResult } from './golden.js';

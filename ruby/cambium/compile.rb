@@ -250,6 +250,15 @@ if defs[:model]
   defs[:model] = model_aliases.resolve(defs[:model], context: "#{klass.name}.model")
 end
 
+# RED-421: resolve fallback model ids (same alias resolution, same
+# compile-time constraint: no runtime alias resolution). Absent when
+# only a single model id was declared (single-arg form stays byte-identical).
+if defs[:model_fallbacks]
+  defs[:model_fallbacks] = defs[:model_fallbacks].map.with_index do |id, i|
+    model_aliases.resolve(id, context: "#{klass.name}.model fallback[#{i}]")
+  end
+end
+
 # RED-215: resolve memory declarations against named pools.
 #
 # Each `memory :x, scope: :support_team, top_k: 5` on a gen becomes
@@ -486,6 +495,23 @@ if defs[:grounding] && defs[:grounding]['from']
     end
 end
 
+# RED-419 C2: the return-schema reference is one of two mutually
+# exclusive shapes, emitted at the same IR position (DEC-001/DEC-004):
+#   - block form → inline `returnSchema` (the collected Draft-07 object,
+#     stamped with `$id: "<ClassName>Output"`); no `returnSchemaId`.
+#   - symbol form → `returnSchemaId` (string name-ref), byte-identical to
+#     pre-RED-419 output, including the `null` when `returns` is absent.
+# The name-existence check above is gated on defs[:returnSchema] and so
+# is already skipped for the inline branch.
+return_schema_ref =
+  if defs[:returnSchemaInline]
+    inline = defs[:returnSchemaInline].dup
+    inline['$id'] = "#{klass.name}Output"
+    { 'returnSchema' => inline }
+  else
+    { 'returnSchemaId' => defs[:returnSchema] }
+  end
+
 # Build an IR per compiled method. Per-class state (model, system,
 # policies, memory, etc.) is shared; per-method state is `entry.method`
 # and `steps` (the PlanBuilder output captured per-method above).
@@ -503,7 +529,10 @@ build_ir = lambda do |method_name, steps|
       'max_tokens' => defs[:max_tokens],
       # RED-325 Part 3: per-model options (e.g. disable_thinking).
       # Optional; emitted only when the gen sets at least one option.
-      'options' => (defs[:model_options] && !defs[:model_options].empty? ? defs[:model_options] : nil)
+      'options' => (defs[:model_options] && !defs[:model_options].empty? ? defs[:model_options] : nil),
+      # RED-421: fallback model ids. Absent (not nil) when only a single
+      # model id was declared so the single-arg IR is byte-identical.
+      'fallbacks' => defs[:model_fallbacks],
     }.compact,
     'system' => system_prompt,
     'mode' => defs[:mode],
@@ -522,7 +551,7 @@ build_ir = lambda do |method_name, steps|
       'schedules'        => resolved_schedules
     },
     'reads_trace_of' => defs[:reads_trace_of],
-    'returnSchemaId' => defs[:returnSchema],
+    **return_schema_ref,
     # RED-276: use the `grounded_in :name` source as the context key when
     # the gen declares grounding, else fall back to 'document' for
     # back-compat with analyst-style gens. Keeps the grounding validator's

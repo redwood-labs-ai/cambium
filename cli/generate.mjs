@@ -277,7 +277,6 @@ function generateAgent(name, ctx) {
   validateName(name, 'agent name');
   const snake = snakeCase(name);
   const pascal = pascalCase(name);
-  const schemaName = `${pascal}Report`;
 
   console.log(`\nGenerating agent: ${pascal}\n`);
 
@@ -289,12 +288,20 @@ class ${pascal} < GenModel
   temperature 0.2
   max_tokens 1200
 
-  returns ${schemaName}
+  # Declare the output schema inline (RED-419) — the runner validates
+  # against it directly. Vocabulary: String / Integer / Float / Boolean,
+  # [String] arrays, nested \`field :x do … end\` blocks, \`enum:\` (String),
+  # \`optional:\`, \`description:\`. For anything richer, use
+  # \`returns :SchemaName\` with a hand-written schema in schemas.ts.
+  # (Engine mode runs block schemas but does not emit generated TS.)
+  returns do
+    field :summary, String, description: "one-paragraph summary"
+    field :key_points, [String]
+  end
 
   def analyze(input)
     generate "TODO: describe what this gen does" do
       with context: input
-      returns ${schemaName}
     end
   end
 end
@@ -304,7 +311,7 @@ end
 You are a ${snake.replace(/_/g, ' ')}. TODO: describe the role and behavior.`);
 
     console.log(`\nNext steps:`);
-    console.log(`  1. Define ${schemaName} in ${ctx.engineDir}/schemas.ts`);
+    console.log(`  1. Edit the \`returns do … end\` schema in ${ctx.engineDir}/${snake}.cmb.rb`);
     console.log(`  2. Edit ${ctx.engineDir}/${snake}.system.md`);
     console.log(`  3. Compile: cambium compile ${ctx.engineDir}/${snake}.cmb.rb`);
     return;
@@ -319,7 +326,19 @@ class ${pascal} < GenModel
   temperature 0.2
   max_tokens 1200
 
-  returns ${schemaName}
+  # Declare the output schema inline (RED-419). The runner validates
+  # against this; \`cambium compile --write\` also emits TypeBox types into
+  # src/contracts.generated.ts for typed consumers. Edit these fields to
+  # match what your agent should return.
+  #
+  # Vocabulary: String / Integer / Float / Boolean, [String] arrays,
+  # nested \`field :x do … end\` blocks, \`enum:\` (on String), \`optional:\`,
+  # \`description:\`. For anything richer, use \`returns :SchemaName\` and
+  # \`cambium new schema\` (the hand-written escape hatch).
+  returns do
+    field :summary, String, description: "one-paragraph summary"
+    field :key_points, [String]
+  end
 
   # Optional: add tools, correctors, constraints, grounding
   # uses :web_search, :calculator
@@ -330,7 +349,6 @@ class ${pascal} < GenModel
   def analyze(document)
     generate "analyze this document" do
       with context: document
-      returns ${schemaName}
     end
   end
 end
@@ -339,28 +357,121 @@ end
   writeFile(join(PKG, 'app/systems', `${snake}.system.md`), `\
 You are a ${pascal.replace(/([A-Z])/g, ' $1').trim().toLowerCase()}. You extract structured data from documents with precision.`);
 
+  // Import path for goldenTest: in-tree workspace uses the deep relative;
+  // external [package] apps import from the published runner package.
+  const goldenImport = ctx.shape === 'workspace'
+    ? '../../../cambium-runner/src/golden.js'
+    : '@redwood-labs/cambium-runner';
+
   writeFile(join(PKG, 'tests', `${snake}.test.ts`), `\
+/**
+ * ${pascal} — golden regression test (RED-140).
+ *
+ * Workflow (token-free after the first run):
+ *
+ *   1. Create a fixture: ${PKG}/examples/fixtures/<fixture>.txt
+ *   2. Run once to produce a snapshot:
+ *        cambium run ${PKG}/app/gens/${snake}.cmb.rb --method analyze \\
+ *          --arg ${PKG}/examples/fixtures/<fixture>.txt --mock
+ *      Copy the output from the run dir (runs/<id>/output.json) to
+ *        ${PKG}/examples/fixtures/${snake}-snapshot.json
+ *      Commit both files.
+ *   3. After that, \`npm test\` (--mock path) never burns tokens.
+ *      Replay an old run instead of re-calling the LLM:
+ *        cambium replay <run-id> --mock
+ *
+ * Edit the snapshot file when the expected output legitimately changes;
+ * the test failure is the signal.
+ */
 import { describe, it, expect } from 'vitest'
-import { execSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
+import { readFileSync, existsSync, rmSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { goldenTest, normalizeStrings } from '${goldenImport}'
+
+const REPO_ROOT = process.cwd()
+const CLI = join(REPO_ROOT, 'cli/cambium.mjs')
+const GEN = '${PKG}/app/gens/${snake}.cmb.rb'
+// TODO: replace with your real fixture path
+const FIXTURE = '${PKG}/examples/fixtures/<fixture>.txt'
+const SNAPSHOT = join(REPO_ROOT, '${PKG}/examples/fixtures/${snake}-snapshot.json')
+
+function runMock() {
+  return spawnSync(
+    'node',
+    [CLI, 'run', GEN, '--method', 'analyze', '--arg', FIXTURE, '--mock'],
+    { cwd: REPO_ROOT, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 },
+  )
+}
+
+// Derive the run directory from the "Trace: <path>" line that \`cambium run\`
+// writes to stderr. This is the documented, user-facing CLI output
+// (cambium.mjs: console.error(\`Trace: \${result.tracePath}\`)); taking
+// dirname() of the trace path gives the run dir without parsing internal
+// diagnostic lines whose format may change.
+function runDirFromStderr(stderr: string): string | null {
+  const m = stderr.match(/Trace: (\\S+)/)
+  return m ? dirname(m[1]) : null
+}
 
 describe('${pascal}', () => {
   it('compiles to valid IR', () => {
-    // TODO: create a fixture and uncomment
-    // const ir = JSON.parse(execSync(
-    //   'ruby ruby/cambium/compile.rb ${PKG}/app/gens/${snake}.cmb.rb --method analyze --arg <fixture>',
-    //   { encoding: 'utf8' },
-    // ))
-    // expect(ir.entry.class).toBe('${pascal}')
-    expect(true).toBe(true)
+    const result = spawnSync(
+      'ruby',
+      [join(REPO_ROOT, 'ruby/cambium/compile.rb'), GEN, '--method', 'analyze'],
+      { encoding: 'utf8', cwd: REPO_ROOT },
+    )
+    expect(result.status).toBe(0)
+    const ir = JSON.parse(result.stdout)
+    expect(ir.entry.class).toBe('${pascal}')
+    expect(ir.entry.method).toBe('analyze')
+  })
+
+  it('produces output matching the golden snapshot (mock, token-free)', () => {
+    if (!existsSync(FIXTURE)) {
+      // Fixture not yet created — skip rather than fail.
+      // Create examples/fixtures/<fixture>.txt and re-run.
+      console.warn('[${pascal}] fixture not found — skipping golden test')
+      return
+    }
+    if (!existsSync(SNAPSHOT)) {
+      // No snapshot yet. Run once, copy output.json → snapshot, commit.
+      console.warn('[${pascal}] snapshot not found — run once with --mock and commit output.json as ${snake}-snapshot.json')
+      return
+    }
+
+    const result = runMock()
+    expect(result.status, \`Gen failed:\\n\${result.stderr}\`).toBe(0)
+
+    // \`cambium run\` writes the output JSON to stdout (its primary output
+    // channel). Parsing stdout is more robust than reading output.json from
+    // the run dir, because it does not depend on the internal artifact layout.
+    const actual = JSON.parse(result.stdout)
+    const expected = JSON.parse(readFileSync(SNAPSHOT, 'utf8'))
+
+    // normalizeStrings trims and collapses whitespace — the mock generator
+    // can vary in spacing. Add more normalizers (normalizeDates, normalizeNumbers)
+    // or ignoreFields as your schema needs.
+    const { passed, summary } = goldenTest(actual, expected, {
+      normalizers: [normalizeStrings],
+    })
+    expect(passed, summary).toBe(true)
+
+    // Clean up the run dir so the test suite stays idempotent.
+    const runDir = runDirFromStderr(result.stderr)
+    if (runDir) try { rmSync(runDir, { recursive: true, force: true }) } catch {}
   })
 })
 `);
 
   console.log(`\nNext steps:`);
-  console.log(`  1. Define ${schemaName} in ${PKG}/src/contracts.ts`);
+  console.log(`  1. Edit the \`returns do … end\` schema in ${PKG}/app/gens/${snake}.cmb.rb`);
   console.log(`  2. Edit ${PKG}/app/systems/${snake}.system.md`);
   console.log(`  3. Create a fixture in ${PKG}/examples/fixtures/`);
   console.log(`  4. Run: cambium run ${PKG}/app/gens/${snake}.cmb.rb --method analyze --arg <fixture>`);
+  console.log(`  5. Copy runs/<id>/output.json → ${PKG}/examples/fixtures/${snake}-snapshot.json and commit`);
+  console.log(`  6. After that, \`npm test\` uses --mock (token-free). See ${PKG}/tests/${snake}.test.ts`);
+  console.log(`  7. (Optional) Generate typed contracts: cambium compile --write`);
 }
 
 function generateTool(name, ctx) {

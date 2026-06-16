@@ -53,13 +53,14 @@ Run `cambium doctor` to verify your environment.
 # 1. Create a new workspace
 cambium init my-project && cd my-project
 
-# 2. Scaffold an agent + schema + system prompt
+# 2. Scaffold an agent (includes a returns do … end block + system prompt)
 cambium new agent MyAnalyst
-cambium new schema MyReport
+#    Edit the `returns do` block in app/gens/my_analyst.cmb.rb to declare
+#    your output fields — no hand-written TypeScript needed.
+#    (`cambium new schema` is the escape hatch if the block vocabulary
+#    doesn't cover your schema.)
 
-# 3. Edit the generated files
-#    - app/gens/my_analyst.cmb.rb: wire up the generate call
-#    - src/contracts.ts: define the schema fields
+# 3. Edit the system prompt
 #    - app/systems/my_analyst.system.md: write the agent's role
 
 # 4. Run it

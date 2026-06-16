@@ -89,6 +89,10 @@ export async function runEnrichment(
   contractsMod: any,
   generateText: GenerateTextFn,
   extractJson: ExtractJsonFn,
+  // Optional override for tests: inject a custom agent-file resolver so
+  // the test can supply a temp-dir path without writing to the live gens dir
+  // (AUD-F1). Defaults to the real filesystem search.
+  _findAgentFile: (name: string) => string | null = findAgentFile,
 ): Promise<EnrichmentResult> {
   const traceSteps: any[] = [];
   const method = enrichment.method ?? 'summarize';
@@ -97,7 +101,7 @@ export async function runEnrichment(
   // The agent must be defined in a file that's been loaded by the parent compilation.
   // For v0, we look in the same package's gens directory.
   const agentName = enrichment.agent;
-  const agentFile = findAgentFile(agentName);
+  const agentFile = _findAgentFile(agentName);
 
   if (!agentFile) {
     traceSteps.push({
@@ -126,13 +130,15 @@ export async function runEnrichment(
     return { field: enrichment.field, ok: false, traceSteps };
   }
 
-  // Load the sub-agent's return schema
-  const subSchema = contractsMod[subIr.returnSchemaId];
+  // Load the sub-agent's return schema. Block-form sub-agents carry the
+  // schema inline (ir.returnSchema); symbol-form fall back to the injected
+  // contracts module. Mirrors runner.ts:678 (DEC-001, RED-419).
+  const subSchema = subIr.returnSchema ?? contractsMod[subIr.returnSchemaId];
   if (!subSchema) {
     traceSteps.push({
       type: 'EnrichError',
       ok: false,
-      errors: [{ message: `Schema "${subIr.returnSchemaId}" not found in contracts for agent "${agentName}"` }],
+      errors: [{ message: `Schema not found for agent "${agentName}" (returnSchemaId="${subIr.returnSchemaId}", inline=${!!subIr.returnSchema})` }],
     });
     return { field: enrichment.field, ok: false, traceSteps };
   }

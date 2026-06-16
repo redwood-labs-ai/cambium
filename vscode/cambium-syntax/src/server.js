@@ -372,8 +372,8 @@ function scanWorkspace() {
 
 const PRIMITIVE_DOCS = {
   model: {
-    detail: 'Declares the LLM provider and model.',
-    doc: 'Two forms.\n\nLiteral: `provider:model_name` (e.g., `"omlx:Qwen3.5-27B-4bit"`).\n\nAlias (RED-237): `model :default` resolves through `app/config/models.rb` at compile time to a literal provider-prefixed id. The runner never sees the symbol.',
+    detail: 'Declares the LLM provider and model, with optional fallbacks.',
+    doc: 'Single: `model "<provider>:<model>"` (e.g., `"omlx:Qwen3.5-27B-4bit"`).\n\nFallback chain (RED-421): `model "<primary>", "<fallback1>", "<fallback2>"` — ordered varargs. On a transient failure of the primary (5xx, 408, 425, 429), the runner tries the next candidate in declaration order. Deterministic failures (other 4xx) fail immediately — the same bad request fails on every provider.\n\nAlias (RED-237): `model :default` (or any arg) resolves through `app/config/models.rb` at compile time to a literal provider-prefixed id. The runner never sees the symbol.',
   },
   system: {
     detail: 'Declares the system prompt.',
@@ -388,8 +388,8 @@ const PRIMITIVE_DOCS = {
     doc: 'Caps the model\'s response length. Affects cost and output completeness.',
   },
   returns: {
-    detail: 'Declares the return schema (TypeBox contract).',
-    doc: 'Must match a `$id` in `src/contracts.ts`.\nOutput is validated against this schema with AJV.\n\n```ruby\nreturns AnalysisReport\n```',
+    detail: 'Declares the return schema for AJV validation.',
+    doc: 'Two forms (RED-419):\n\n**Block form (default)** — define the schema inline; no hand-written TypeScript needed:\n\n```ruby\nreturns do\n  field :name, String\n  field :tags, [String]\n  field :status, String, enum: %w[active archived]\n  field :score, Float, optional: true\nend\n```\n\nThe schema compiles to Draft-07 JSON inline in the IR and is self-sufficient at runtime.\n\n**Symbol form (escape hatch)** — reference a hand-written TypeBox export in `src/contracts.ts`:\n\n```ruby\nreturns AnalysisReport\n```\n\nUse this when the block vocabulary (String/Integer/Float/Boolean, arrays, nested objects, enum on String) doesn\'t cover your schema.\n\nSee [[P - returns]].',
   },
   uses: {
     detail: 'Declares allowed tools (deny-by-default).',

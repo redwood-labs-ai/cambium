@@ -433,8 +433,11 @@ export async function runPipelineFromIr(
   // Rehydrate stepResults from the prior run's recorded operator outputs,
   // seed the budget counters from the parent (so the cap spans the replay
   // chain), and dispatch only the operators from the resume point onward.
-  // `topLevelOps` stays the FULL list so bind()/pass_context lookups still
-  // resolve against the complete DAG.
+  // bind() lookups resolve against the rehydrated stepResults; the full
+  // `operators` list is still used below to compute the top-level dispatch
+  // seed prior (the output of the operator immediately before the resume
+  // point), so a first-dispatched fan_out's pass_context reads the prior
+  // that was rehydrated rather than seeing `null`.
   let dispatchOps = operators;
   if (opts.replay) {
     const plan = planPipelineResume(operators, opts.replay.priorTrace, opts.replay.fromOp ?? null);
@@ -468,13 +471,36 @@ export async function runPipelineFromIr(
     mock: opts.mock ?? false,
     tokenCap,
     toolCallCap,
-    topLevelOps: operators,
     pipelineRunId: runId,
     pipelineMemorySlots,
     compileRb,
     appCorrectors,
   };
-  const dispatchResult = await dispatchOperatorList(dispatchOps, dispatchCtx, stepResults, trace);
+  // Seed the top-level dispatch's running prior. Nothing precedes the
+  // first top-level operator on a fresh run, so the seed is null. On a
+  // resumed run the dispatched slice starts mid-DAG, so compute the
+  // output of the operator immediately preceding `dispatchOps[0]` in the
+  // full `operators` list, read from the rehydrated `stepResults` — a
+  // "walk back to the first prior id present in stepResults", applied once
+  // here at the seed rather than per fan_out.
+  let topLevelSeedPrior: any = null;
+  if (opts.replay && dispatchOps !== operators && dispatchOps.length > 0) {
+    const startIdx = operators.findIndex((o) => o.id === dispatchOps[0]?.id);
+    for (let i = startIdx - 1; i >= 0; i--) {
+      const prior = operators[i];
+      if (prior.id && prior.id in stepResults) {
+        topLevelSeedPrior = stepResults[prior.id];
+        break;
+      }
+    }
+  }
+  const dispatchResult = await dispatchOperatorList(
+    dispatchOps,
+    dispatchCtx,
+    stepResults,
+    trace,
+    topLevelSeedPrior,
+  );
   const pipelineOk = dispatchResult.ok;
   const pipelineError = dispatchResult.errorMessage;
   const pipelineFailureKind = dispatchResult.failureKind;
@@ -631,10 +657,6 @@ interface DispatchContext {
   mock: boolean;
   tokenCap: number | undefined;
   toolCallCap: number | undefined;
-  /** Always the TOP-LEVEL operators[] from the Pipeline IR. Used by
-   *  fan_out's findPriorOperatorResult for pass_context, regardless of
-   *  whether the fan_out is nested inside a branch_on body. */
-  topLevelOps: any[];
   /** RED-381 Phase E: pipeline-shared memory wiring. Pipeline run id
    *  becomes the bucket key for sub-gen :pipeline_run memory; slot map
    *  carries the pipeline-authoritative strategy/embed/keyed_by/retain
@@ -671,12 +693,20 @@ interface DispatchResult {
  * Budget checks fire on the SHARED dispatchCtx so the cap is enforced
  * uniformly across the whole pipeline run, even when operators live
  * inside a branch_on body.
+ *
+ * `seedPrior` is the output of the operator immediately preceding this
+ * block (or null when nothing precedes it). The loop threads a running
+ * `prevOutput`, updated as each result-producing operator (Step, FanOut)
+ * completes, so a fan_out's `pass_context` reads the contextually-correct
+ * prior even across a branch_on nesting boundary. A BranchOn records no
+ * result, so it does NOT advance `prevOutput`.
  */
 async function dispatchOperatorList(
   operators: any[],
   ctx: DispatchContext,
   stepResults: Record<string, any>,
   parentTrace: { operators: any[]; meta: any },
+  seedPrior: any,
 ): Promise<DispatchResult> {
   const runStepCtx: RunStepContext = {
     ir: ctx.ir,
@@ -692,6 +722,7 @@ async function dispatchOperatorList(
     appCorrectors: ctx.appCorrectors,
   };
 
+  let prevOutput = seedPrior;
   for (const op of operators) {
     // Pre-dispatch token-budget projection (Step only — fan_out's
     // projection is harder and lands as a follow-up if needed).
@@ -733,6 +764,7 @@ async function dispatchOperatorList(
             };
           }
           stepResults[op.id] = stepTrace.output;
+          prevOutput = stepTrace.output;
           if (ctx.toolCallCap !== undefined && parentTrace.meta.total_tool_calls > ctx.toolCallCap) {
             parentTrace.operators.push({
               type: 'PipelineBudgetExceeded',
@@ -752,7 +784,7 @@ async function dispatchOperatorList(
           break;
         }
         case 'FanOut': {
-          const fanOutTrace = await runFanOut(op, runStepCtx, ctx.topLevelOps);
+          const fanOutTrace = await runFanOut(op, runStepCtx, prevOutput);
           parentTrace.operators.push(fanOutTrace.entry);
           parentTrace.meta.total_tokens += fanOutTrace.tokens;
           parentTrace.meta.total_tool_calls += fanOutTrace.toolCalls;
@@ -765,6 +797,7 @@ async function dispatchOperatorList(
             };
           }
           stepResults[op.id] = fanOutTrace.output;
+          prevOutput = fanOutTrace.output;
           if (ctx.toolCallCap !== undefined && parentTrace.meta.total_tool_calls > ctx.toolCallCap) {
             parentTrace.operators.push({
               type: 'PipelineBudgetExceeded',
@@ -784,7 +817,12 @@ async function dispatchOperatorList(
           break;
         }
         case 'BranchOn': {
-          const brTrace = await runBranchOn(op, ctx, stepResults);
+          // Forward the running prior as the nested block's seed so a
+          // fan_out that is first-in-block reads the operator before the
+          // branch_on. A branch_on records no result, so prevOutput is
+          // NOT advanced afterward (the operator following the branch_on
+          // keeps the branch_on's own prior as its prior).
+          const brTrace = await runBranchOn(op, ctx, stepResults, prevOutput);
           parentTrace.operators.push(brTrace.entry);
           parentTrace.meta.total_tokens += brTrace.tokens;
           parentTrace.meta.total_tool_calls += brTrace.toolCalls;
@@ -835,6 +873,7 @@ async function runBranchOn(
   op: any,
   ctx: DispatchContext,
   stepResults: Record<string, any>,
+  seedPrior: any,
 ): Promise<BranchOnTrace> {
   const startedAt = new Date().toISOString();
 
@@ -911,7 +950,7 @@ async function runBranchOn(
       operators_executed: 0,
     },
   };
-  const nestedResult = await dispatchOperatorList(firedOps, ctx, stepResults, nestedTrace);
+  const nestedResult = await dispatchOperatorList(firedOps, ctx, stepResults, nestedTrace, seedPrior);
 
   return {
     entry: {
@@ -1168,26 +1207,6 @@ function expandBranches(op: any): ExpandedBranch[] {
 }
 
 /**
- * Locate the operator immediately preceding this fan_out in the
- * pipeline's declaration order. `pass_context` fields are pulled from
- * that operator's result; if no prior operator exists (fan_out is the
- * first operator), pass_context resolves against pipeline input slots
- * instead — same precedence story as bind(:input) shortcuts.
- */
-function findPriorOperatorResult(
-  op: any,
-  operators: any[],
-  stepResults: Record<string, any>,
-): any {
-  const idx = operators.findIndex((o) => o.id === op.id);
-  for (let i = idx - 1; i >= 0; i--) {
-    const prior = operators[i];
-    if (prior.id && prior.id in stepResults) return stepResults[prior.id];
-  }
-  return null;
-}
-
-/**
  * Concurrency-limited worker pool. Native Promise.all has no built-in
  * limiter; this is a tight worker-pool that pulls tasks off a shared
  * index. PromiseSettledResult preserves both success and failure paths
@@ -1222,7 +1241,7 @@ async function runWithConcurrency<T>(
 async function runFanOut(
   op: any,
   ctx: RunStepContext,
-  operators: any[],
+  priorResult: any,
 ): Promise<FanOutTrace> {
   const startedAt = new Date().toISOString();
   const branches = expandBranches(op);
@@ -1245,8 +1264,10 @@ async function runFanOut(
   }
 
   // Build the shared pass_context map from the prior operator's output.
+  // `priorResult` is threaded in by dispatchOperatorList — the output of
+  // the operator immediately preceding this fan_out, resolved correctly
+  // across branch_on nesting (null when no prior operator exists).
   const passContextFields: string[] = op.pass_context ?? [];
-  const priorResult = findPriorOperatorResult(op, operators, ctx.stepResults);
   const passContext: Record<string, any> = {};
   for (const field of passContextFields) {
     passContext[field] = priorResult?.[field];

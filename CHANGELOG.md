@@ -4,6 +4,21 @@ All notable changes to Cambium are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Cambium adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-06-15 — The Surface Wave
+
+The on-ramp release: declare a gen's output schema in one file, fall over across providers, and pin output with golden regression tests — plus a pipeline correctness fix.
+
+### Added
+
+- **Schema as build artifact (RED-419).** A `returns do … end` field-declaration block declares a gen's output schema in Ruby — closed vocabulary (`String`/`Integer`/`Float`/`Boolean`, arrays, nested objects, array-of-object, `enum:` on `String`, `optional:`, `description:`) — compiled to a Draft-07 JSON Schema inline in the IR plus an auto-generated `src/contracts.generated.ts` (TypeBox + inferred TS types) behind a sentinel-guarded code-gen path (the compiler refuses to overwrite any file lacking the generated-file header). `cambium new agent` now scaffolds the block by default; `returns :Symbol` (hand-written TypeBox in `contracts.ts`) remains supported as the escape hatch.
+- **Multi-provider fallback (RED-421).** `model "anthropic:…", "bedrock:…"` accepts an ordered fallback list (varargs). On a *transient* failure of the primary — connection-level errors (surfaced as a typed `ProviderConnectionError`) or HTTP 5xx / 429 / 408 / 425 — the runner walks the chain in order through the per-run `ProviderRegistry`; deterministic 4xx and untyped custom-provider errors fail fast (no fan-out). Adds the additive `model.fallbacks` IR field and a new `ModelFallback` trace step.
+- **Golden regression tests are public API (RED-140).** `goldenTest` and the field normalizers (`stripCitations`, `normalizeNumbers`, `normalizeStrings`, `normalizeDates`) are now exported from `@redwood-labs/cambium-runner`. `cambium new agent` scaffolds a golden regression test (fixture + committed snapshot, deterministic via `--mock`).
+
+### Fixed
+
+- **`pass_context` now reaches operators nested inside `branch_on` / `fan_out` (Pipeline).** A `fan_out` nested in a `branch_on` block silently dropped its `pass_context` fields — the pipeline returned `ok` but the nested branch received no upstream context, degrading output with zero signal. The prior-operator inference now threads a running output through operator dispatch instead of an id-search against the top-level operator list.
+- **Reconciled the CLI → runner dependency pin** (the `@redwood-labs/cambium` root declared `@redwood-labs/cambium-runner@0.7.1` while the runner shipped `0.7.2`).
+
 ## [0.7.2] — 2026-06-08
 
 Patch release. Four fixes surfaced by engine-mode dogfood (`cambium-lnd` v0 on runner 0.6.0→0.7.0) plus a socket.dev hardening item.
