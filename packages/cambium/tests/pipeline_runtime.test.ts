@@ -666,9 +666,17 @@ end
     expect(fan.meta.succeeded).toBe(3);
   });
 
-  it('pass_context routes prior step fields into every branch', () => {
-    // recon → fan_out with pass_context :summary
-    // Each branch receives `summary` from the recon step's output.
+  it('pass_context wiring on a top-level fan_out compiles + dispatches (structural)', () => {
+    // recon → fan_out with pass_context :summary.
+    //
+    // STRUCTURAL ONLY: under --mock, mockGenerate returns a fixed summary
+    // and cannot carry an upstream-derived sentinel into a branch's
+    // observable output, so this CLI case can verify the plumbing
+    // compiles + the fan_out dispatches, but NOT that a branch actually
+    // RECEIVED the context. The delivery assertion (branch raw_preview
+    // contains the upstream sentinel) lives in
+    // `pass_context_nested.test.ts` on the stub-provider echo harness —
+    // both top-level (positive control) and the AUD-PC1 nested case.
     const pipePath = writePipelineWorkspace(`
 class P < Pipeline
   input :doc, schema: AnalysisReport

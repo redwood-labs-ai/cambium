@@ -31,10 +31,12 @@ The CLI and `cambium serve` dispatch by `ir.kind`: pipeline IRs route through `r
 
 | Field | Source primitive | Notes |
 |---|---|---|
-| `version`, `entry`, `model`, `system`, `steps` | core | `entry.source` is the primary `.cmb.rb` path |
+| `version`, `entry`, `model`, `system`, `steps` | core | `entry.source` is the primary `.cmb.rb` path. `model.id` is the primary provider-prefixed model id (alias-resolved at compile, RED-237). |
+| `model.fallbacks` | `model "primary", "fallback1", …` (varargs, RED-421) | `string[] \| undefined` — ordered fallback model ids, each alias-resolved at compile time. Absent (key omitted) when only one model is declared, so single-`model` IRs are byte-identical to pre-RED-421. On a transient failure of the primary the runner walks this list in order (see `N - Model Identifiers` § Multi-provider fallback). |
 | `mode` | `mode :agentic` / `mode :retro` | absent = default single-call mode |
 | `reads_trace_of` | `reads_trace_of :primary` | retro memory agents only |
-| `returnSchemaId` | `returns <Schema>` | validated against contracts.ts at compile (RED-210) |
+| `returnSchemaId` | `returns <Schema>` (name form) | string name-ref; validated against contracts.ts at compile (RED-210). Mutually exclusive with `returnSchema`. |
+| `returnSchema` | `returns do … end` (block form, RED-419) | inline Draft-07 JSON Schema object, additive. Carries its own `$id: "<ClassName>Output"`, `additionalProperties: false` at every object level, computed `required`. The runtime resolves `ir.returnSchema ?? contractsMod[ir.returnSchemaId]` — inline wins. Self-contained: a block-form gen runs and validates with no `contracts.ts` and no generated file. Closed vocabulary (see [[P - returns]]). |
 | `policies.tools_allowed` | `uses :a, :b` | deny-by-default allowlist |
 | `policies.correctors` | `corrects :math, :dates` | `Array<{name: string, max_attempts: number}>` — deterministic post-validation transforms. Each entry carries its own `max_attempts` (1..3, default 1, RED-298). Pre-RED-298 IRs with bare-string arrays are normalized to `max_attempts: 1` at run time. |
 | `policies.log` | `log :datadog, include: [:signals]` | `Array<{destination, include, granularity, endpoint?, api_key_env?, _profile?}>` — trace-fan-out destinations (RED-282 / RED-302). Profile references are resolved at compile time and inlined; `_profile` preserves the source name for trace observability. |

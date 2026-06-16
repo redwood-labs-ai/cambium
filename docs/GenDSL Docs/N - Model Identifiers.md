@@ -72,6 +72,28 @@ The in-repo example is `packages/cambium/app/providers/gateway.ts` — a no-SDK 
 
 Bedrock needs AWS SigV4, which means an AWS SDK. That's the **consumer's** dependency, not Cambium's — write `app/providers/bedrock.ts` with `defineProvider`, import `@aws-sdk/...` in your own app, and sign the request inside `generateText`/`generateWithTools`. Run the endpoint through `validateProviderBaseUrl` before signing (Tier-2 providers don't get the factory's automatic SSRF guard). Cambium stays SDK-free; your app owns its own dependency hygiene.
 
+## Multi-provider fallback (RED-421)
+
+`model` accepts multiple model ids as ordered varargs:
+
+```ruby
+model "anthropic:claude-opus", "bedrock:claude-opus"   # primary, then fallback
+model "omlx:big", "omlx:medium", "ollama:small"        # ordered chain
+```
+
+On a **transient** failure of the primary, the runner tries the next candidate in declaration order through the same per-run `ProviderRegistry`. The **transient** set (RED-421, DEC-A/DEC-C/DEC-D):
+
+- `ProviderHttpError` with status 5xx, 408, 425, or 429 — the server responded but the response signals a retriable condition.
+- `ProviderConnectionError` with status 0 — no HTTP response at all (ECONNREFUSED, DNS failure, TLS error). Built-in providers (`omlx`, `anthropic`, `ollama`) emit this automatically when the underlying `fetch()` rejects. DEC-D.
+
+**Deterministic** failures (any other 4xx) fail immediately — the same bad request fails on every provider, so fanning out only burns spend.
+
+- Each id resolves through model aliases at compile time (RED-237); no runtime alias resolution. The IR carries literal `provider:name` strings in `model.id` (primary) and `model.fallbacks[]` (rest) — see `C - IR` § `model.fallbacks`.
+- No stickiness in v1: each generation attempt (including a repair re-generation) walks the list fresh from the primary.
+- A `ModelFallback` trace step is emitted before each fallback attempt, recording the model that failed, the error class, and the candidate tried next. See `C - Trace (observability).md`.
+- The native-document gate runs against the **primary** provider before any fallback (and per-candidate for fallbacks): a document-bearing gen on a non-document provider fails fast rather than silently dropping the document to enable fallback.
+- **Custom providers** that want retry-on-transient for HTTP-status failures must throw `ProviderHttpError` (exported from `@redwood-labs/cambium-runner`), carrying the HTTP status. For pre-response connection failures (no HTTP response — ECONNREFUSED, DNS, TLS), throw `ProviderConnectionError` instead (also exported from `@redwood-labs/cambium-runner`; subclasses `ProviderHttpError` with `status: 0`). A plain `Error` or `TypeError` — any non-`ProviderHttpError` — is classified **deterministic**, so an unrecognized failure produces controlled fail-fast rather than a cost-blowing fan-out to every fallback. DEC-A is unchanged: the type-gate, not a `.status` property, determines classification.
+
 ## Anthropic prompt caching (RED-321)
 
 `buildAnthropicMessagesRequest` automatically applies `cache_control: {type: 'ephemeral'}` to two blocks:

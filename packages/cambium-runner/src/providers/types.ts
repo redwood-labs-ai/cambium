@@ -16,6 +16,36 @@ export type TokenUsage = {
   total_tokens: number;
 };
 
+// RED-421 (DEC-A): typed provider HTTP error. Built-in providers throw this
+// on an HTTP-status error so the fallback classifier reads a typed integer
+// instead of regex-sniffing the message string. Part of the provider-author
+// contract — a custom provider that wants retry-on-transient throws this with
+// the HTTP status; a plain `Error` is classified deterministic (fail fast,
+// no fan-out). Exported from the package root. Keep minimal: do not add fields.
+export class ProviderHttpError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'ProviderHttpError';
+    this.status = status;
+  }
+}
+
+// RED-421 (DEC-D): typed connection error. Built-in providers wrap a
+// fetch-level rejection (ECONNREFUSED / DNS / TLS — no HTTP response received)
+// in this subclass so the fallback classifier treats it as transient.
+// `status` is hardcoded to 0 (the sentinel for "no HTTP status"), which
+// `isTransientStatus(0)` recognises. Custom providers that throw a plain
+// `Error` or `TypeError` still hit the deterministic path — DEC-A's fan-out
+// protection is unchanged. Exported from the package root alongside
+// `ProviderHttpError`. Keep minimal: constructor takes only `message`.
+export class ProviderConnectionError extends ProviderHttpError {
+  constructor(message: string) {
+    super(0, message);
+    this.name = 'ProviderConnectionError';
+  }
+}
+
 export type GenerateResult = { text: string; usage?: TokenUsage };
 
 export type ProviderMessage = {

@@ -11,6 +11,7 @@
 
 import { ProviderRegistry, defineProvider } from './registry.js';
 import { openaiCompatible, anthropicCompatible } from './factories.js';
+import { ProviderHttpError, ProviderConnectionError } from './types.js';
 import { normalizeOmlxBaseUrl, validateProviderBaseUrl } from './base-url-validator.js';
 import { buildOllamaChatRequest, normalizeOllamaChatResponse } from './ollama.js';
 
@@ -71,12 +72,19 @@ export const ollamaProvider = defineProvider({
         num_predict: opts.max_tokens ?? 1200,
       },
     };
-    const res = await fetch('http://localhost:11434/api/generate', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`Ollama error: HTTP ${res.status}`);
+    let res: Response;
+    try {
+      res = await fetch('http://localhost:11434/api/generate', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (fetchErr) {
+      throw new ProviderConnectionError(
+        `Ollama connection failed: ${(fetchErr as Error).message ?? String(fetchErr)}`,
+      );
+    }
+    if (!res.ok) throw new ProviderHttpError(res.status, `Ollama error: HTTP ${res.status}`);
     const json: any = await res.json();
     return {
       text: json.response as string,
@@ -104,12 +112,19 @@ export const ollamaProvider = defineProvider({
       max_tokens: opts.max_tokens,
       temperature: opts.temperature,
     });
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`Ollama error: HTTP ${res.status}`);
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (fetchErr) {
+      throw new ProviderConnectionError(
+        `Ollama connection failed: ${(fetchErr as Error).message ?? String(fetchErr)}`,
+      );
+    }
+    if (!res.ok) throw new ProviderHttpError(res.status, `Ollama error: HTTP ${res.status}`);
     const json: any = await res.json();
     const normalized = normalizeOllamaChatResponse(json);
     // Inline tool-call markup parsing is applied by the dispatcher.

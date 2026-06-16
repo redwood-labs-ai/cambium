@@ -74,6 +74,11 @@ export type GenerateTextFn = (opts: {
    *  Empty/absent = legacy behavior (oMLX path applies thinking-suppression
    *  ONLY when disable_thinking explicit-true OR auto-detected for Qwen3). */
   modelOptions?: { disable_thinking?: boolean };
+  /** RED-421: ordered fallback model ids to try on transient primary failure
+   *  (connection errors / 5xx / 429). Absent → no fallback (single-model
+   *  behavior unchanged). The dispatcher resolves each id through the same
+   *  per-run ProviderRegistry as the primary. */
+  fallbacks?: string[];
 }) => Promise<GenerateTextResult>;
 
 export type ExtractJsonFn = (text: string) => any;
@@ -173,9 +178,14 @@ export async function handleGenerate(
     jsonSchema: schema,
     documents,
     modelOptions: ir.model.options,
+    // RED-421: pass fallbacks so the dispatcher can walk them on transient failure.
+    fallbacks: ir.model.fallbacks,
   });
 
   const raw = genResult.text;
+  // model_used reflects the actual model that produced the result (primary or a
+  // fallback); the dispatcher sets it on the result when a fallback was taken.
+  const modelUsed: string = (genResult as any).modelUsed ?? ir.model.id;
   let parsed: any = undefined;
   let parseError: string | undefined;
   try {
@@ -193,7 +203,7 @@ export async function handleGenerate(
       ms: Date.now() - started,
       ok: parsed !== undefined,
       errors: parseError ? [{ message: parseError }] : undefined,
-      meta: { model_used: ir.model.id, raw_preview: raw.slice(0, 400), usage: genResult.usage },
+      meta: { model_used: modelUsed, raw_preview: raw.slice(0, 400), usage: genResult.usage },
     },
   };
 }
@@ -343,9 +353,12 @@ export async function handleRepair(
     temperature: ir.model.temperature,
     jsonSchema: schema,
     modelOptions: ir.model.options,
+    // RED-421: repair is also a generation attempt — walk fallbacks fresh.
+    fallbacks: ir.model.fallbacks,
   });
 
   const newRaw = genResult.text;
+  const repairModelUsed: string = (genResult as any).modelUsed ?? ir.model.id;
   let parsed: any = undefined;
   try {
     parsed = extractJson(newRaw);
@@ -360,7 +373,7 @@ export async function handleRepair(
       type: 'Repair',
       ms: Date.now() - started,
       ok: parsed !== undefined,
-      meta: { attempt, model_used: ir.model.id, raw_preview: newRaw.slice(0, 400), usage: genResult.usage },
+      meta: { attempt, model_used: repairModelUsed, raw_preview: newRaw.slice(0, 400), usage: genResult.usage },
     },
   };
 }
@@ -568,6 +581,8 @@ export type GenerateWithToolsFn = (opts: {
   documents?: DocumentBlock[];
   /** RED-325 Part 3: per-model options from `model "id", disable_thinking: true`. */
   modelOptions?: { disable_thinking?: boolean };
+  /** RED-421: ordered fallback model ids. See GenerateTextFn.fallbacks. */
+  fallbacks?: string[];
 }) => Promise<{ message: { content: string | null; tool_calls?: ToolCallMsg[] }; usage?: TokenUsage }>;
 
 export async function handleAgenticGenerate(
@@ -667,6 +682,8 @@ export async function handleAgenticGenerate(
       temperature: ir.model.temperature,
       documents,
       modelOptions: ir.model.options,
+      // RED-421: fallbacks for agentic turns (each turn walks fresh).
+      fallbacks: ir.model.fallbacks,
     });
 
     const msg = response.message;
@@ -744,7 +761,8 @@ export async function handleAgenticGenerate(
         ok: true,
         meta: {
           turn: turn + 1,
-          model_used: ir.model.id,
+          // RED-421: reflect the actual provider used (primary or fallback).
+          model_used: (response as any).modelUsed ?? ir.model.id,
           tool_calls: msg.tool_calls.map((tc: any) => ({
             name: tc.function.name,
             args: tc.function.arguments,

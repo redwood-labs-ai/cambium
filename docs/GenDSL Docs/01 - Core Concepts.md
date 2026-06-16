@@ -7,7 +7,7 @@ This DSL is "Rails for generation engineering": reliable LLM programs via conven
 
 ## Key ideas
 - **Programs with contracts:** generation is a transaction with validation + repair.
-- **Typed returns:** outputs validate against JSON Schema; `returns <Name>` is compile-time checked against your contracts module (RED-210).
+- **Typed returns:** outputs validate against JSON Schema. Two forms: `returns do … end` (block form, default) compiles field declarations to an inline Draft-07 schema — no hand-written TypeScript needed; `returns :Symbol` (escape hatch) references a hand-written TypeBox export in `src/contracts.ts`. Both → AJV validation. See [[P - returns]].
 - **Grounding as policy:** citations/provenance are enforced, not requested.
 - **Tools as capabilities:** tool calls are declared, permissioned, typed, and logged. Handlers live next to their schemas in `app/tools/` and are auto-discovered (RED-209).
 - **Sandboxing as declaration:** `security network: { allowlist: [...] }` and `budget per_tool: {...}` are first-class primitives. SSRF guard + IP pinning + per-tool call caps are enforced at the dispatch site, not hand-plumbed in each tool (RED-137).
