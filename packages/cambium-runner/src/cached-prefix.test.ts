@@ -218,6 +218,59 @@ describe('handleGenerate cached-prefix split', () => {
     expect(captured[1].prompt).toBe('Lens B.');
   });
 
+  it('multi-gen fan-out: distinct IRs sharing grounding + context + schema produce byte-identical cachedPrefix', async () => {
+    // Real fan-out posture: each reviewer gen is a separate `.cmb.rb` file
+    // that compiles to its own IR. The prefix construction reads only
+    // `ir.policies.grounding`, `ir.context`, and the schema arg — fields
+    // that DO vary across reviewer gens (system, model.id, model.temperature,
+    // ir.id, etc.) MUST NOT bleed into the prefix, or the cache key diverges
+    // and the fan-out cache hit rate drops to zero.
+    const captured: any[] = [];
+    const fakeGen = async (opts: any) => {
+      captured.push(opts);
+      return { text: '{"summary":"ok","tags":[]}' };
+    };
+    // Two independently-constructed IRs sharing only the cache-relevant
+    // surface; everything else deliberately differs.
+    const sharedContext = { document: LONG_DOC, diff_surface: 'ruby_dsl, runner' };
+    const sharedGrounding = { policies: { grounding: { source: 'document' } } };
+    const irArchitecture = {
+      ...sharedGrounding,
+      id: 'architecture_reviewer',
+      system: 'You are an architecture reviewer.',
+      model: { id: 'anthropic:claude-opus-4-7', max_tokens: 1200, temperature: 0.1 },
+      context: sharedContext,
+    };
+    const irSecurity = {
+      ...sharedGrounding,
+      id: 'security_reviewer',
+      system: 'You are a security reviewer focused on auth, input validation, secret handling.',
+      model: { id: 'anthropic:claude-sonnet-4-6', max_tokens: 800, temperature: 0.2 },
+      context: sharedContext,
+    };
+    await handleGenerate(
+      { id: 'arch', prompt: 'Apply the ARCHITECTURE lens.' },
+      irArchitecture,
+      SCHEMA,
+      fakeGen as any,
+      JSON.parse,
+    );
+    await handleGenerate(
+      { id: 'sec', prompt: 'Apply the SECURITY lens.' },
+      irSecurity,
+      SCHEMA,
+      fakeGen as any,
+      JSON.parse,
+    );
+    // Two distinct IRs, two distinct systems, two distinct models — but the
+    // cacheablePrefix must be byte-identical because the cache-relevant
+    // surface (grounding source + context + schema) matches.
+    expect(captured[0].cachedPrefix).toBeDefined();
+    expect(captured[0].cachedPrefix).toBe(captured[1].cachedPrefix);
+    expect(captured[0].prompt).toBe('Apply the ARCHITECTURE lens.');
+    expect(captured[1].prompt).toBe('Apply the SECURITY lens.');
+  });
+
   it('cached-prefix path includes pipeline bind() context sections inside the prefix', async () => {
     let captured: any;
     const fakeGen = async (opts: any) => {
