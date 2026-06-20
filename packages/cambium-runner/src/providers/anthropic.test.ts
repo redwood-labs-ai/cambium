@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildAnthropicMessagesRequest, normalizeAnthropicMessagesResponse } from './anthropic.js';
+import { buildAnthropicMessagesRequest, normalizeAnthropicMessagesResponse, MIN_USER_CACHE_CHARS } from './anthropic.js';
 
 describe('buildAnthropicMessagesRequest', () => {
   it('extracts system role to top-level system with cache_control', () => {
@@ -461,6 +461,161 @@ describe('buildAnthropicMessagesRequest with documents (RED-323)', () => {
       documents: [],
     });
     expect(body.messages[0].content).toBe('q');
+  });
+});
+
+describe('buildAnthropicMessagesRequest with cacheUserPrefix', () => {
+  // Larger than MIN_USER_CACHE_CHARS so the prefix is cache-eligible.
+  const longPrefix = 'DOCUMENT:\n' + 'x'.repeat(MIN_USER_CACHE_CHARS);
+
+  it('omitting cacheUserPrefix keeps today\'s single-string user content', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: 'analyse the diff' },
+      ],
+    });
+    // Byte-identical default path — content is a string, no array wrapping.
+    expect(body.messages[0]).toEqual({ role: 'user', content: 'analyse the diff' });
+  });
+
+  it('emits multi-block user content with cache_control on the prefix when eligible', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: 'Apply the ARCHITECTURE lens.' },
+      ],
+      cacheUserPrefix: longPrefix,
+    });
+    expect(body.messages).toHaveLength(1);
+    const userMsg = body.messages[0];
+    expect(userMsg.role).toBe('user');
+    expect(Array.isArray(userMsg.content)).toBe(true);
+    expect(userMsg.content).toHaveLength(2);
+    // Prefix first (cache marker extends BACKWARD through this block)
+    expect(userMsg.content[0]).toEqual({
+      type: 'text',
+      text: longPrefix,
+      cache_control: { type: 'ephemeral' },
+    });
+    // Per-call instruction last (varies across fan-out, must trail the breakpoint)
+    expect(userMsg.content[1]).toEqual({
+      type: 'text',
+      text: 'Apply the ARCHITECTURE lens.',
+    });
+  });
+
+  it('omits cache_control on prefix when cache is disabled', () => {
+    // With `cache: false` the runner is meant to flatten upstream so this
+    // path shouldn't fire in practice — but if a caller does hand a prefix
+    // to a cache-disabled build, never emit a no-op cache marker.
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [{ role: 'user', content: 'instr' }],
+      cacheUserPrefix: longPrefix,
+      cache: false,
+    });
+    const blocks = body.messages[0].content;
+    expect(Array.isArray(blocks)).toBe(true);
+    // Cache disabled → no marker, prefix is inlined as one text block.
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toEqual({ type: 'text', text: `${longPrefix}\n\ninstr` });
+  });
+
+  it('below the cache floor: inlines prefix as plain text, no marker', () => {
+    const shortPrefix = 'too short to cache';
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [{ role: 'user', content: 'instr' }],
+      cacheUserPrefix: shortPrefix,
+    });
+    const blocks = body.messages[0].content;
+    expect(blocks).toHaveLength(1);
+    // No cache_control field anywhere; prefix-first inline.
+    expect(blocks[0]).toEqual({ type: 'text', text: `${shortPrefix}\n\ninstr` });
+  });
+
+  it('attaches the prefix to the FIRST user message only', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: 'first ask' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{ id: 't1', type: 'function', function: { name: 'web_search', arguments: '{}' } }],
+        },
+        { role: 'tool', content: '{"result":"ok"}', tool_call_id: 't1' },
+      ],
+      cacheUserPrefix: longPrefix,
+    });
+    // First user message carries the cached prefix + the asker's text
+    expect(body.messages[0].role).toBe('user');
+    expect(body.messages[0].content[0].cache_control).toEqual({ type: 'ephemeral' });
+    expect(body.messages[0].content[1].text).toBe('first ask');
+    // Tool-result user turn has NO cached prefix prepended
+    expect(body.messages[2].role).toBe('user');
+    expect(body.messages[2].content).toHaveLength(1);
+    expect(body.messages[2].content[0].type).toBe('tool_result');
+  });
+
+  it('cacheUserPrefix and documents coexist: docs first, prefix-cached block, then text', () => {
+    const pdfDoc = {
+      key: 'invoice',
+      kind: 'base64_pdf' as const,
+      data: 'UERGIGRhdGE=',
+      media_type: 'application/pdf',
+    };
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [{ role: 'user', content: 'instr' }],
+      documents: [pdfDoc],
+      cacheUserPrefix: longPrefix,
+    });
+    const blocks = body.messages[0].content;
+    expect(blocks).toHaveLength(3);
+    // Document keeps its own cache marker (last document)
+    expect(blocks[0]).toMatchObject({ type: 'document', cache_control: { type: 'ephemeral' } });
+    // Prefix block carries the 4th cache breakpoint
+    expect(blocks[1]).toEqual({
+      type: 'text',
+      text: longPrefix,
+      cache_control: { type: 'ephemeral' },
+    });
+    // Per-call instruction last
+    expect(blocks[2]).toEqual({ type: 'text', text: 'instr' });
+  });
+
+  it('byte-identical prefix across two requests is the cache-hit invariant', () => {
+    const build = (instruction: string) =>
+      buildAnthropicMessagesRequest({
+        model: 'claude-sonnet-4-6',
+        messages: [
+          { role: 'system', content: 'sys' },
+          { role: 'user', content: instruction },
+        ],
+        cacheUserPrefix: longPrefix,
+      });
+    const a = build('Apply the ARCHITECTURE lens.');
+    const b = build('Apply the SECURITY lens.');
+    // System block + cached prefix text are identical → cache reuse possible
+    expect(a.system).toEqual(b.system);
+    expect(a.messages[0].content[0]).toEqual(b.messages[0].content[0]);
+    // Only the per-call instruction differs
+    expect(a.messages[0].content[1].text).not.toBe(b.messages[0].content[1].text);
+  });
+
+  it('throws when cacheUserPrefix is set but no user message is present', () => {
+    expect(() =>
+      buildAnthropicMessagesRequest({
+        model: 'claude-sonnet-4-6',
+        messages: [{ role: 'system', content: 'sys only' }],
+        cacheUserPrefix: longPrefix,
+      }),
+    ).toThrow(/cacheUserPrefix provided but no user message/);
   });
 });
 

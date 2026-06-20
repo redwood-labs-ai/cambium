@@ -292,6 +292,13 @@ export function anthropicCompatible(config: AnthropicCompatibleConfig): CambiumP
   return {
     name: config.name,
     supportsDocuments: config.supportsDocuments ?? false,
+    // cache_control on a user-message prefix block needs Anthropic's
+    // multi-block content shape. Other Anthropic-Messages-compatible
+    // endpoints accept the same shape too, so the flag tracks `cache`
+    // (the only switch that disables the marker emission). When `cache`
+    // is off the runner flattens upstream so this provider sees a single
+    // string — keep the flag honest with that.
+    supportsPromptCacheControl: config.cache !== false,
     fetchFailureHint: config.fetchFailureHint,
 
     async generateText(opts: GenerateTextOpts): Promise<GenerateResult> {
@@ -305,6 +312,7 @@ export function anthropicCompatible(config: AnthropicCompatibleConfig): CambiumP
         temperature: opts.temperature,
         cache: config.cache,
         documents: opts.documents ?? [],
+        cacheUserPrefix: opts.cachedPrefix,
       });
       const target = url();
       const h = headers();
