@@ -122,7 +122,7 @@ Read these docs before making architectural decisions or adding new primitives.
 - Built-in providers for agentic mode:
   - **oMLX** (OpenAI-compatible): `CAMBIUM_OMLX_BASEURL` (default `http://localhost:8080`), optional `CAMBIUM_OMLX_API_KEY`. Model id: `"omlx:<name>"`.
   - **Ollama**: `CAMBIUM_OLLAMA_BASEURL` (default `http://localhost:11434`), no API key. Model id: `"ollama:<name>"` or a bare name (Ollama is the default provider).
-  - **Anthropic** (RED-321/323): `ANTHROPIC_API_KEY` or `CAMBIUM_ANTHROPIC_API_KEY`; optional `CAMBIUM_ANTHROPIC_BASEURL`. Model id: `"anthropic:<name>"`. Prompt caching on by default; native PDF/image document input via typed `ir.context` envelopes (Anthropic-only, size-capped). See [`N - Model Identifiers`](docs/GenDSL%20Docs/N%20-%20Model%20Identifiers.md) § Native document input.
+  - **Anthropic** (RED-321/323): `ANTHROPIC_API_KEY` or `CAMBIUM_ANTHROPIC_API_KEY`; optional `CAMBIUM_ANTHROPIC_BASEURL`. Model id: `"anthropic:<name>"`. Prompt caching on by default (system, tools, and the user-prompt prefix for grounded gens); native PDF/image document input via typed `ir.context` envelopes (Anthropic-only, size-capped). See [`N - Model Identifiers`](docs/GenDSL%20Docs/N%20-%20Model%20Identifiers.md) § Native document input.
 - Qwen 3.5 thinking mode (oMLX): suppressed via `/no_think` token + `chat_template_kwargs`
 - VS Code: syntax highlighting + LSP (hover, go-to-definition, completions) for `.cmb.rb`
 
