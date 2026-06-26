@@ -108,11 +108,57 @@ export class ProviderRegistry {
       if (!existing || (f.endsWith('.ts') && !existing.endsWith('.ts'))) bases.set(base, f);
     }
 
+    await this.registerFromDir(dirPath, bases);
+  }
+
+  /**
+   * Engine-mode provider discovery (RED-424). Engine folders are flat — the
+   * gen sits beside `schemas.ts`, `index.ts`, `*.corrector.ts`, etc. — so
+   * unlike `app/providers` this selects ONLY files carrying the discriminating
+   * `.provider.ts` (or compiled `.provider.js`) suffix; the basename minus
+   * `.provider` is the model-id prefix. Mirrors the `.corrector.ts` engine
+   * convention. Same guard set as loadFromDir (shared via registerFromDir).
+   * A missing directory is fine. Called AFTER `app/providers` so the ordering
+   * matches tools/actions (builtin < app < engine sibling).
+   */
+  async loadFromEngineDir(dirPath: string): Promise<void> {
+    let entries: string[];
+    try {
+      entries = readdirSync(dirPath);
+    } catch {
+      return; // no engine dir is fine
+    }
+    const bases = new Map<string, string>(); // base → filename
+    for (const f of entries) {
+      if (f.endsWith('.d.ts')) continue;
+      let base: string | undefined;
+      if (f.endsWith('.provider.ts')) base = f.slice(0, -'.provider.ts'.length);
+      else if (f.endsWith('.provider.js')) base = f.slice(0, -'.provider.js'.length);
+      else continue;
+      const existing = bases.get(base);
+      if (!existing || (f.endsWith('.ts') && !existing.endsWith('.ts'))) bases.set(base, f);
+    }
+    await this.registerFromDir(dirPath, bases);
+  }
+
+  /**
+   * Shared guard + register tail for both discovery paths. Given base→filename
+   * pairs already collected from `dirPath`, apply the security guards and
+   * register each provider. Single source of the guards (RED-214/275 path
+   * cluster) so the app and engine paths can't drift:
+   *   - basename must match /^[a-z][a-z0-9_]*$/ — it becomes the model-id
+   *     prefix AND is interpolated into a filesystem path.
+   *   - realpath escape check rejects a symlink resolving outside dirPath.
+   *   - `export default` must implement both generate methods.
+   *   - if the provider carries a `name`, it must equal the basename (RED-393
+   *     honesty check).
+   */
+  private async registerFromDir(dirPath: string, bases: Map<string, string>): Promise<void> {
     if (bases.size === 0) return;
     // Resolve the dir's realpath for the escape check. Guard it the same way
-    // the readdir above is guarded: if the directory vanished between readdir
-    // and here (symlink swap, transient FS event), treat it as absent rather
-    // than crashing runGen startup — parity with app-loader's existsSync gate.
+    // the readdir is guarded: if the directory vanished between readdir and
+    // here (symlink swap, transient FS event), treat it as absent rather than
+    // crashing runGen startup — parity with app-loader's existsSync gate.
     let realDir: string;
     try {
       realDir = realpathSync(dirPath);

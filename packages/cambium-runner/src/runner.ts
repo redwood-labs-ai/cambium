@@ -931,13 +931,18 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   // Built-ins first (anthropic/omlx/ollama), then app-supplied providers
   // under app/providers/*.ts. loadFromDir's last-write-wins means an app
   // provider shadows a built-in with the same model-id prefix — the
-  // override hook, same as tools/correctors. Engine-mode providers are a
-  // follow-up (engine siblings are plain `.ts`, indistinguishable from
-  // schemas/correctors without a typed extension). Built per-runGen so a
-  // long-lived engine-mode host gets App-A-can't-leak-into-App-B isolation
-  // (RED-299 stance), and the dispatchers close over THIS registry.
+  // override hook, same as tools/correctors. RED-424: engine-mode hosts get
+  // the same shadowing via `<prefix>.provider.ts` siblings (the discriminating
+  // suffix — engine folders are flat, so a bare `.ts` can't be assumed to be a
+  // provider). Load order matches tools/actions: builtin < app < engine sibling.
+  // Built per-runGen so a long-lived engine-mode host gets
+  // App-A-can't-leak-into-App-B isolation (RED-299 stance), and the dispatchers
+  // close over THIS registry.
   const providerRegistry = buildBuiltinRegistry();
   await providerRegistry.loadFromDir(join(appPkgRoot, 'app/providers'));
+  if (engineDir) {
+    await providerRegistry.loadFromEngineDir(engineDir);
+  }
   // RED-421, TEST-ONLY: merge injected fake providers last so they win
   // (same precedence as an app provider shadowing a built-in). The map key
   // is the model-id prefix; register() keys on provider.name, so force the
