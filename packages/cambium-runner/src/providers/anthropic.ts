@@ -62,7 +62,20 @@ export type AnthropicMessagesRequestOpts = {
   temperature?: number;
   cache?: boolean;         // default true — apply cache_control to system block + last tool + last document
   documents?: AnthropicDocumentBlock[];  // RED-323: emitted as content blocks on the FIRST user message
+  /** Shared payload emitted as a cache_control:ephemeral text block ahead
+   *  of the first user message's content (4th breakpoint: system + last
+   *  tool + last document + this). Below MIN_USER_CACHE_CHARS the marker
+   *  would be a no-op so the prefix is inlined as
+   *  `<prefix>\n\n<user content>` instead. Cache-disabled callers never
+   *  reach this — the runner concatenates upstream. */
+  cacheUserPrefix?: string;
 };
+
+// Cache-floor threshold for the user-prompt prefix. Anthropic's minimum
+// cacheable prefix is 1024 tokens (Sonnet/Haiku) — ~4 chars/token gives a
+// conservative client-side gate so we don't ship a cache marker the
+// server would silently refuse.
+export const MIN_USER_CACHE_CHARS = 4096;
 
 /**
  * Build the request body for Anthropic's POST /v1/messages endpoint.
@@ -169,16 +182,42 @@ export function buildAnthropicMessagesRequest(opts: AnthropicMessagesRequestOpts
     }
 
     // Default: role === 'user' or any other role — pass through.
-    if (m.role === 'user' && !documentsConsumed && documents.length > 0) {
-      // RED-323: prepend document blocks to the FIRST user message. Per
-      // Anthropic's guidance, document blocks should precede the text
-      // block in the same user message for best attention.
-      const docBlocks = buildDocumentBlocks();
-      const textBlock = { type: 'text', text: m.content ?? '' };
-      translatedMessages.push({
-        role: 'user',
-        content: [...docBlocks, textBlock],
-      });
+    // RED-323 + cacheUserPrefix: a first user message gets special handling
+    // whenever documents OR a cacheUserPrefix are present. Both anchor on
+    // the first user-role message (`documentsConsumed` gates both for the
+    // same reason — they belong to the original prompt, not later
+    // tool_result turns).
+    const userText = m.content ?? '';
+    const cacheUserPrefix = opts.cacheUserPrefix;
+    const userPrefixEligible =
+      useCache && !!cacheUserPrefix && cacheUserPrefix.length >= MIN_USER_CACHE_CHARS;
+    if (
+      m.role === 'user' &&
+      !documentsConsumed &&
+      (documents.length > 0 || cacheUserPrefix)
+    ) {
+      const docBlocks = documents.length > 0 ? buildDocumentBlocks() : [];
+      const blocks: any[] = [...docBlocks];
+      if (cacheUserPrefix) {
+        if (userPrefixEligible) {
+          // 4th breakpoint, prefix-first ordering so the cached region
+          // extends backward through (documents +) the prefix.
+          blocks.push({
+            type: 'text',
+            text: cacheUserPrefix,
+            cache_control: { type: 'ephemeral' },
+          });
+          blocks.push({ type: 'text', text: userText });
+        } else {
+          // Below the cache floor: skip the marker — keep prefix-first
+          // order so the caller's intent (and any non-Anthropic fallback
+          // ordering) stays consistent across the cached/uncached split.
+          blocks.push({ type: 'text', text: `${cacheUserPrefix}\n\n${userText}` });
+        }
+      } else {
+        blocks.push({ type: 'text', text: userText });
+      }
+      translatedMessages.push({ role: 'user', content: blocks });
       documentsConsumed = true;
       continue;
     }
@@ -188,11 +227,15 @@ export function buildAnthropicMessagesRequest(opts: AnthropicMessagesRequestOpts
     });
   }
 
-  // If documents were provided but no user message appeared in the
-  // conversation to attach them to, that's a caller bug — Anthropic
-  // would reject a request with orphan document blocks. Fail explicit.
-  if (documents.length > 0 && !documentsConsumed) {
-    throw new Error('Anthropic: documents provided but no user message found to attach them to');
+  // If documents OR a cacheUserPrefix were provided but no user message
+  // appeared in the conversation to attach them to, that's a caller bug
+  // — silently dropping a large cached payload would mask the wiring
+  // mistake. Fail explicit, same rationale as the documents-orphan case.
+  if (!documentsConsumed && (documents.length > 0 || opts.cacheUserPrefix)) {
+    if (documents.length > 0) {
+      throw new Error('Anthropic: documents provided but no user message found to attach them to');
+    }
+    throw new Error('Anthropic: cacheUserPrefix provided but no user message found to attach it to');
   }
 
   // Translate OpenAI-format tools → Anthropic format.

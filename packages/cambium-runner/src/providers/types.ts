@@ -68,6 +68,14 @@ export type GenerateTextOpts = {
   jsonSchema?: any;
   documents?: any[];
   modelOptions?: { disable_thinking?: boolean };
+  /** Long shared payload eligible for the provider's prompt-cache prefix.
+   *  When set, `prompt` is the per-call instruction and the provider emits
+   *  `cachedPrefix` first (as a separate block with a cache breakpoint)
+   *  followed by `prompt`. Providers that lack cache support never see
+   *  this field — the runner concatenates it into `prompt` upstream
+   *  (`<prompt>\n\n<cachedPrefix>`, preserving pre-existing grounded
+   *  ordering) so dispatch stays uniform. */
+  cachedPrefix?: string;
 };
 
 export type GenerateWithToolsResult = {
@@ -96,6 +104,13 @@ export interface CambiumProvider {
    *  envelopes). The registry dispatcher uses it for the fail-fast gate so a
    *  document never gets silently JSON-stringified into a prompt. */
   supportsDocuments: boolean;
+  /** Whether this provider can mark a portion of the user prompt with a
+   *  prompt-cache breakpoint. When true, the runner forwards
+   *  `GenerateTextOpts.cachedPrefix` to the provider unchanged. When false
+   *  (or absent), the runner concatenates `cachedPrefix` into `prompt`
+   *  before dispatch so the provider sees a single combined string and the
+   *  caller's grounded prompts retain their pre-split ordering. */
+  supportsPromptCacheControl?: boolean;
   /** Optional context appended to the thrown error when a fetch to this
    *  provider fails (the "check CAMBIUM_OMLX_BASEURL…" hint). */
   fetchFailureHint?: string;

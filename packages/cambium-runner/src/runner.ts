@@ -211,8 +211,12 @@ export function isTransientProviderError(err: unknown): boolean {
   return false;
 }
 
-function makeGenerateText(providerRegistry: ProviderRegistry, traceSteps: any[]) {
- return async function generateText(opts: { model: string; system: string; prompt: string; max_tokens?: number; temperature?: number; jsonSchema?: any; documents?: any[]; modelOptions?: { disable_thinking?: boolean }; fallbacks?: string[]; }): Promise<GenerateResult & { modelUsed?: string }> {
+// Exported so cached-prefix.test.ts can assert the runner-level flatten
+// (providers without `supportsPromptCacheControl` receive
+// `<prompt>\n\n<cachedPrefix>` and no `cachedPrefix` field) without
+// standing up the full runGen pipeline.
+export function makeGenerateText(providerRegistry: ProviderRegistry, traceSteps: any[]) {
+ return async function generateText(opts: { model: string; system: string; prompt: string; max_tokens?: number; temperature?: number; jsonSchema?: any; documents?: any[]; modelOptions?: { disable_thinking?: boolean }; fallbacks?: string[]; cachedPrefix?: string; }): Promise<GenerateResult & { modelUsed?: string }> {
   const documents = opts.documents ?? [];
 
   // RED-323 / RED-421 (DEC-B / AUD-421-3): the native-document gate runs for
@@ -296,16 +300,29 @@ function makeGenerateText(providerRegistry: ProviderRegistry, traceSteps: any[])
       });
     }
 
+    // Providers that can't emit a user-prompt cache breakpoint see a
+    // single concatenated prompt. Flatten as `<prompt>\n\n<prefix>` —
+    // legacy ordering — so a grounded gen running against a non-Anthropic
+    // fallback shows the model the prompt it was tuned against pre-split.
+    // The cache-aware provider receives the structured split unchanged and
+    // emits prefix-first (cached) ordering itself.
+    const rawPrefix = opts.cachedPrefix;
+    const passPrefix = rawPrefix && provider.supportsPromptCacheControl;
+    const effectivePrompt = passPrefix
+      ? opts.prompt
+      : (rawPrefix ? `${opts.prompt}\n\n${rawPrefix}` : opts.prompt);
+
     try {
       const result = await provider.generateText({
         model: name,
         system: opts.system,
-        prompt: opts.prompt,
+        prompt: effectivePrompt,
         max_tokens: opts.max_tokens,
         temperature: opts.temperature,
         jsonSchema: opts.jsonSchema,
         documents,
         modelOptions: { disable_thinking: disableThinking },
+        cachedPrefix: passPrefix ? rawPrefix : undefined,
       });
       // Surface which model actually produced the result so Generate meta can
       // reflect the fallback (model_used != ir.model.id when a fallback ran).

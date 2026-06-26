@@ -79,7 +79,22 @@ export type GenerateTextFn = (opts: {
    *  behavior unchanged). The dispatcher resolves each id through the same
    *  per-run ProviderRegistry as the primary. */
   fallbacks?: string[];
+  /** Long shared payload eligible for provider-side prompt caching (e.g.
+   *  the grounded document + output template that's identical across a
+   *  fan-out of reviewer gens). The cache-aware provider emits it as a
+   *  separate cached block; non-cache-aware providers receive a single
+   *  concatenated prompt the runner builds upstream. */
+  cachedPrefix?: string;
 }) => Promise<GenerateTextResult>;
+
+/** Only worth splitting the prompt when the shared payload is big enough
+ *  to clear the cache floor with margin. Below this size the cache marker
+ *  would be a no-op and we'd just add complexity to the request body for
+ *  nothing. Char-based: Anthropic's floor is 1024 tokens for Sonnet/Haiku
+ *  (~4 chars/token). The provider re-checks at request-build time, but
+ *  gating here also keeps the legacy single-string path for
+ *  small/ungrounded gens. */
+export const MIN_CACHE_PREFIX_CHARS = 4096;
 
 export type ExtractJsonFn = (text: string) => any;
 
@@ -141,10 +156,13 @@ export async function handleGenerate(
     else jsonTemplate[key] = null;
   }
 
-  // Build prompt with document + any enriched context
-  const promptParts = [
-    step.prompt,
-    '',
+  // Build the shared (potentially-cacheable) portion of the user prompt:
+  // DOCUMENT body + non-primary context + OUTPUT_JSON_TEMPLATE. This is the
+  // payload that's identical across a fan-out of gens sharing the same
+  // grounding — the only thing varying per-call is `step.prompt` (the
+  // per-lens dispatch text). The Anthropic provider marks this block with
+  // cache_control so branches 2..N read it from cache.
+  const sharedParts: string[] = [
     'DOCUMENT:',
     String(doc ?? ''),
   ];
@@ -156,15 +174,30 @@ export async function handleGenerate(
   // `ir.context.foo` but never reached the LLM. Now every non-framework
   // key gets a labeled prompt section.
   const groundingSource = ir.policies?.grounding?.source;
-  appendNonPrimaryContextSections(promptParts, ir.context ?? {}, groundingSource);
+  appendNonPrimaryContextSections(sharedParts, ir.context ?? {}, groundingSource);
 
-  promptParts.push(
+  sharedParts.push(
     '',
     'OUTPUT_JSON_TEMPLATE (fill this; keep keys the same; no extra keys):',
     JSON.stringify(jsonTemplate),
   );
 
-  const prompt = promptParts.join('\n');
+  const cacheablePrefix = sharedParts.join('\n');
+
+  // Legacy single-string prompt — byte-identical to the pre-split layout.
+  // The cache-aware path reorders to prefix-first inside the provider;
+  // this fallback ordering is what every non-Anthropic (or cache-disabled
+  // Anthropic) call sees, so a grounded gen running against a non-cache
+  // provider is unchanged.
+  const legacyPrompt = `${step.prompt}\n\n${cacheablePrefix}`;
+
+  // Opt into the cached-prefix path only when (1) grounding is declared —
+  // without it the "shared payload" framing is misleading — and (2) the
+  // prefix is large enough to clear Anthropic's cache floor with margin.
+  // Below either gate we send the single-string legacy prompt and skip
+  // the split entirely.
+  const grounded = !!ir.policies?.grounding;
+  const useCachedPrefix = grounded && cacheablePrefix.length >= MIN_CACHE_PREFIX_CHARS;
 
   const outMax = Number(ir.model.max_tokens ?? 1200);
   const started = Date.now();
@@ -172,7 +205,7 @@ export async function handleGenerate(
   const genResult = await generateText({
     model: ir.model.id,
     system,
-    prompt,
+    prompt: useCachedPrefix ? step.prompt : legacyPrompt,
     max_tokens: outMax,
     temperature: ir.model.temperature,
     jsonSchema: schema,
@@ -180,6 +213,7 @@ export async function handleGenerate(
     modelOptions: ir.model.options,
     // RED-421: pass fallbacks so the dispatcher can walk them on transient failure.
     fallbacks: ir.model.fallbacks,
+    cachedPrefix: useCachedPrefix ? cacheablePrefix : undefined,
   });
 
   const raw = genResult.text;

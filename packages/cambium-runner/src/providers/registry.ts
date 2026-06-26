@@ -145,7 +145,12 @@ export class ProviderRegistry {
           `Rename the file or drop the name field (it derives from the filename).`,
         );
       }
-      this.register({ ...provider, name: base, supportsDocuments: !!provider.supportsDocuments });
+      this.register({
+        ...provider,
+        name: base,
+        supportsDocuments: !!provider.supportsDocuments,
+        supportsPromptCacheControl: !!provider.supportsPromptCacheControl,
+      });
     }
   }
 }
