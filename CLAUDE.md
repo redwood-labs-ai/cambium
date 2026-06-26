@@ -118,7 +118,7 @@ Read these docs before making architectural decisions or adding new primitives.
 
 - Tests: `npm test` (vitest)
 - Ruby 3.x gate (RED-378): `node scripts/test-on-ruby.mjs` runs the suite in a `ruby:<v>-alpine` container (gated step `[7/7]` in pre-publish). Cheap audit-time half: `npm run audit:ruby-compat` (RED-379). Details: `SECURITY.md` § Ruby supply chain.
-- Provider dispatch (RED-393): model-id prefixes resolve through a per-run `ProviderRegistry`; app `app/providers/<name>.ts` (filename = prefix) shadows built-ins; author custom providers with the `openaiCompatible` / `anthropicCompatible` factories. See [`N - Model Identifiers`](docs/GenDSL%20Docs/N%20-%20Model%20Identifiers.md).
+- Provider dispatch (RED-393): model-id prefixes resolve through a per-run `ProviderRegistry`; app `app/providers/<name>.ts` (filename = prefix) shadows built-ins, and engine-mode gens use `<prefix>.provider.ts` flat siblings (RED-424, same guards + load precedence); author custom providers with the `openaiCompatible` / `anthropicCompatible` factories. See [`N - Model Identifiers`](docs/GenDSL%20Docs/N%20-%20Model%20Identifiers.md).
 - Built-in providers for agentic mode:
   - **oMLX** (OpenAI-compatible): `CAMBIUM_OMLX_BASEURL` (default `http://localhost:8080`), optional `CAMBIUM_OMLX_API_KEY`. Model id: `"omlx:<name>"`.
   - **Ollama**: `CAMBIUM_OLLAMA_BASEURL` (default `http://localhost:11434`), no API key. Model id: `"ollama:<name>"` or a bare name (Ollama is the default provider).
@@ -192,6 +192,7 @@ One pattern, many sites: anywhere a user-picked symbol or string interpolates in
 | App correctors (RED-275) | basename regex + export-name match + realpath escape check | `correctors/app-loader.ts` |
 | `--memory-key` values + `CAMBIUM_SESSION_ID` | `/^[a-zA-Z0-9_\-]+$/`, 128-char max | `memory/keys.ts#validateSafeSegment` |
 | `Genfile.toml [types].contracts` (RED-274) | no absolute paths, no null bytes, no `..` escape after resolve | `genfile.ts#resolveGenfileContracts` |
+| Custom providers (RED-393/424) | basename regex + realpath escape + export-default + name/filename agreement | `providers/registry.ts#registerFromDir` |
 
 - **App-root resolution is single-sourced**: ALL `app/<type>/` discovery anchors on `ir.entry.source` (walk-up), never `process.cwd()` — cwd is only the last-resort fallback when the source path is unreachable (host-compiled IR in a container). New plugin surfaces must reuse the same `appPkgRoot`/`engineDir` that tools use inside `runGen`; never re-resolve from cwd independently. History + operator contract: [`N - App Mode vs Engine Mode (RED-220)`](docs/GenDSL%20Docs/N%20-%20App%20Mode%20vs%20Engine%20Mode%20%28RED-220%29.md).
 

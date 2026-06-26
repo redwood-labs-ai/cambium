@@ -24,7 +24,7 @@ Agentic mode is the tool-use loop (`mode :agentic`). Single-turn `generate` work
 
 ## How the prefix resolves to a provider (RED-393)
 
-The runner dispatches every model call through a **provider registry** keyed by the model-id prefix. `model "anthropic:claude-sonnet-4-6"` → the registry's `anthropic` provider; a bare `"llama3"` (no prefix) → `ollama`. The registry is built per-run: framework built-ins (`anthropic`, `omlx`, `ollama`) first, then app-supplied `app/providers/*.ts` — **last write wins, so an app provider shadows a built-in with the same prefix** (the override hook, same stance as tools/correctors).
+The runner dispatches every model call through a **provider registry** keyed by the model-id prefix. `model "anthropic:claude-sonnet-4-6"` → the registry's `anthropic` provider; a bare `"llama3"` (no prefix) → `ollama`. The registry is built per-run: framework built-ins (`anthropic`, `omlx`, `ollama`) first, then app-supplied `app/providers/*.ts`, then engine-mode `<prefix>.provider.ts` siblings (RED-424) — **last write wins, so a later layer shadows an earlier one with the same prefix** (the override hook, same stance as tools/correctors). Load order: builtin < app < engine sibling.
 
 The dispatcher owns the cross-cutting concerns — prefix parse, Qwen thinking auto-detect, the native-document support gate (`provider.supportsDocuments`), the `--mock` short-circuit, fetch-failure hinting, and inline tool-call markup parsing. A provider implements ONLY build-body → fetch → normalize, so app providers inherit all the gates for free.
 
@@ -33,6 +33,8 @@ The dispatcher owns the cross-cutting concerns — prefix parse, Qwen thinking a
 Add a provider — Bedrock, Azure OpenAI, OpenRouter, Vertex, a self-hosted gateway — without forking the runner and **with zero new dependencies** (Cambium ships no provider SDKs; built-ins are raw `fetch`). One file, `app/providers/<name>.ts`, `export default` a provider; **the filename is the model-id prefix**.
 
 Scaffold one with `cambium new provider <Name>` — it emits an `openaiCompatible` template (the Tier-1 shape below) with the `validateProviderBaseUrl` SSRF guard already wired and a `name` matching the filename. `cambium lint` then checks every `app/providers/*.ts` for the basename regex, an `export default`, and name/filename agreement.
+
+**Engine mode (RED-424):** an embedded host places the file as `<prefix>.provider.ts` directly in the engine folder (no `app/providers/` subdirectory) — the discriminating suffix the runner's `loadFromEngineDir` scans for, since a flat engine folder's bare `.ts` files (`schemas.ts`, `index.ts`, `*.corrector.ts`) can't be assumed to be providers. Same filename-as-prefix rule, same guards, same factory imports. `cambium new provider <Name>` emits the sibling when run from inside an engine folder, and `cambium lint` checks engine `*.provider.ts` siblings with the same rules as `app/providers/*.ts`.
 
 Two authoring tiers:
 

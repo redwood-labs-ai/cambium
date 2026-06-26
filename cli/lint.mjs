@@ -613,6 +613,31 @@ function lintEngine(engineDir) {
   // Framework-builtin log destinations — legitimate inline references.
   const BUILTIN_LOG_DESTINATIONS = new Set(['stdout', 'http_json', 'datadog']);
 
+  // 7b. Custom providers (RED-424): engine-mode `<prefix>.provider.ts` siblings.
+  // Same shape checks as the app-mode block in lintPackage — basename = model-id
+  // prefix, must `export default`, and any `name:` field must agree with the
+  // basename. The runner's registerFromDir is the authoritative loader (shared
+  // by both discovery paths); this is the early-warning before first dispatch.
+  const providerSiblings = entries.filter(
+    f => f.endsWith('.provider.ts') && !f.endsWith('.provider.d.ts') && !f.endsWith('.provider.test.ts'),
+  );
+  for (const f of providerSiblings) {
+    const providerName = f.slice(0, -'.provider.ts'.length);
+    if (!NAME_REGEX.test(providerName)) {
+      fail(`provider file name "${providerName}" (${f}) must match ${NAME_REGEX} — the basename becomes the model-id prefix (RED-393/RED-424)`);
+      continue;
+    }
+    pass(`provider: ${f}`);
+    const body = readFileSync(join(engineDir, f), 'utf8');
+    if (!/export\s+default/.test(body)) {
+      fail(`  ${f}: must \`export default\` a CambiumProvider (RED-393 loader requirement)`);
+    }
+    const nameField = body.match(/[\n,{]\s*name:\s*['"]([a-z][a-z0-9_]*)['"]/);
+    if (nameField && nameField[1] !== providerName) {
+      fail(`  ${f}: declares name '${nameField[1]}' but the filename requires '${providerName}' — rename the file or drop the name field (RED-393)`);
+    }
+  }
+
   // 8. Gen validation — walk every .cmb.rb and cross-check references.
   //    Framework-builtin tool / corrector names are legitimate refs too;
   //    lint only warns on unknown names (not fails) since the runner has

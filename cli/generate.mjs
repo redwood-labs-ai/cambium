@@ -1211,10 +1211,10 @@ describe('${pascal} pipeline', () => {
 // loadFromDir enforces the identical regex at load time; this is the
 // scaffold-side half.
 //
-// Engine-mode providers are not supported yet (runner discovery is
-// app/providers-only — engine siblings are plain `.ts`, indistinguishable
-// from schemas/correctors without a typed extension). Error like the
-// policy / memory_pool / log_profile scaffolders do.
+// RED-424: engine-mode providers ship as `<prefix>.provider.ts` flat siblings
+// of the gen (the discriminating suffix the runner's loadFromEngineDir scans
+// for). App mode still writes app/providers/<name>.ts. Same basename-as-prefix
+// rule and /^[a-z][a-z0-9_]*$/ guard on both paths.
 
 function generateProvider(name, ctx) {
   validateName(name, 'provider name');
@@ -1229,33 +1229,32 @@ function generateProvider(name, ctx) {
     process.exit(2);
   }
 
-  if (ctx.mode === 'engine') {
-    console.error(`\n'cambium new provider' is not supported in engine mode.`);
-    console.error(`Provider discovery is app-mode only (app/providers/). Engine-mode providers are a follow-up.`);
-    process.exit(2);
-  }
-
   const ENV = `CAMBIUM_${snake.toUpperCase()}`;
+  const isEngine = ctx.mode === 'engine';
 
-  // Import path differs by mode, matching the corrector/tool conventions:
-  //   - in-tree cambium workspace uses a deep relative to framework source
-  //     (it doesn't import itself as a package);
-  //   - external [package] apps import from the published runner package.
-  const factoryImport = ctx.shape === 'workspace'
+  // Import path: engine siblings and external [package] apps import the
+  // published runner; the in-tree [workspace] app uses a deep relative (it
+  // can't import itself as a package). Mirrors the schema scaffolder, which
+  // imports @sinclair/typebox by package in engine mode.
+  const factoryImport = (!isEngine && ctx.shape === 'workspace')
     ? '../../../cambium-runner/src/providers/factories.js'
     : '@redwood-labs/cambium-runner';
 
+  // Where the file lands + how it's discovered, by mode.
+  const convention = isEngine
+    ? `${snake}.provider.ts (a flat sibling of the gen)`
+    : `app/providers/${snake}.ts`;
+
   const body = `\
 /**
- * Custom model provider (RED-393). Auto-discovered by the runner — any
- * \`app/providers/<name>.ts\` that \`export default\`s a CambiumProvider is
+ * Custom model provider (RED-393). Auto-discovered by the runner: this file is
  * registered under the model-id prefix matching its filename. A gen then
  * dispatches to it with \`model "${snake}:<model-name>"\`.
  *
- * The filename basename IS the model-id prefix and MUST match
- * /^[a-z][a-z0-9_]*$/. The \`name\` below must equal the basename "${snake}"
- * (or drop it — the loader derives the name from the filename and rejects a
- * mismatch).
+ * Discovery: ${convention}. The filename basename IS the model-id prefix and
+ * MUST match /^[a-z][a-z0-9_]*$/. The \`name\` below must equal the basename
+ * "${snake}" (or drop it — the loader derives the name from the filename and
+ * rejects a mismatch).
  *
  * This template uses \`openaiCompatible\` — the Tier-1 factory for "an
  * OpenAI-compatible POST /v1/chat/completions endpoint at a different base
@@ -1288,9 +1287,24 @@ export default openaiCompatible({
   // --- optional knobs (uncomment as needed; defaults give a vanilla OpenAI gateway) ---
   // modelName: (n) => n,                       // Cambium model name → wire id (Azure deployment sugar, etc.)
   // supportsDocuments: false,                  // base64 PDF/image envelopes (generic OpenAI endpoints can't)
+  // supportsPromptCacheControl: false,         // forward a cached user-prompt prefix as a separate block
   // fetchFailureHint: 'Is ${ENV}_BASEURL set and reachable?',
 });
 `;
+
+  if (isEngine) {
+    const file = join(ctx.engineDir, `${snake}.provider.ts`);
+    writeFile(file, body);
+    console.log(`\nNext steps:`);
+    console.log(`  1. Set baseUrl + auth in ${file} (or via ${ENV}_BASEURL / ${ENV}_API_KEY env vars).`);
+    console.log(`  2. Use in your gen: model "${snake}:<model-name>"`);
+    console.log(`\n  Auto-discovered as an engine sibling — no registration step. The basename "${snake}"`);
+    console.log(`  IS the model-id prefix; it must match /^[a-z][a-z0-9_]*$/ (enforced at scaffold time`);
+    console.log(`  and load). An engine provider shadows a same-named built-in (anthropic / omlx / ollama).`);
+    console.log(`\n  Anthropic-Messages endpoint instead? Swap openaiCompatible → anthropicCompatible.`);
+    console.log(`  Need full wire control? Use defineProvider. Both are exported from the runner package.`);
+    return;
+  }
 
   const PKG = ctx.appPkgRoot;
   writeFile(join(PKG, 'app/providers', `${snake}.ts`), body);
@@ -1320,8 +1334,8 @@ const GENERATORS = {
   log_profile: generateLogProfile,
   config: generateConfig,
   engine: generateEngine,
-  // RED-393: custom model providers under app/providers/<name>.ts. App-mode
-  // only (runner discovery is app/providers-only; engine-mode is a follow-up).
+  // RED-393: custom model providers under app/providers/<name>.ts (app mode)
+  // or <prefix>.provider.ts siblings (engine mode, RED-424).
   provider: generateProvider,
   // RED-381 Phase G.1: pipelines scaffold parallel to agents. App-mode
   // only in v1 — engine-mode pipelines (a pipeline as the engine's

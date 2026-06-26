@@ -138,6 +138,13 @@ function scanEngineFolder(engineDir) {
       correctorFiles[name] = { path: full, origin: 'engine' };
       continue;
     }
+    if (f.endsWith('.provider.ts') && !f.endsWith('.provider.d.ts') && !f.endsWith('.provider.test.ts')) {
+      // RED-424: engine-mode custom provider. Basename minus `.provider` is the
+      // model-id prefix; merges into the same providerDefs map app-mode writes.
+      const name = f.slice(0, -'.provider.ts'.length);
+      providerDefs[name] = { path: full };
+      continue;
+    }
     if (f.endsWith('.policy.rb')) {
       const name = f.replace('.policy.rb', '');
       try {
@@ -318,10 +325,10 @@ function scanWorkspace() {
     }
   }
 
-  // Scan custom providers (RED-393). Basename = model-id prefix; feeds the
-  // `model "<prefix>:..."` completion / hover / go-to-def below. App-mode
-  // only — the runner's provider discovery is app/providers-only (engine-mode
-  // providers are a follow-up), so there's no engine sibling scan here.
+  // Scan app-mode custom providers (RED-393). Basename = model-id prefix; feeds
+  // the `model "<prefix>:..."` completion / hover / go-to-def below. Engine-mode
+  // providers (`<prefix>.provider.ts` siblings, RED-424) are scanned in
+  // scanEngineFolder above and merge into the same providerDefs map.
   const providersDir = path.join(appPkgRoot, 'app/providers');
   if (fs.existsSync(providersDir)) {
     for (const f of fs.readdirSync(providersDir)) {
