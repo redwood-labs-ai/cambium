@@ -4,6 +4,23 @@ All notable changes to Cambium are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Cambium adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] — 2026-06-28 — The Provider Horizon
+
+Parity closes: engine-mode custom providers land with the same guards, scaffolding, and LSP support as app-mode. A community contribution cuts fan-out input costs by more than half, and a security patch rolls undici forward past four advisories.
+
+### Added
+
+- **Engine-mode custom providers via `<prefix>.provider.ts` flat siblings (RED-424).** `runGen` now loads `*.provider.ts` siblings from the engine directory (new `loadFromEngineDir` path in `ProviderRegistry`), enabling `model "myprovider:..."` in engine-mode hosts without an `app/` tree. Only files named exactly `<prefix>.provider.ts` are loaded — non-provider siblings (`schemas.ts`, `index.ts`, etc.) are ignored, closing a file-confusion gap in `loadFromDir`. The same security guards apply: basename regex, realpath escape check, name/filename agreement, dual-method check. Precedence: builtin < app < engine < test-injected. `cambium new provider` scaffolds engine-mode providers, `cambium lint` validates them, and the VS Code LSP resolves their model-id prefixes for hover/goto/completion.
+- **Anthropic user-prompt-prefix caching for grounded fan-out gens (PR #18, contrib by kennethsqe).** When a gen has `grounded_in` set and the shared user-prompt payload (DOCUMENT + non-primary context + `OUTPUT_JSON_TEMPLATE`) clears Anthropic's cache floor, `handleGenerate` splits the prompt into a cacheable prefix block and a per-call instruction; the Anthropic provider emits the prefix as a separate text block with `cache_control: ephemeral`. In a fan-out sharing the same grounded document, branch 1 writes the cache and branches 2..N read it — estimated 55–65% input-cost reduction on large fan-out shapes. Non-grounded gens, gens below the cache floor, and non-Anthropic providers receive the byte-identical single-string prompt as before (the runner flattens upstream for providers that don't declare `supportsPromptCacheControl`). The agentic `generateWithTools` path is intentionally unchanged.
+
+### Security
+
+- **undici 8.1.0 → 8.5.0 (CVE-2026-6734 + 3 advisories).** Closes the SOCKS5 connection-pool reuse cross-origin request leak (CVE-2026-6734, GHSA-cxrh-j4jr-qwg3) plus three further advisories including a cumulative-fragment DoS regression specific to 8.1.0. undici backs the runner's SSRF guard (`network-guard.ts`); the `Agent`/`fetch`/`buildConnector` API is unchanged across the minor. 8.5.0 published 2026-06-15, clear of the 7-day age gate; no allowlist needed.
+
+### Changed
+
+- **`@redwood-labs/cambium`** and **`@redwood-labs/cambium-runner`** bump to `0.8.1`.
+
 ## [0.8.0] — 2026-06-15 — The Surface Wave
 
 The on-ramp release: declare a gen's output schema in one file, fall over across providers, and pin output with golden regression tests — plus a pipeline correctness fix.
