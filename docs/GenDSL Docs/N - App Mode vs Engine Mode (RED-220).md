@@ -58,11 +58,12 @@ What changes between modes is **discovery and packaging**, not semantics. Three 
 | Tool/action discovery | `loadFromDir('packages/cambium/app/{tools,actions}')` | Also scans `<engineDir>/*.tool.json` + `<engineDir>/*.action.json` |
 | App-corrector discovery | CLI-main loads `<genfileDir>/app/correctors/` | Also scans `<engineDir>/*.corrector.ts` inside `runGen` |
 | App log-sink discovery (RED-302) | Loads `<appPkgRoot>/app/logs/*.log.ts` at runner start | Also scans `<engineDir>/*.log.ts` inside `runGen`; `opts.logSinks` injects explicit sinks |
+| Provider discovery (RED-393/424) | `loadFromDir('app/providers')` | Also scans `<engineDir>/*.provider.ts` siblings inside `runGen`; rides the existing `engineDir` (builtin < app < engine) |
 | `runsRoot` | `join(cwd(), 'runs')` | Defaults to `<engineDir>/runs` when engine mode is detected; configurable per call |
 | `sessionId` | `CAMBIUM_SESSION_ID` env var | `opts.sessionId` option wins; host wrappers can set per-request |
 | Scheduled-fire identity (RED-305) | CLI parses `--fired-by` / `CAMBIUM_FIRED_BY` into a structured fire id | `opts.firedBy` injects a pre-parsed value for engine-mode hosts driving scheduled runs programmatically |
 
-All seven are now on `RunGenOptions` (engine-mode runtime catch-up). Everything else inside `runner.ts` is mode-agnostic already.
+All seven are on `RunGenOptions` (engine-mode runtime catch-up); RED-424 later added provider discovery (the eighth touchpoint), which rides the existing `engineDir` rather than a new option. Everything else inside `runner.ts` is mode-agnostic already.
 
 ---
 
@@ -87,11 +88,12 @@ my-node-app/
         ├── slack_notify.action.json # optional trigger action (RED-212)
         ├── slack_notify.action.ts   # paired action handler
         ├── regex_check.corrector.ts # optional app corrector (RED-275)
+        ├── openrouter.provider.ts   # optional custom model provider (RED-424)
         ├── summarizer.ir.json       # produced by `npx cambium compile`
         └── index.ts                 # generated: typed wrapper
 ```
 
-Every surface Cambium supports — tools, actions, correctors, systems, policies, memory pools — lives as a **sibling** of the gen in engine mode. `app/config/` (model aliases, memory policy) is the one exception: those are workspace-level primitives and do not apply inside a single engine folder. A gen that needs model aliases belongs in app mode.
+Every surface Cambium supports — tools, actions, correctors, systems, policies, memory pools, custom providers — lives as a **sibling** of the gen in engine mode. `app/config/` (model aliases, memory policy) is the one exception: those are workspace-level primitives and do not apply inside a single engine folder. A gen that needs model aliases belongs in app mode.
 
 Three principles:
 
@@ -318,6 +320,7 @@ The RED-220 ticket lists five follow-up implementation pieces. With the decision
    - Ruby compile catch-up: `ModelAliases.search_candidates` and `MemoryPolicy.search_candidates` now return `[]` when the sentinel sits next to the gen — an engine folder does not inherit ancestor workspace config. `Cambium::ENGINE_SENTINEL` promoted to module scope. The RED-210 schema validator in `compile.rb` prepends `<genDir>/schemas.ts` so engine gens get real compile-time schema-name validation (typo detection, "did you mean" suggestions) instead of silently skipping.
    - Tests: `engine_mode_e2e.test.ts` compiles + runs a tmpdir engine with sibling tool + corrector end-to-end through the real CLI. `engine-root.test.ts` + `app-loader.test.ts` engine-mode cases + `compile_model_aliases.test.ts` + `compile_schema_validation.test.ts` engine-mode cases cover the unit-level invariants. Full suite after catch-up: 693 passed.
    - **Cross-env fallback (RED-353, 0.3.3).** Source-anchored detection is the *primary* mechanism — but it fails when `ir.entry.source` is an absolute path baked in by automated tooling on a host that doesn't exist at run time (Docker / CI / peer machine: e.g., `/Users/Steve/...` doesn't resolve in the container). `engine-root.ts` exports a sibling helper, `findEngineDirFromCwd(cwd)`, with the same fixed-name walk-up shape but anchored at cwd. `runGenFromIr` invokes it as a fallback **only when** source-based detection returns null AND `entry.source` is set but unreachable on disk — so `engine_mode_e2e`'s "run-from-anywhere" property (cwd unrelated to gen, source path exists) is preserved verbatim. Operator contract for the cross-env case: at run time, cwd is the engine dir or an ancestor of it. The resolved `engineDir` is also passed explicitly to `runGen` via `opts.engineDir` so the inner re-detection doesn't undo the cwd resolution. Test: a second `it()` in `engine_mode_e2e.test.ts` simulates cross-env by tampering `entry.source` to a non-existent path and asserts the engine still resolves (run artifacts land under `<engineDir>/runs/`, not `<cwd>/runs/`).
+   - **Provider discovery (RED-424, 0.8.1).** The engine-mode follow-up for custom providers — deferred when RED-393 shipped app-mode discovery — is closed. `runGen()` calls `providerRegistry.loadFromEngineDir(engineDir)` after `app/providers`, scanning `<prefix>.provider.ts` siblings (the discriminating suffix; a flat engine folder's bare `.ts` files can't be assumed to be providers). Same guard set as app mode, shared via `registerFromDir`. Load order: builtin < app < engine sibling.
 
 7. **Engine-mode authoring polish.** *(Landed 2026-04-20, same day as item 6; see git log.)*
    - Context: item 6 closed the runtime/compile cluster but left four authoring-UX gaps: `cambium lint` didn't recognize engine folders, the VS Code extension couldn't resolve engine-mode sibling symbols, `cambium new schema` in engine mode printed boilerplate instead of editing `schemas.ts`, and `cambium run` had no signal when the committed `.ir.json` was stale vs. the source gen.

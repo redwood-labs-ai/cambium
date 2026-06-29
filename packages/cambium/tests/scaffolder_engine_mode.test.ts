@@ -371,6 +371,18 @@ describe('cambium new <type> — RED-284 scaffolder additions', () => {
     expect(body).toContain("from '@redwood-labs/cambium-runner'");
   });
 
+  it('cambium new provider writes <snake>.provider.ts in engine mode (RED-424)', () => {
+    writeFileSync(join(scratch, 'cambium.engine.json'), '{}');
+    const result = runCli(['new', 'provider', 'AcmeGateway'], scratch);
+    expect(result.status).toBe(0);
+    const file = join(scratch, 'acme_gateway.provider.ts');
+    expect(existsSync(file)).toBe(true);
+    // Engine sibling: discriminating suffix + package import + name = basename.
+    const body = readFileSync(file, 'utf8');
+    expect(body).toContain("from '@redwood-labs/cambium-runner'");
+    expect(body).toContain("name: 'acme_gateway'");
+  });
+
   it('cambium new policy writes <snake>.policy.rb under packages/cambium/app/policies/', () => {
     mkdirSync(join(scratch, 'packages', 'cambium'), { recursive: true });
     const result = runCli(['new', 'policy', 'research_caps'], scratch);

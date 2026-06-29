@@ -18,13 +18,13 @@ If no `provider:` prefix is given, the bare string is treated as `"ollama:<name>
 |---|---|---|---|---|
 | `omlx`      | ✅ | ✅ (`POST /v1/embeddings`) | n/a | `CAMBIUM_OMLX_BASEURL`, optional `CAMBIUM_OMLX_API_KEY` |
 | `ollama`    | ✅ | ✅ (`POST /api/embed`) | n/a | `CAMBIUM_OLLAMA_BASEURL` (default `http://localhost:11434`) |
-| `anthropic` | ✅ | ❌ (no native embeddings API) | ✅ system block + last tool | `ANTHROPIC_API_KEY` (or `CAMBIUM_ANTHROPIC_API_KEY`), optional `CAMBIUM_ANTHROPIC_BASEURL` (default `https://api.anthropic.com`) |
+| `anthropic` | ✅ | ❌ (no native embeddings API) | ✅ system + last tool + last doc + grounded user-prefix | `ANTHROPIC_API_KEY` (or `CAMBIUM_ANTHROPIC_API_KEY`), optional `CAMBIUM_ANTHROPIC_BASEURL` (default `https://api.anthropic.com`) |
 
 Agentic mode is the tool-use loop (`mode :agentic`). Single-turn `generate` works for all three providers.
 
 ## How the prefix resolves to a provider (RED-393)
 
-The runner dispatches every model call through a **provider registry** keyed by the model-id prefix. `model "anthropic:claude-sonnet-4-6"` → the registry's `anthropic` provider; a bare `"llama3"` (no prefix) → `ollama`. The registry is built per-run: framework built-ins (`anthropic`, `omlx`, `ollama`) first, then app-supplied `app/providers/*.ts` — **last write wins, so an app provider shadows a built-in with the same prefix** (the override hook, same stance as tools/correctors).
+The runner dispatches every model call through a **provider registry** keyed by the model-id prefix. `model "anthropic:claude-sonnet-4-6"` → the registry's `anthropic` provider; a bare `"llama3"` (no prefix) → `ollama`. The registry is built per-run: framework built-ins (`anthropic`, `omlx`, `ollama`) first, then app-supplied `app/providers/*.ts`, then engine-mode `<prefix>.provider.ts` siblings (RED-424) — **last write wins, so a later layer shadows an earlier one with the same prefix** (the override hook, same stance as tools/correctors). Load order: builtin < app < engine sibling.
 
 The dispatcher owns the cross-cutting concerns — prefix parse, Qwen thinking auto-detect, the native-document support gate (`provider.supportsDocuments`), the `--mock` short-circuit, fetch-failure hinting, and inline tool-call markup parsing. A provider implements ONLY build-body → fetch → normalize, so app providers inherit all the gates for free.
 
@@ -33,6 +33,8 @@ The dispatcher owns the cross-cutting concerns — prefix parse, Qwen thinking a
 Add a provider — Bedrock, Azure OpenAI, OpenRouter, Vertex, a self-hosted gateway — without forking the runner and **with zero new dependencies** (Cambium ships no provider SDKs; built-ins are raw `fetch`). One file, `app/providers/<name>.ts`, `export default` a provider; **the filename is the model-id prefix**.
 
 Scaffold one with `cambium new provider <Name>` — it emits an `openaiCompatible` template (the Tier-1 shape below) with the `validateProviderBaseUrl` SSRF guard already wired and a `name` matching the filename. `cambium lint` then checks every `app/providers/*.ts` for the basename regex, an `export default`, and name/filename agreement.
+
+**Engine mode (RED-424):** an embedded host places the file as `<prefix>.provider.ts` directly in the engine folder (no `app/providers/` subdirectory) — the discriminating suffix the runner's `loadFromEngineDir` scans for, since a flat engine folder's bare `.ts` files (`schemas.ts`, `index.ts`, `*.corrector.ts`) can't be assumed to be providers. Same filename-as-prefix rule, same guards, same factory imports. `cambium new provider <Name>` emits the sibling when run from inside an engine folder, and `cambium lint` checks engine `*.provider.ts` siblings with the same rules as `app/providers/*.ts`.
 
 Two authoring tiers:
 
@@ -67,6 +69,7 @@ The in-repo example is `packages/cambium/app/providers/gateway.ts` — a no-SDK 
 - Secrets resolve from env via the `auth` callback — never bake a key into the file.
 - The base URL is operator-controlled (same trust boundary as `CAMBIUM_OMLX_BASEURL`); run it through `validateProviderBaseUrl` for the SSRF guard.
 - Set `supportsDocuments` honestly — `false` makes the runtime fail fast on a native-document gen instead of stringifying a base64 blob into the prompt.
+- Set `supportsPromptCacheControl` honestly — `true` tells the runner to forward `GenerateTextOpts.cachedPrefix` to the provider as a separate cached block; `false`/absent makes the runner flatten `cachedPrefix` into `prompt` before dispatch so the provider always sees a single string. The `anthropicCompatible` factory sets it from `config.cache !== false`.
 
 ### Bedrock (consumer recipe, not shipped)
 
@@ -96,10 +99,12 @@ On a **transient** failure of the primary, the runner tries the next candidate i
 
 ## Anthropic prompt caching (RED-321)
 
-`buildAnthropicMessagesRequest` automatically applies `cache_control: {type: 'ephemeral'}` to two blocks:
+`buildAnthropicMessagesRequest` automatically applies `cache_control: {type: 'ephemeral'}` to up to four blocks — Anthropic's per-request breakpoint ceiling:
 
 1. The top-level `system` block (always, when a system prompt exists).
 2. The last entry in `tools[]` (which caches the whole tools array up through it).
+3. The last native-document block (RED-323), when document input is present — caches the whole document stack up through it.
+4. The shared user-prompt prefix — DOCUMENT + non-primary context sections + OUTPUT_JSON_TEMPLATE — for gens that declare `grounded_in`, when the shared payload is ≥ `MIN_CACHE_PREFIX_CHARS` (~4 KB). This fires automatically for grounded fan-out gens: the prefix is byte-identical across candidates, so branch 1 writes the cache (`cache_creation_input_tokens`) and branches 2..N read it (`cache_read_input_tokens`). The split happens only on the single-turn `generateText` path; the agentic loop is unchanged. Blocks 2 and 4 never co-occur on one request (separate code paths), so four is a ceiling, not a typical count. **Ordering note (0.8.1):** when this breakpoint fires, the Anthropic user message is reordered to document/prefix-first, instruction-last — required by Anthropic's caching contract; gens below the floor and all non-Anthropic providers are unaffected.
 
 Cache stats surface through the usual usage channel and are carried in the trace:
 

@@ -207,7 +207,9 @@ export function buildAnthropicMessagesRequest(opts: AnthropicMessagesRequestOpts
             text: cacheUserPrefix,
             cache_control: { type: 'ephemeral' },
           });
-          blocks.push({ type: 'text', text: userText });
+          // AUD-003: omit the trailing instruction block when empty — Anthropic
+          // rejects requests with empty text content blocks (HTTP 400).
+          if (userText) blocks.push({ type: 'text', text: userText });
         } else {
           // Below the cache floor: skip the marker — keep prefix-first
           // order so the caller's intent (and any non-Anthropic fallback
