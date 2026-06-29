@@ -245,7 +245,12 @@ export function makeGenerateText(providerRegistry: ProviderRegistry, traceSteps:
   // short-circuits the fallback chain — no real providers are consulted,
   // no fallback trace steps are emitted.
   if (process.env.CAMBIUM_ALLOW_MOCK === '1') {
-    return { text: mockGenerate(opts.prompt, opts.jsonSchema) };
+    // AUD-001: reconstruct the full prompt the way a non-cache-capable provider
+    // sees it so mock fidelity matches production (and the pre-split layout).
+    const mockPrompt = opts.cachedPrefix
+      ? `${opts.prompt}\n\n${opts.cachedPrefix}`
+      : opts.prompt;
+    return { text: mockGenerate(mockPrompt, opts.jsonSchema) };
   }
 
   // RED-421: build the ordered list of model ids to try: primary first,

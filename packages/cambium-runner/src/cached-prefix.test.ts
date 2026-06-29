@@ -389,6 +389,47 @@ describe('runner-level flatten for providers without prompt-cache support', () =
   });
 });
 
+describe('--mock fidelity with cachedPrefix (AUD-001)', () => {
+  // The mock short-circuit at runner.ts:makeGenerateText must reconstruct the
+  // full flattened prompt (the way a non-cache provider sees it) so golden
+  // tests based on --mock produce the same output for grounded ≥4 KB gens
+  // as they did before the cached-prefix split was introduced.
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('mock sees prompt + cachedPrefix flattened (metric in prefix is visible)', async () => {
+    vi.stubEnv('CAMBIUM_ALLOW_MOCK', '1');
+    // No provider registered — mock fires before provider lookup.
+    const reg = new ProviderRegistry();
+    const gen = makeGenerateText(reg, []);
+    // Latency metric lives only in the cachedPrefix, not in the per-call
+    // instruction. Pre-fix: mockGenerate received only opts.prompt →
+    // latency_ms_samples: []. Post-fix: full flattened prompt →
+    // latency_ms_samples: [100].
+    const result = await gen({
+      model: 'flat:m',
+      system: 'sys',
+      prompt: 'Apply the ARCHITECTURE lens.',
+      cachedPrefix: 'DOCUMENT:\nThe system processed the request in 100ms total.',
+    });
+    const parsed = JSON.parse(result.text);
+    expect(parsed.metrics.latency_ms_samples).toEqual([100]);
+  });
+
+  it('mock without cachedPrefix is byte-identical to pre-split behavior', async () => {
+    vi.stubEnv('CAMBIUM_ALLOW_MOCK', '1');
+    const reg = new ProviderRegistry();
+    const gen = makeGenerateText(reg, []);
+    const result = await gen({
+      model: 'flat:m',
+      system: 'sys',
+      prompt: 'Apply the ARCHITECTURE lens.',
+    });
+    const parsed = JSON.parse(result.text);
+    // No ms patterns anywhere → latency_ms_samples stays empty.
+    expect(parsed.metrics.latency_ms_samples).toEqual([]);
+  });
+});
+
 describe('agentic generateWithTools is unaffected by the cachedPrefix wiring (guard rail)', () => {
   // The cachedPrefix wiring lives in the GenerateTextOpts path only. The
   // agentic path uses GenerateWithToolsOpts and deliberately doesn't

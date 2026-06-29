@@ -617,6 +617,29 @@ describe('buildAnthropicMessagesRequest with cacheUserPrefix', () => {
       }),
     ).toThrow(/cacheUserPrefix provided but no user message/);
   });
+
+  it('empty instruction with eligible prefix: omits trailing empty text block (AUD-003)', () => {
+    // A grounded gen ≥ ~4 KB with an empty step.prompt reaches this path.
+    // Before the fix: pushed { type: 'text', text: '' } — Anthropic rejects
+    // empty content blocks with HTTP 400. After the fix: only the cached
+    // prefix block is emitted; the trailing text block is suppressed.
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [{ role: 'user', content: '' }],
+      cacheUserPrefix: longPrefix,
+    });
+    const blocks = body.messages[0].content;
+    expect(Array.isArray(blocks)).toBe(true);
+    // Exactly one block: the cached prefix. No empty trailing text block.
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toEqual({
+      type: 'text',
+      text: longPrefix,
+      cache_control: { type: 'ephemeral' },
+    });
+    // Defensive: no empty text block anywhere in the message.
+    expect(blocks.some((b: any) => b.type === 'text' && b.text === '')).toBe(false);
+  });
 });
 
 describe('buildAnthropicMessagesRequest → normalizeAnthropicMessagesResponse round-trip', () => {
