@@ -1,6 +1,6 @@
 # Road to 1.0
 
-**Status:** point-in-time assessment, written 2026-07-01 at v0.8.1. This is a strategy note, not a spec — it captures where the project stands, what the 1.0 promise should cover, the gate list, and the growth directions after. Expect it to be revised as 0.9 lands.
+**Status:** point-in-time assessment, written 2026-07-01 at v0.8.1; revised 2026-07-03 with a Rails-doctrine decision pass (see *Rails doctrine → 1.0 decisions*) that lands gates 1–3 and the thesis demo. This is a strategy note, not a spec — it captures where the project stands, what the 1.0 promise should cover, the gate list, and the growth directions after. Expect it to be revised again as 0.9 lands.
 
 ## Thesis
 
@@ -30,20 +30,33 @@ Cambium has six distinct API surfaces a 1.0 promise could cover. Readiness varie
 | IR shape | Additive-only discipline; single-`model` IRs stay byte-identical across releases | Yes, once pinned by a golden corpus |
 | Serve wire format | `/v1` locked; closed `error.kind` enum; breaking-change boundary defined (`/v2` rule) | Yes |
 | Trace step vocabulary | Framework-owned, additive; every new step type documented in `C - Trace` | Yes |
-| Runner library API | **Weakest surface.** `export type IR = any`; deprecated back-compat shims still present | **No — this is the work** |
+| Runner library API | **Weakest surface.** `export type IR = any`; deprecated back-compat shims still present | **Yes — once declared opaque** (IR is Arel; shims deprecated, not restructured). Downgraded from "the work" by the Rails-doctrine pass below. |
 | CLI surface | Verbs stable; "No CLI surface removals" holds in every release since 0.3.x | Yes |
+
+## Rails doctrine → 1.0 decisions
+
+The project's north star is the Rails doctrine, and several open 1.0 questions resolve the moment they're run through it. Recording the mapping so the decisions are portable — future forks get settled the same way rather than re-litigated, and the gate list below can just point here.
+
+| Doctrine | What it decides | Decision |
+|---|---|---|
+| **IR is Arel** — Rails keeps its intermediate representation (the query AST) private; it promises the DSL and the result, never the AST between them. | Gate 1: opaque vs. structured `IR` type. | Split the surface the doc was conflating. The IR **JSON shape** is a data contract (like `schema.rb`): additive-only, golden-pinned, promised. The IR **TypeScript type** (`export type IR`) is Arel — `export type IR = OpaqueIR`, an opaque handle, unpromised. Keeps the "IR as product" growth path open (Arel was eventually promoted) without paying for it at 1.0. |
+| **Secure by default** — CSRF, strong params, escaped output: Rails ships the safe default and trusts you to opt out. | Gate 3: strict exec. | Flip it. Strict is the default; unsandboxed native is a **sharp knife** — available but loud and explicit (e.g. `security exec: { unsafe_native: true }`, keeping the `tool.exec.unsandboxed` trace step). Aligning with the one Rails value Cambium currently violates, not just "a break we should do." |
+| **Deprecation cycle** — Rails breaks constantly but almost never *silently*: warn in N, remove in N+1. | Gate 2: the shims. | **Deprecate in 0.9, remove at 1.0.** Not delete-now. A named production downstream (gaia_solver) reads `constraints.budget` — warn it, don't silent-break it. Same destination, Rails-legitimate path. |
+| **Test behavior, not bytes** — Rails system tests assert "the page shows the name," never HTML byte-equality. | Q1: the "testable refactor" thesis. | The 1.0 demo asserts the **contract suite is green** across a model swap (schema + correctors + grounding + signals all `ok: true` against the new model's *real* output), not that the `--mock` snapshot is unchanged. That assertion mode is `cambium eval` in embryo; the 1.0 story needs the embryo, not the deferred product. |
+| **Options bags grow additively** — Rails evolves APIs by adding keyword args, not changing signatures. | Q3: cancellation vs. the runner-API freeze. | `runGen({…})` already takes an options object; `signal?` is an additive key, and with the runner API opaque (row 1) the internal `AbortSignal` threading is free to change. No freeze collision — cancellation stays in the 0.10 window. |
+| **Error messages are UX** — `did_you_mean`, helpful-exception pages: Rails treats a good error as a feature with a test. | Gate 4 scope. | The 212 field-naming raises are a promised surface. The golden corpus gets a **rejection half** (malformed DSL → expected error text) to protect them during the regret sweep that churns them. |
+| **Exalt beautiful code / convention over configuration** — Rails names by one consistent grammar. | The regret sweep (0.9 triage). | The sweep audits for **naming-convention consistency** — one verb/noun grammar across every keyword — not just one-off regrets. Hand it to fresh eyes; the author is worst-placed to see their own regrets. |
 
 ## The gate list
 
-Things that must close before the promise is honest. In rough dependency order:
+Things that must close before the promise is honest. Several are now **decided** by the Rails-doctrine pass above; those carry the deciding principle inline. In rough dependency order — the corpus is gate zero, it lands first as the safety net the breaks fall under:
 
-1. **`export type IR = any` must become a real structured type or an officially opaque handle.** It's exported, so it's API — `any` is a promise that can't be kept. (Flagged as a follow-up in 0.3.3; the bill comes due at 1.0.)
-2. **Delete the deprecated shims.** `registerAppCorrectors` (superseded by the per-run registry) and the legacy `policies.constraints.budget` parse path. Pre-1.0 is the last cheap window.
-3. **Flip strict exec to the default.** `security exec: { allowed: true }` silently meaning unsandboxed `:native` is the one place Cambium doesn't meet its own deny-by-default standard. At 1.0, `CAMBIUM_STRICT_EXEC` behavior is the default and unsandboxed native is an explicit, loudly-declared opt-out. Breaking — belongs in the 0.9 window.
-4. **Golden IR corpus.** The DSL→IR mapping *is* the 1.0 contract, and nothing pins it directly today (the Ruby side has zero unit tests; `runtime.rb` and `compile.rb` are exercised only through TS e2e). Cheapest 1.0-grade fix: compile every in-tree gen and pipeline, snapshot the IR JSON, diff on every commit. This turns the compatibility promise into a failing test.
-5. **One serve-mode decision.** Unauthenticated + no cancellation is acceptable *if documented as "v1 assumes network isolation."* Given a production-track downstream, the better close is minimal bearer-token auth plus cooperative cancellation (`DELETE /v1/runs/<id>`), with streaming/quotas/hot-reload staying deferred.
-6. **The 1.0 compatibility document.** Which of the six surfaces are semver-covered; what "additive" means per surface (IR fields, trace step types, wire fields, DSL kwargs). This document is the deliverable that makes 1.0 real — the release is mostly its announcement.
-7. **Compatibility-proof notes for the headline deferrals.** For retrieval/corpora, streaming, and async retro-agents: a short design note proving the current DSL shape can grow into each *additively* (e.g. `grounded_in :corpus_name` already takes a symbol; the IR accepts new step types). Anything that cannot be added additively later is, by definition, 1.0-blocking now. Expected result: nothing is.
+1. **`export type IR = any` → opaque handle. (Decided: IR is Arel.)** Rails keeps its intermediate representation private and promises the DSL + the result, never the AST between. So the IR *JSON shape* stays a promised, additive, golden-pinned data contract, while the exported *TypeScript type* becomes `export type IR = OpaqueIR` — an opaque, unpromised handle. Shrinks from "the work" to an afternoon plus one sentence in the compatibility document. (Flagged as a follow-up in 0.3.3; the bill comes due at 1.0.)
+2. **Deprecate the shims in 0.9, remove at 1.0. (Decided: deprecation cycle.)** `registerAppCorrectors` (superseded by the per-run registry) and the legacy `policies.constraints.budget` parse path. Rails breaks constantly but almost never *silently* — warn in N, remove in N+1. A named production downstream (gaia_solver) reads `constraints.budget`, so 0.9 emits a deprecation warning + changelog migration note and 1.0 does the removal. Same destination as "delete now," Rails-legitimate path.
+3. **Flip strict exec to the default. (Decided: secure by default.)** `security exec: { allowed: true }` silently meaning unsandboxed `:native` is the one place Cambium doesn't meet its own deny-by-default standard — and secure-by-default is Rails' proudest contribution. Strict becomes the default; unsandboxed native stays available as a **sharp knife** — loud and explicit (e.g. `security exec: { unsafe_native: true }`, keeping the `tool.exec.unsandboxed` trace step). Breaking — 0.9 window.
+4. **Golden IR corpus — gate zero.** The DSL→IR mapping *is* the 1.0 contract, and nothing pins it directly today (the Ruby side has zero unit tests; `runtime.rb` and `compile.rb` are exercised only through TS e2e). It lands *first*, before the breaks in 2 and 3, so it catches their regressions. Two halves: an **acceptance** corpus (compile every in-tree gen/pipeline, snapshot the IR JSON, diff on every commit) and a **rejection** corpus (malformed DSL → expected error text) — because in Rails a good error message is UX with a test, and the 212 field-naming raises are exactly what the regret sweep will churn. This turns the compatibility promise into a failing test.
+5. **One serve-mode decision.** Unauthenticated + no cancellation is acceptable *if documented as "v1 assumes network isolation."* Given a production-track downstream, the better close is minimal bearer-token auth plus cooperative cancellation. Cancellation is an **additive** `signal?` key on the `runGen` options bag (Rails grows APIs by adding keyword args, not changing signatures) and its internal `AbortSignal` threading is private under the now-opaque runner — so it does *not* collide with the API freeze and can land in the 0.10 window. Streaming/quotas/hot-reload stay deferred.
+6. **The 1.0 compatibility document — written first, as a living doc.** Which of the six surfaces are semver-covered; what "additive" means per surface (IR fields, trace step types, wire fields, DSL kwargs, and new optional keys on the `runGen` options bag). It's the deliverable that makes 1.0 real, so it's opened at the *start* of 0.9 and the other gates fill it in — starting it last risks discovering at the end that a surface assumed additive isn't. The **compatibility-proof notes** for the headline deferrals (retrieval/corpora, streaming, async retro-agents — each proving the current DSL grows into it additively, e.g. `grounded_in :corpus_name` already takes a symbol and the IR accepts new step types) live here as a *section*, not a separate gate; anything that cannot be added additively later is, by definition, 1.0-blocking now. Expected result: nothing is.
 
 ### Explicitly not gating 1.0
 
@@ -51,19 +64,19 @@ The long tail of the deferral list does not block the release: Pyodide/WASM-Pyth
 
 ## The questions, with leans
 
-**What is the identity sentence at 1.0?** Lean: *Cambium is the framework that makes small, local models reliable enough to trust — and makes model choice a testable refactor.* The deterministic verification stack (schemas, repair, correctors, grounding checks, golden tests) is exactly what closes the reliability gap for a local 27B model, and it is simultaneously what makes swapping `omlx:` for `anthropic:` (or distilling the other direction) provable instead of vibes. `profile :dev/:prod` is the embryo. The 15-minute demo writes itself: `cambium new agent` → `returns` block → run against a local model → golden test pins it → change one `model` line → tests still pass. That demo is the 1.0 announcement.
+**What is the identity sentence at 1.0?** Lean: *Cambium is the framework that makes small, local models reliable enough to trust — and makes model choice a testable refactor.* The deterministic verification stack (schemas, repair, correctors, grounding checks, golden tests) is exactly what closes the reliability gap for a local 27B model, and it is simultaneously what makes swapping `omlx:` for `anthropic:` (or distilling the other direction) provable instead of vibes. `profile :dev/:prod` is the embryo. The 15-minute demo writes itself: `cambium new agent` → `returns` block → run against a local model → change one `model` line → the **contract suite stays green** — schema, correctors, grounding, and signals all pass against the new model's *real* output. (Rails asserts the rendered outcome, never byte-identical HTML; a model swap moves the bytes, so the golden `--mock` snapshot — which pins one model deterministically — is the wrong altitude for the swap, and the contract assertions are the right one.) That assertion mode is `cambium eval` in embryo; the demo is the 1.0 announcement.
 
-**Does retrieval/RAG block 1.0?** The `Retrieve` step is the largest spec'd-never-built item — grounding shipped as inline document injection instead, and `D - Grounding Sources` (corpora, connectors, chunking) remains a stub. Lean: **no**, provided the compatibility-proof note (gate item 7) shows the DSL can grow into it additively. Retrieval becomes the flagship post-1.0 direction, not a 1.0 gate.
+**Does retrieval/RAG block 1.0?** The `Retrieve` step is the largest spec'd-never-built item — grounding shipped as inline document injection instead, and `D - Grounding Sources` (corpora, connectors, chunking) remains a stub. Lean: **no**, provided the compatibility-proof note (now a section of gate 6, the compatibility document) shows the DSL can grow into it additively. Retrieval becomes the flagship post-1.0 direction, not a 1.0 gate.
 
-**What would we break if we could break everything once?** Pre-1.0 is the last cheap breaking window. Sweep for regrets — DSL keyword renames, kwarg shapes, default flips — and bundle every break into one loud 0.9 rather than dribbling them out.
+**What would we break if we could break everything once?** Pre-1.0 is the last cheap breaking window. Sweep for regrets — DSL keyword renames, kwarg shapes, default flips — and bundle every break into one loud 0.9 rather than dribbling them out. Two Rails caveats: where a *named downstream already depends on a shim*, the deprecation cycle applies (warn in 0.9, remove at 1.0) rather than a silent break; and the sweep itself audits for **naming-convention consistency** — one verb/noun grammar across every keyword — not just one-off regrets. Hand it to fresh eyes; the author is worst-placed to see their own regrets.
 
 **What do actual users need?** The downstreams point at serve-mode operational hardening (auth, cancellation) — not the exotic tail. Let real usage, not the deferral list, order the work.
 
 ## The path
 
-- **0.9 — "The Contract" (the last-call release).** All breaking changes at once: strict exec default, shims deleted, `IR` type resolved, any DSL regrets. Plus the golden IR corpus and the 1.0 compatibility document.
-- **0.10 / 1.0-rc — operational close.** Serve auth + cancellation, docs/README sweep, deferral list published as a roadmap.
-- **1.0 — a declaration release.** Mostly announcement and documentation. The demo above is the headline.
+- **0.9 — "The Contract" (the last-call release).** The golden IR corpus lands *first* as the safety net, then the breaks land under it: strict exec becomes the default (unsandboxed native → loud sharp-knife opt-out), the `IR` type goes opaque, and the DSL regret sweep runs. The shims are *deprecated* here (removed at 1.0, not now). The 1.0 compatibility document is opened at the start of the window as a living doc the rest of it fills in.
+- **0.10 / 1.0-rc — operational close.** Serve bearer-token auth + cooperative cancellation (an additive `signal` on the `runGen` options bag — no freeze collision), docs/README sweep, deferral list published as a roadmap.
+- **1.0 — a declaration release.** The deprecated shims are removed; otherwise mostly announcement and documentation. The demo above — asserting the contract stays green across a model swap, not a byte-identical snapshot — is the headline.
 
 ## After 1.0: three growth directions
 
@@ -85,21 +98,20 @@ Picture the project as a vertical stack — DSL → IR → runner → trace — 
 The gate list and path decompose into fileable issues. Grouped by window:
 
 **0.9 window (breaking + contract):**
-1. Golden IR corpus — snapshot compiled IR for every in-tree gen/pipeline; diff in CI.
-2. Resolve `export type IR = any` — structured type or officially opaque.
-3. Remove deprecated shims (`registerAppCorrectors`, legacy `policies.constraints.budget` parsing).
-4. Strict exec becomes default; unsandboxed `:native` becomes explicit opt-out.
-5. DSL regret sweep — inventory keyword/kwarg/default regrets before freeze (meta-issue).
-6. Write the 1.0 compatibility document (surfaces covered, additivity rules per surface).
-7. Compatibility-proof notes: retrieval/corpora, streaming, async retro-agents.
+1. Golden IR corpus — **gate zero, lands first.** Acceptance half (snapshot compiled IR for every in-tree gen/pipeline; diff in CI) + rejection half (malformed DSL → expected error text, pinning the field-naming raises).
+2. Resolve `export type IR = any` → opaque `OpaqueIR` handle (IR is Arel); keep the IR *JSON shape* as the promised, golden-pinned contract.
+3. **Deprecate** `registerAppCorrectors` + legacy `policies.constraints.budget` in 0.9 (warning + migration note); **remove at 1.0**.
+4. Strict exec becomes default; unsandboxed `:native` → loud sharp-knife opt-out (e.g. `unsafe_native: true`).
+5. DSL regret sweep — audit for naming-convention consistency (one verb/noun grammar); hand to fresh eyes (meta-issue).
+6. Write the 1.0 compatibility document **first, as a living doc** (surfaces covered, additivity rules per surface incl. `runGen` options keys); the compatibility-proof notes (retrieval/corpora, streaming, async retro-agents) are a section of it, not a separate issue.
 
 **0.10 / rc window (operational):**
-8. Serve: minimal bearer-token auth.
-9. Serve: cooperative cancellation (`DELETE /v1/runs/<id>`).
-10. README: engine-mode section missing 0.8.1's own engine-mode providers feature (trivial).
-11. Publish the deferral list as a public roadmap document.
+7. Serve: minimal bearer-token auth.
+8. Serve: cooperative cancellation — additive `signal` on the `runGen` options bag (`DELETE /v1/runs/<id>` at the wire layer).
+9. README: engine-mode section missing 0.8.1's own engine-mode providers feature (trivial).
+10. Publish the deferral list as a public roadmap document.
 
 **Post-1.0 seeds (design notes, not code):**
-12. `cambium eval` design note — traces as datasets, verifiers as metrics.
-13. Retrieve step / corpus layer design note — the additive path from `grounded_in`.
-14. Thin-coverage close: 1:1 tests for log backends, `web_search`/`web_extract` tools.
+11. `cambium eval` design note — traces as datasets, verifiers as metrics. (The thin *contract-assertion* embryo — assert the contract stays green across a model swap — is pulled forward into the 1.0 demo; the full eval product stays here.)
+12. Retrieve step / corpus layer design note — the additive path from `grounded_in`.
+13. Thin-coverage close: 1:1 tests for log backends, `web_search`/`web_extract` tools.
