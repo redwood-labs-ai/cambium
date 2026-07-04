@@ -1,0 +1,77 @@
+{
+  "research": {
+    "version": "0.2",
+    "entry": {
+      "class": "WebResearcher",
+      "method": "research",
+      "source": "packages/cambium/app/gens/web_researcher.cmb.rb"
+    },
+    "model": {
+      "id": "omlx:Qwen3.5-27B-4bit",
+      "temperature": 0.2,
+      "max_tokens": 800
+    },
+    "system": "You are a concise web researcher. Given a question, use the `web_search` tool to find relevant pages, then produce a short factual summary (2-4 sentences) with the sources you used.\n\n## How you work\n\n1. Call `web_search` with a focused query. Use at most two searches — the budget is tight on purpose.\n2. Read the snippets returned.\n3. Write a short summary that directly answers the question, grounded in what the search returned.\n4. List the sources: title + url for each page you referenced.\n\n## Output rules\n\n- Do not invent URLs. Only include sources that appeared in a `web_search` result.\n- If the searches didn't surface enough to answer, say so in the summary — don't pad with general knowledge.\n- Keep it short. Summaries over four sentences are too long.",
+    "mode": "agentic",
+    "policies": {
+      "tools_allowed": [
+        "web_search"
+      ],
+      "correctors": [],
+      "constraints": {},
+      "grounding": null,
+      "security": {
+        "network": {
+          "allowlist": [
+            "api.tavily.com",
+            "api.exa.ai"
+          ],
+          "denylist": [],
+          "block_private": true,
+          "block_metadata": true
+        },
+        "_packs": [
+          "research_defaults"
+        ]
+      },
+      "budget": {
+        "per_tool": {
+          "web_search": {
+            "max_calls": 5
+          }
+        },
+        "per_run": {
+          "max_calls": 20
+        },
+        "_packs": [
+          "research_defaults"
+        ]
+      },
+      "memory": [],
+      "memory_pools": {},
+      "memory_write_via": null,
+      "log": [],
+      "log_profiles": [],
+      "schedules": []
+    },
+    "reads_trace_of": null,
+    "returnSchemaId": "WebResearchResult",
+    "context": {
+      "document": ""
+    },
+    "enrichments": [],
+    "signals": [],
+    "triggers": [],
+    "steps": [
+      {
+        "id": "generate_1",
+        "type": "Generate",
+        "prompt": "research the question and return a short summary with sources",
+        "with": {
+          "context": ""
+        },
+        "returns": "WebResearchResult"
+      }
+    ]
+  }
+}

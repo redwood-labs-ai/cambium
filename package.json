@@ -43,6 +43,7 @@
     "run": "node ./cli/cambium.mjs",
     "compile": "ruby ./ruby/cambium/compile.rb",
     "test": "npm run build && vitest run",
+    "test:golden": "vitest run packages/cambium/tests/golden",
     "build": "npm run build --workspace @redwood-labs/cambium-runner",
     "prepack": "node scripts/prepack.mjs",
     "postpack": "node scripts/postpack.mjs",

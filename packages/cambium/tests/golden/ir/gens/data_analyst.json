@@ -1,0 +1,56 @@
+{
+  "analyze": {
+    "version": "0.2",
+    "entry": {
+      "class": "DataAnalyst",
+      "method": "analyze",
+      "source": "packages/cambium/app/gens/data_analyst.cmb.rb"
+    },
+    "model": {
+      "id": "omlx:Qwen3.5-27B-4bit",
+      "temperature": 0.2,
+      "max_tokens": 1200
+    },
+    "system": "You are a data analyst agent. You have access to tools that help you compute metrics. Use the calculator tool to compute any aggregates (averages, sums, etc.) rather than computing them yourself. Report your findings as structured data.",
+    "mode": "agentic",
+    "policies": {
+      "tools_allowed": [
+        "calculator"
+      ],
+      "correctors": [],
+      "constraints": {
+        "budget": {
+          "max_tool_calls": 10
+        }
+      },
+      "grounding": null,
+      "security": null,
+      "budget": null,
+      "memory": [],
+      "memory_pools": {},
+      "memory_write_via": null,
+      "log": [],
+      "log_profiles": [],
+      "schedules": []
+    },
+    "reads_trace_of": null,
+    "returnSchemaId": "AnalysisReport",
+    "context": {
+      "document": ""
+    },
+    "enrichments": [],
+    "signals": [],
+    "triggers": [],
+    "steps": [
+      {
+        "id": "generate_1",
+        "type": "Generate",
+        "prompt": "analyze this document, use the calculator tool for any computations",
+        "with": {
+          "context": ""
+        },
+        "returns": "AnalysisReport"
+      }
+    ]
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "solve": {
+    "version": "0.2",
+    "entry": {
+      "class": "GaiaSolver",
+      "method": "solve",
+      "source": "packages/cambium/app/gens/gaia_solver.cmb.rb"
+    },
+    "model": {
+      "id": "omlx:gemma-4-31b-it-8bit",
+      "temperature": 0.1,
+      "max_tokens": 1200
+    },
+    "system": "You are a precise question-answering agent. You have tools: web_search, web_extract, calculator, execute_code.\n\nSTRATEGY:\n1. Search once for the key information you need.\n2. If the search results contain the answer, produce your final output immediately.\n3. Only search again if the first search was insufficient. Do not repeat similar searches.\n4. Use calculator or execute_code for computation, not estimation.\n\nYour final answer must be SHORT — a number, a name, a date, or a comma-separated list. Never a paragraph.\n\nIMPORTANT: After gathering enough information, STOP calling tools and produce your final JSON output.",
+    "mode": "agentic",
+    "policies": {
+      "tools_allowed": [
+        "web_search",
+        "web_extract",
+        "calculator",
+        "execute_code"
+      ],
+      "correctors": [],
+      "constraints": {
+        "budget": {
+          "max_tool_calls": 4,
+          "max_duration": "8m"
+        }
+      },
+      "grounding": null,
+      "security": {
+        "network": {
+          "allowlist": [
+            "*"
+          ],
+          "denylist": [],
+          "block_private": true,
+          "block_metadata": true
+        },
+        "exec": {
+          "allowed": true,
+          "runtime": "native"
+        }
+      },
+      "budget": null,
+      "memory": [],
+      "memory_pools": {},
+      "memory_write_via": null,
+      "log": [],
+      "log_profiles": [],
+      "schedules": []
+    },
+    "reads_trace_of": null,
+    "returnSchemaId": "GaiaAnswer",
+    "context": {
+      "document": ""
+    },
+    "enrichments": [],
+    "signals": [],
+    "triggers": [],
+    "steps": [
+      {
+        "id": "generate_1",
+        "type": "Generate",
+        "prompt": "answer this question precisely using available tools",
+        "with": {
+          "context": ""
+        },
+        "returns": "GaiaAnswer"
+      }
+    ]
+  }
+}

@@ -1,0 +1,86 @@
+{
+  "analyze": {
+    "version": "0.2",
+    "entry": {
+      "class": "Analyst",
+      "method": "analyze",
+      "source": "packages/cambium/app/gens/analyst_enriched.cmb.rb"
+    },
+    "model": {
+      "id": "omlx:Qwen3.5-27B-4bit",
+      "temperature": 0.2,
+      "max_tokens": 1200
+    },
+    "system": "You are a professional analyst specializing in infrastructure reliability and incident response. You extract structured data from documents with precision, preserving all measurements, timestamps, and factual claims.",
+    "mode": null,
+    "policies": {
+      "tools_allowed": [
+        "calculator"
+      ],
+      "correctors": [
+        {
+          "name": "math",
+          "max_attempts": 1
+        }
+      ],
+      "constraints": {
+        "tone": {
+          "to": "professional"
+        },
+        "compound": {
+          "strategy": "review"
+        }
+      },
+      "grounding": null,
+      "security": null,
+      "budget": null,
+      "memory": [],
+      "memory_pools": {},
+      "memory_write_via": null,
+      "log": [],
+      "log_profiles": [],
+      "schedules": []
+    },
+    "reads_trace_of": null,
+    "returnSchemaId": "AnalysisReport",
+    "context": {
+      "document": ""
+    },
+    "enrichments": [
+      {
+        "field": "document",
+        "agent": "LogSummarizer",
+        "method": "summarize"
+      }
+    ],
+    "signals": [
+      {
+        "name": "latency_ms",
+        "type": "number",
+        "path": "metrics.latency_ms_samples"
+      }
+    ],
+    "triggers": [
+      {
+        "on": "latency_ms",
+        "action": "tool_call",
+        "tool": "calculator",
+        "args": {
+          "operation": "avg"
+        },
+        "target": "metrics.avg_latency_ms"
+      }
+    ],
+    "steps": [
+      {
+        "id": "generate_1",
+        "type": "Generate",
+        "prompt": "analyze incident transcript",
+        "with": {
+          "context": ""
+        },
+        "returns": "AnalysisReport"
+      }
+    ]
+  }
+}
