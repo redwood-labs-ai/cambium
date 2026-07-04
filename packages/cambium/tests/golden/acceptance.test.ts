@@ -10,6 +10,12 @@
  * IR's `source` field is a stable relative string (not an absolute path
  * with a username in it).
  *
+ * DEC-004a: the compiler stdout is re-serialized through
+ * JSON.stringify(JSON.parse(...), null, 2) before snapshotting. This makes
+ * JS the sole formatting authority and eliminates cross-Ruby-version
+ * whitespace differences in empty containers (json-gem 2.9.1 emits `[]`/`{}`
+ * while older apt Ruby emits `[\n\n]`/`{\n}`).
+ *
  * Run offline: `npm run test:golden` — no LLM, no secrets.
  */
 import { describe, it, expect } from 'vitest'
@@ -55,7 +61,7 @@ describe('golden IR corpus — acceptance', () => {
           `${relPath} failed to compile (exit ${result.status}):\n${result.stderr}`,
         ).toBe(0)
         const snapshotPath = join(SNAPSHOTS_DIR, 'gens', `${stem}.json`)
-        await expect(result.stdout.trimEnd()).toMatchFileSnapshot(snapshotPath)
+        await expect(JSON.stringify(JSON.parse(result.stdout), null, 2)).toMatchFileSnapshot(snapshotPath)
       },
     )
   })
@@ -75,7 +81,7 @@ describe('golden IR corpus — acceptance', () => {
           `${relPath} failed to compile (exit ${result.status}):\n${result.stderr}`,
         ).toBe(0)
         const snapshotPath = join(SNAPSHOTS_DIR, 'pipelines', `${stem}.json`)
-        await expect(result.stdout.trimEnd()).toMatchFileSnapshot(snapshotPath)
+        await expect(JSON.stringify(JSON.parse(result.stdout), null, 2)).toMatchFileSnapshot(snapshotPath)
       },
     )
   })
