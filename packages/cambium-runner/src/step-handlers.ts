@@ -98,26 +98,16 @@ export const MIN_CACHE_PREFIX_CHARS = 4096;
 
 export type ExtractJsonFn = (text: string) => any;
 
-export async function handleGenerate(
-  step: any,
-  ir: any,
-  schema: any,
-  generateText: GenerateTextFn,
-  extractJson: ExtractJsonFn,
-  /** RED-323: pre-extracted docs + extracted PDF text, supplied by the
-   *  runner which extracts once per run (not per step). Optional so
-   *  external callers of this handler (tests, custom pipelines) keep
-   *  working without threading the extraction — in that case we run
-   *  it inline here. */
-  docInput?: { documents: DocumentBlock[]; groundingTextByKey: Record<string, string> },
-): Promise<{ raw: string; parsed: any; result: StepResult }> {
-  const { documents, groundingTextByKey } = docInput ?? await extractDocuments(ir);
+// ── Shared prompt assemblers ───────────────────────────────────────────
+//
+// The system block and the cacheable user-prompt prefix are a pure
+// function of (ir, schema, extracted docs) — no per-call instruction
+// (`step.prompt`) bleeds in. handleGenerate and the pipeline's auto-prewarm
+// path both build their prefix through these helpers, so the two can never
+// drift — byte-identity is the whole precondition for a cache hit.
 
-  const doc = getGroundingDocument(ir, groundingTextByKey);
+export function buildGenSystem(ir: any, schema: any): string {
   const constraints = ir.policies?.constraints ?? {};
-  const schemaKeys = Object.keys(schema.properties ?? {});
-
-  // System prompt: use author-defined prompt from IR, or fall back to a generic one.
   const basePrompt = ir.system
     ?? (constraints.tone?.to ? `You are a ${constraints.tone.to} analyst.` : 'You are an analyst.');
 
@@ -144,9 +134,23 @@ export async function handleGenerate(
     );
   }
 
-  const system = systemParts.join('\n');
+  return systemParts.join('\n');
+}
 
-  // Build a JSON template from schema properties
+/** The shared (potentially-cacheable) portion of the user prompt: DOCUMENT
+ *  body + non-primary context sections + OUTPUT_JSON_TEMPLATE, plus the two
+ *  gates the dispatch site uses to decide whether to split it into a cached
+ *  block. Only `docInput.groundingTextByKey` is consulted; `documents`
+ *  travels to the provider separately. */
+export function buildCacheablePrefix(
+  ir: any,
+  schema: any,
+  docInput: { documents: DocumentBlock[]; groundingTextByKey: Record<string, string> },
+): { cacheablePrefix: string; grounded: boolean; useCachedPrefix: boolean } {
+  const doc = getGroundingDocument(ir, docInput.groundingTextByKey);
+  const schemaKeys = Object.keys(schema.properties ?? {});
+
+  // Build a JSON template from schema properties.
   const jsonTemplate: Record<string, any> = {};
   for (const key of schemaKeys) {
     const prop = schema.properties[key];
@@ -156,23 +160,14 @@ export async function handleGenerate(
     else jsonTemplate[key] = null;
   }
 
-  // Build the shared (potentially-cacheable) portion of the user prompt:
-  // DOCUMENT body + non-primary context + OUTPUT_JSON_TEMPLATE. This is the
-  // payload that's identical across a fan-out of gens sharing the same
-  // grounding — the only thing varying per-call is `step.prompt` (the
-  // per-lens dispatch text). The Anthropic provider marks this block with
-  // cache_control so branches 2..N read it from cache.
   const sharedParts: string[] = [
     'DOCUMENT:',
     String(doc ?? ''),
   ];
 
   // Include additional context fields (enrich primitive + Pipeline
-  // bind() injections). RED-382: pre-fix this iteration only handled
-  // `*_enriched` keys (the enrich primitive's convention), which meant
-  // pipeline `with: { foo: bind(:upstream) }` bindings landed in
-  // `ir.context.foo` but never reached the LLM. Now every non-framework
-  // key gets a labeled prompt section.
+  // bind() injections). RED-382: every non-framework key gets a labeled
+  // prompt section.
   const groundingSource = ir.policies?.grounding?.source;
   appendNonPrimaryContextSections(sharedParts, ir.context ?? {}, groundingSource);
 
@@ -184,20 +179,42 @@ export async function handleGenerate(
 
   const cacheablePrefix = sharedParts.join('\n');
 
+  // Opt into the cached-prefix path only when (1) grounding is declared —
+  // without it the "shared payload" framing is misleading — and (2) the
+  // prefix is large enough to clear Anthropic's cache floor with margin.
+  const grounded = !!ir.policies?.grounding;
+  const useCachedPrefix = grounded && cacheablePrefix.length >= MIN_CACHE_PREFIX_CHARS;
+
+  return { cacheablePrefix, grounded, useCachedPrefix };
+}
+
+export async function handleGenerate(
+  step: any,
+  ir: any,
+  schema: any,
+  generateText: GenerateTextFn,
+  extractJson: ExtractJsonFn,
+  /** RED-323: pre-extracted docs + extracted PDF text, supplied by the
+   *  runner which extracts once per run (not per step). Optional so
+   *  external callers of this handler (tests, custom pipelines) keep
+   *  working without threading the extraction — in that case we run
+   *  it inline here. */
+  docInput?: { documents: DocumentBlock[]; groundingTextByKey: Record<string, string> },
+): Promise<{ raw: string; parsed: any; result: StepResult }> {
+  const { documents, groundingTextByKey } = docInput ?? await extractDocuments(ir);
+
+  const system = buildGenSystem(ir, schema);
+  const { cacheablePrefix, useCachedPrefix } = buildCacheablePrefix(ir, schema, {
+    documents,
+    groundingTextByKey,
+  });
+
   // Legacy single-string prompt — byte-identical to the pre-split layout.
   // The cache-aware path reorders to prefix-first inside the provider;
   // this fallback ordering is what every non-Anthropic (or cache-disabled
   // Anthropic) call sees, so a grounded gen running against a non-cache
   // provider is unchanged.
   const legacyPrompt = `${step.prompt}\n\n${cacheablePrefix}`;
-
-  // Opt into the cached-prefix path only when (1) grounding is declared —
-  // without it the "shared payload" framing is misleading — and (2) the
-  // prefix is large enough to clear Anthropic's cache floor with margin.
-  // Below either gate we send the single-string legacy prompt and skip
-  // the split entirely.
-  const grounded = !!ir.policies?.grounding;
-  const useCachedPrefix = grounded && cacheablePrefix.length >= MIN_CACHE_PREFIX_CHARS;
 
   const outMax = Number(ir.model.max_tokens ?? 1200);
   const started = Date.now();

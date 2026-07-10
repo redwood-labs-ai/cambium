@@ -166,6 +166,17 @@ end
 
 Each reviewer gen (and the Fixer) declares `memory :findings, scope: :pipeline_run` to opt into the shared bucket. The Fixer reads it at its step start, seeing the union of all four reviewers' writes.
 
+### Fan-out cache prewarm
+
+When a `fan_out` has `concurrency > 1` and its branches share a grounded cacheable prefix (same `system` + `returns` + `grounded_in` + inbound context), all branches otherwise dispatch in one tick and race **cold** — each writes its own copy of the shared prefix to the provider cache at full price, so a run costs *more* than before prefix caching existed. The runner prevents this automatically: before dispatching the branches it fires **one tiny warm-up call per distinct (model tier × prefix)**, so the branches read the prefix from cache instead. Reviewers sharing a system+schema+grounding collapse to one warm-up per model tier.
+
+- **Zero inference** — a warm-up is a cache write with `max_tokens 16` whose completion is discarded, not an orchestration decision.
+- **Byte-identity** — the warm-up builds `(system, cacheablePrefix)` through the same assembler each branch uses, so the cache key matches. (Sliding-window memory recall augments `system` at runtime, after the warm-up; a gen with recall won't match and runs cold — write-only `:log` memory is unaffected.)
+- **Best-effort** — a warm-up failure never fails the fan-out; that group's branches just run cold. Outcomes surface in the `PipelineFanOut` trace `meta.prewarm`.
+- **On by default; opt out with `prewarm_cache false`.** Skipped for `concurrency 1` (branch 1 warms the rest), single-branch fan-outs, ungrounded/sub-floor prefixes, and `--mock` runs.
+
+This replaces the per-workspace pattern of hand-written tier-matched warm-up gens wired in ahead of the reviewer fan-out.
+
 ### Sequential pipeline
 
 ```ruby
