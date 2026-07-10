@@ -1144,6 +1144,10 @@ class ${pascal} < Pipeline
   #   on_branch_failure :continue
   #   require :all
   #   pass_context :summary
+  #   # prewarm_cache false  # default on: with concurrency > 1 and a shared
+  #   #                      # grounded prefix, the runner auto-warms the
+  #   #                      # provider prompt cache once per model tier
+  #   #                      # before dispatch (N - Orchestration Layer).
   # end
 
   # Example branch_on (deterministic conditional, REQUIRES a default block):

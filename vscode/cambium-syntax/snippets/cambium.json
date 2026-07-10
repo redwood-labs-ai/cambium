@@ -250,6 +250,7 @@
       "  on_branch_failure :${9|continue,fail_fast|}",
       "  require :${10|all|}",
       "  pass_context :${11:upstream_field}",
+      "  # prewarm_cache false",
       "end"
     ],
     "description": "Parallel pipeline fan-out (RED-381 Phase C). N branches against shared upstream context; downstream `bind(:fan_id)` returns the typed array."

@@ -72,7 +72,7 @@
         },
         {
           "comment": "Pipeline operator primitives (RED-381). Match at line start so `step` / `fan_out` / `branch_on` etc. don't false-positive on Ruby method calls elsewhere.",
-          "match": "^\\s*(step|fan_out|branch_on|bind_defaults|input|output|branch|pass_context|on_branch_failure|concurrency|require|agent|over)\\b",
+          "match": "^\\s*(step|fan_out|branch_on|bind_defaults|input|output|branch|pass_context|on_branch_failure|concurrency|require|prewarm_cache|agent|over)\\b",
           "captures": {
             "1": { "name": "keyword.other.pipeline.cambium support.function.cambium" }
           }

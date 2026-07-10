@@ -307,6 +307,44 @@ end
     expect(fan.require).toEqual({ kind: 'all' })
     expect(fan.concurrency).toBeUndefined()
     expect(fan.pass_context).toBeUndefined()
+    // Default-on prewarm emits NO key — existing pipeline IR stays byte-identical.
+    expect(fan.prewarm_cache).toBeUndefined()
+  })
+
+  it('prewarm_cache false emits the opt-out key; true emits true', () => {
+    const mk = (val: string) => `
+class P < Pipeline
+  input :pr, schema: AnalysisReport
+  fan_out :reviewers, collect_into: :reviews do
+    branch :a, agent: Analyst, method: :analyze
+    prewarm_cache ${val}
+  end
+  def run(pr); end
+end
+`
+    const off = compilePipeline(mk('false'))
+    expect(off.stderr).toBe('')
+    expect(off.ir.operators[0].prewarm_cache).toBe(false)
+
+    const on = compilePipeline(mk('true'))
+    expect(on.stderr).toBe('')
+    expect(on.ir.operators[0].prewarm_cache).toBe(true)
+  })
+
+  it('prewarm_cache rejects non-Boolean values', () => {
+    const body = `
+class P < Pipeline
+  input :pr, schema: AnalysisReport
+  fan_out :reviewers, collect_into: :reviews do
+    branch :a, agent: Analyst, method: :analyze
+    prewarm_cache :yes
+  end
+  def run(pr); end
+end
+`
+    const { ir, stderr } = compilePipeline(body)
+    expect(ir).toBeNull()
+    expect(stderr).toContain('prewarm_cache')
   })
 
   it('captures homogeneous-fan-out sugar (agent + over + as)', () => {

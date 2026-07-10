@@ -72,7 +72,7 @@ module Cambium
   # DSL helpers used inside `fan_out` blocks.
   class FanOutDSL
     attr_reader :_branches, :_concurrency, :_on_branch_failure, :_require_threshold, :_pass_context,
-                :_homogeneous
+                :_homogeneous, :_prewarm_cache
 
     def initialize
       @_branches            = []
@@ -81,6 +81,7 @@ module Cambium
       @_require_threshold   = { 'kind' => 'all' }
       @_pass_context        = nil
       @_homogeneous         = nil  # set when `agent ...; over ...` sugar is used
+      @_prewarm_cache       = nil  # nil = default (runner prewarms); false = opt out
     end
 
     # Heterogeneous form: one explicit branch per call.
@@ -144,6 +145,18 @@ module Cambium
     # the upstream step's output into every branch's input context.
     def pass_context(*fields)
       @_pass_context = fields.map(&:to_s)
+    end
+
+    # prewarm_cache false — opt out of the runner's automatic per-tier
+    # prompt-cache warm-up. Default (unset) lets the runner prime the shared
+    # cacheable prefix once per (model tier × prefix) before dispatching
+    # branches, so branches read the cache instead of racing cold. Only
+    # meaningful when concurrency > 1 and branches share a grounded prefix.
+    def prewarm_cache(value)
+      unless value == true || value == false
+        raise ArgumentError, "prewarm_cache: must be true or false (got #{value.inspect})"
+      end
+      @_prewarm_cache = value
     end
   end
 
@@ -639,6 +652,10 @@ module Cambium
         op['concurrency']   = dsl._concurrency  if dsl._concurrency
         op['pass_context']  = dsl._pass_context if dsl._pass_context
         op['_homogeneous']  = dsl._homogeneous  if dsl._homogeneous
+        # Emit whenever explicitly set (true or false); absent when unset,
+        # which keeps existing pipeline IR byte-identical and lets the runner
+        # default to on.
+        op['prewarm_cache'] = dsl._prewarm_cache unless dsl._prewarm_cache.nil?
         op
       end
 
