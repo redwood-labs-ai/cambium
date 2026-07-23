@@ -1,6 +1,6 @@
 # Road to 1.0
 
-**Status:** point-in-time assessment, written 2026-07-01 at v0.8.1; revised 2026-07-03 with a Rails-doctrine decision pass (see *Rails doctrine → 1.0 decisions*) that lands gates 1–3 and the thesis demo. This is a strategy note, not a spec — it captures where the project stands, what the 1.0 promise should cover, the gate list, and the growth directions after. Expect it to be revised again as 0.9 lands.
+**Status:** point-in-time assessment, written 2026-07-01 at v0.8.1; revised 2026-07-03 with a Rails-doctrine decision pass (see *Rails doctrine → 1.0 decisions*) that lands gates 1–3 and the thesis demo; revised 2026-07-23 to fold in the first substantive external code contribution (PR #20, fan-out cache prewarm — see *Triage*). This is a strategy note, not a spec — it captures where the project stands, what the 1.0 promise should cover, the gate list, and the growth directions after. Expect it to be revised again as 0.9 lands.
 
 ## Thesis
 
@@ -115,3 +115,17 @@ The gate list and path decompose into fileable issues. Grouped by window:
 11. `cambium eval` design note — traces as datasets, verifiers as metrics. (The thin *contract-assertion* embryo — assert the contract stays green across a model swap — is pulled forward into the 1.0 demo; the full eval product stays here.)
 12. Retrieve step / corpus layer design note — the additive path from `grounded_in`.
 13. Thin-coverage close: 1:1 tests for log backends, `web_search`/`web_extract` tools.
+
+### External contribution: PR #20 — fan-out cache prewarm
+
+The project's first substantive external code contribution (Kenneth, `kennethsqe`; his ref AIE-1046). Landed after the gate list above was drawn, so it's folded in here rather than renumbered into it. Needs a RED ticket on our side for tracking. **The work looks good** (contributor ran security / docs-drift / correctness passes + live-Anthropic QA, docs already updated in the diff); the notes below are about *placement in the release*, not about whether to take it.
+
+It auto-fires one tiny warm-up per distinct `(model tier × grounded prefix)` before a `concurrency > 1` fan-out dispatches, so the branches read the shared cacheable prefix from cache instead of all racing cold and each re-writing it at 1.25× (the AIE-1000 cost regression). Additive IR/trace (`operators[].prewarm_cache`, `PipelineFanOut.meta.prewarm`, absent-when-unset → pre-existing IR byte-identical); opt out with `prewarm_cache false`.
+
+**Where it lands:** the **0.9 window**, gated behind the golden corpus (item 1). It is *additive, not a break* — so it's low-risk — but it introduces one new DSL kwarg, and the DSL vocabulary is a promised 1.0 surface, so the kwarg name is a one-way door that must be settled in 0.9, not merged casually.
+
+14. **[0.9] Merge PR #20 *after* the golden corpus (item 1), rebased onto it.** No collision with existing snapshots (the new IR field is absent-when-unset, so every current snapshot stays byte-identical), but the PR's ad-hoc `compile_pipeline.test.ts` cases should become golden **acceptance** snapshots (a fan-out using `prewarm_cache`) plus a **rejection** case (`prewarm_cache` on a non-fan_out / bad value) — the new field becomes a pinned contract from day one, which is exactly what gate zero is for.
+15. **[0.9] `prewarm_cache` goes through the naming-convention sweep (item 5).** Is the verb/noun grammar consistent with the other `fan_out` options? The sweep rules on it *before* 1.0 promises the DSL surface — after that it's unremovable.
+16. **[0.10] Per-model cache floor.** The single `MIN_CACHE_PREFIX_CHARS` gate doesn't know Haiku/Opus's 4096-token cache floor (vs Sonnet's 2048), so a mid-size prefix on those tiers fires a warm-up that silently can't cache — wasted spend, no failure. Contributor-flagged; polish, not blocking.
+17. **[0.10] Fan-out has no pre-dispatch token-budget gate** (pre-existing). Prewarm now adds real spend into that ungated space. Consistent with the "budget is cooperative, not preemptive" stance ([`N - Orchestration Layer`](GenDSL%20Docs/N%20-%20Orchestration%20Layer.md)), but prewarm makes the gap more visible — worth naming as its own issue.
+18. **[near-term, orthogonal to 1.0] Anthropic provider unconditionally sends `temperature`,** which 400s on Opus 4.8/4.7, Sonnet 5, and Fable 5 — so prewarm (and gens generally) can't target the newest models. A genuine defect surfaced by the PR but independent of it; own RED ticket, near-term rather than release-gated.
