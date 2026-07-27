@@ -4,6 +4,12 @@ All notable changes to Cambium are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Cambium adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`IR` type made opaque (Road to 1.0, Gate 1).** `export type IR` is now a phantom-branded opaque handle — reading its fields is a compile error. Consumers obtain `IR` via `JSON.parse(irText)` (any → IR) or from runner result objects (`RunGenResult.ir`). See `C - IR (Intermediate Representation)` § Two-level contract. Supersedes the RED-354 entry's "sharpening to a structured interface is a follow-up" note.
+
 ## [0.8.1] — 2026-06-28 — The Provider Horizon
 
 Parity closes: engine-mode custom providers land with the same guards, scaffolding, and LSP support as app-mode. A community contribution cuts fan-out input costs by more than half, and a security patch rolls undici forward past four advisories.

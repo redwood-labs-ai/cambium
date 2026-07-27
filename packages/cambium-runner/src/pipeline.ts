@@ -21,7 +21,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { runGen, type IR, type RunGenResult } from './runner.js';
+import { runGen, type IR, type IRInternal, type RunGenResult } from './runner.js';
 import { findGenfileDir, resolveGenfileContracts, loadContractsFromGenfile } from './genfile.js';
 import { loadAppCorrectors } from './correctors/app-loader.js';
 import type { CorrectorFn } from './correctors/types.js';
@@ -264,9 +264,13 @@ export function rehydrateFromEntries(entries: any[], stepResults: Record<string,
 export async function runPipelineFromIr(
   opts: RunPipelineFromIrOptions,
 ): Promise<RunPipelineFromIrResult> {
-  if (opts.ir?.kind !== 'Pipeline') {
+  // Cast the public opaque IR to the package-private internal alias so
+  // field reads below compile. One cast at the public boundary; internal
+  // helpers (DispatchContext, RunStepContext) receive IRInternal directly.
+  const ir: IRInternal = opts.ir as IRInternal;
+  if (ir?.kind !== 'Pipeline') {
     throw new Error(
-      `runPipelineFromIr requires a Pipeline IR (got kind=${JSON.stringify(opts.ir?.kind)}). ` +
+      `runPipelineFromIr requires a Pipeline IR (got kind=${JSON.stringify(ir?.kind)}). ` +
         `Gen IRs route through runGenFromIr.`,
     );
   }
@@ -292,10 +296,10 @@ export async function runPipelineFromIr(
     }
     const scheduleId = m[1];
     const timestamp = m[2] ?? new Date().toISOString();
-    const declared: any[] = opts.ir.policies?.schedules ?? [];
+    const declared: any[] = ir.policies?.schedules ?? [];
     if (declared.length === 0) {
       throw new Error(
-        `--fired-by was set but ${opts.ir.entry?.class ?? 'this pipeline'} declares no cron schedules. ` +
+        `--fired-by was set but ${ir.entry?.class ?? 'this pipeline'} declares no cron schedules. ` +
         `Either remove --fired-by or declare a \`cron :...\` on the Pipeline class.`,
       );
     }
@@ -303,7 +307,7 @@ export async function runPipelineFromIr(
     if (!known) {
       const ids = declared.map((s) => s.id).join(', ');
       throw new Error(
-        `--fired-by schedule id "${scheduleId}" is not declared on ${opts.ir.entry?.class ?? 'this pipeline'}. ` +
+        `--fired-by schedule id "${scheduleId}" is not declared on ${ir.entry?.class ?? 'this pipeline'}. ` +
         `Declared schedules: [${ids}]`,
       );
     }
@@ -314,7 +318,7 @@ export async function runPipelineFromIr(
   // <workspace> is two levels up. runs/ + contracts both live relative
   // to it. Mirrors runGenFromIr's stance (engine-mode aware, but
   // pipelines are always app-mode in v1 — engine pipelines defer).
-  const pipelineFile = resolveSource(opts.ir.entry?.source, cwd);
+  const pipelineFile = resolveSource(ir.entry?.source, cwd);
   const workspaceDir = pipelineFile
     ? dirname(dirname(dirname(pipelineFile)))
     : cwd;
@@ -345,7 +349,7 @@ export async function runPipelineFromIr(
   // Pipelines are app-mode in v1 — discover contracts via Genfile.toml
   // from the pipeline's workspace, falling back to the in-tree
   // packages/cambium/src/contracts.ts for the framework's own monorepo.
-  const genfileDir = findGenfileDir(opts.ir.entry?.source) ?? cwd;
+  const genfileDir = findGenfileDir(ir.entry?.source) ?? cwd;
   const genfile = resolveGenfileContracts(genfileDir);
   let contractsMod: Record<string, any>;
   if (genfile) {
@@ -376,8 +380,8 @@ export async function runPipelineFromIr(
   // through ir.context._pipeline_arg) maps to that one slot. Multi-input
   // pipelines with JSON-object args are a Phase B.3 follow-up.
   const inputSlots: Record<string, any> = parsePipelineInputs(
-    opts.ir.input ?? {},
-    opts.ir.context?._pipeline_arg ?? '',
+    ir.input ?? {},
+    ir.context?._pipeline_arg ?? '',
   );
 
   // ── Pipeline-level memory slots (RED-381 Phase E) ────────────────────
@@ -387,7 +391,7 @@ export async function runPipelineFromIr(
   // pool stance of RED-215). Sub-gen dispatch injects this slot config
   // into each sub-gen's matching memory entry before runGen sees it.
   const pipelineMemorySlots: Record<string, any> = {};
-  for (const m of (opts.ir.policies?.memory ?? []) as any[]) {
+  for (const m of (ir.policies?.memory ?? []) as any[]) {
     if (m && m.name) pipelineMemorySlots[m.name] = m;
   }
 
@@ -398,7 +402,7 @@ export async function runPipelineFromIr(
   // tool_calls (since per-tool projection is hard until we know which
   // tools the sub-gen will actually invoke). Per the design note:
   // simple ceiling, no implicit splitting, no per-child re-allocation.
-  const budgetCap = opts.ir.policies?.budget ?? {};
+  const budgetCap = ir.policies?.budget ?? {};
   const tokenCap = typeof budgetCap.tokens === 'number' ? budgetCap.tokens : undefined;
   const toolCallCap = typeof budgetCap.tool_calls === 'number' ? budgetCap.tool_calls : undefined;
 
@@ -407,9 +411,9 @@ export async function runPipelineFromIr(
   const trace: any = {
     type: 'PipelineRun',
     run_id: runId,
-    version: opts.ir.version,
-    name: opts.ir.name,
-    entry: opts.ir.entry,
+    version: ir.version,
+    name: ir.name,
+    entry: ir.entry,
     started_at: new Date(startedAtMs).toISOString(),
     operators: [],
     meta: {
@@ -427,7 +431,7 @@ export async function runPipelineFromIr(
   const stepResults: Record<string, any> = {};
 
   // ── Operator dispatch ────────────────────────────────────────────────
-  const operators: any[] = opts.ir.operators ?? [];
+  const operators: any[] = ir.operators ?? [];
 
   // ── RED-385 Phase B: pipeline replay resume ──────────────────────────
   // Rehydrate stepResults from the prior run's recorded operator outputs,
@@ -463,7 +467,7 @@ export async function runPipelineFromIr(
   }
 
   const dispatchCtx: DispatchContext = {
-    ir: opts.ir,
+    ir,
     pipelineFile,
     workspaceDir,
     inputSlots,
@@ -508,7 +512,7 @@ export async function runPipelineFromIr(
   // ── Output assembly ──────────────────────────────────────────────────
   let output: any = null;
   if (pipelineOk) {
-    output = assembleOutput(opts.ir.output, stepResults, inputSlots, operators);
+    output = assembleOutput(ir.output, stepResults, inputSlots, operators);
   }
 
   trace.ok = pipelineOk;
@@ -524,7 +528,7 @@ export async function runPipelineFromIr(
   //
   // Sink errors never fail the pipeline (LogFailed trace steps absorb).
   // Per-operator step-level events defer; v1 ships run-level only.
-  const logDestinations: any[] = opts.ir.policies?.log ?? [];
+  const logDestinations: any[] = ir.policies?.log ?? [];
   if (logDestinations.length > 0) {
     const { event, reason } = classifyPipelineRunOutcome(
       pipelineOk,
@@ -532,8 +536,8 @@ export async function runPipelineFromIr(
       pipelineError,
     );
     const runEvent = buildRunLogEvent({
-      genClass: opts.ir.entry?.class ?? opts.ir.name ?? 'Pipeline',
-      method: opts.ir.entry?.method ?? 'run',
+      genClass: ir.entry?.class ?? ir.name ?? 'Pipeline',
+      method: ir.entry?.method ?? 'run',
       event,
       runId,
       ok: pipelineOk,
@@ -561,7 +565,7 @@ export async function runPipelineFromIr(
   const irPath = join(runDir, 'ir.json');
   const tracePath = opts.traceOut ?? join(runDir, 'trace.json');
   const outputPath = opts.outputOut ?? join(runDir, 'output.json');
-  writeFileSync(irPath, JSON.stringify(opts.ir, null, 2));
+  writeFileSync(irPath, JSON.stringify(ir, null, 2));
   writeFileSync(tracePath, JSON.stringify(trace, null, 2));
   writeFileSync(outputPath, JSON.stringify(output ?? null, null, 2));
 
@@ -649,7 +653,7 @@ function projectStepTokens(op: any, workspaceDir: string, compileRb: string): nu
 // ── Operator dispatch loop (shared by top-level + branch_on bodies) ──
 
 interface DispatchContext {
-  ir: IR;
+  ir: IRInternal;
   pipelineFile: string | null;
   workspaceDir: string;
   inputSlots: Record<string, any>;
@@ -977,7 +981,7 @@ async function runBranchOn(
 // ── Step dispatch ─────────────────────────────────────────────────────
 
 interface RunStepContext {
-  ir: IR;
+  ir: IRInternal;
   pipelineFile: string | null;
   workspaceDir: string;
   inputSlots: Record<string, any>;

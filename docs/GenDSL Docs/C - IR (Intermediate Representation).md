@@ -10,6 +10,14 @@ Define the auditable, replayable plan that the DSL compiles to.
 - IR MUST be serializable (JSON) and versioned.
 - IR SHOULD be compatible across runtimes and model providers.
 
+## Two-level contract: promised JSON shape vs. unpromised TypeScript type
+
+The IR has two distinct contractual surfaces:
+
+**Promised: the JSON shape.** The fields documented in the tables below are the golden-pinned data contract — byte-identical IR JSON is what `npm run test:golden` protects. Adding an IR field is additive (same philosophy as `schema.rb`). The JSON shape is what the roadmap means when it says "IR is the promised data contract."
+
+**Unpromised: the exported TypeScript type.** `export type IR` in `@redwood-labs/cambium-runner` is an **opaque, phantom-branded handle** (Road to 1.0, Gate 1). Consumers obtain `IR` values via `cambium compile`, by passing a `JSON.parse(irText)` result (typed `any`) to runner functions, or from runner result objects (`RunGenResult.ir`). They do not read fields off the exported type — field access on `IR` is a TypeScript compile error. This is intentional: it keeps the internal shape free to evolve without breaking consumer code. Gate 6's compatibility document will formalize this distinction and enumerate the stable subset of the JSON shape that is safe to inspect.
+
 ## Step types (v0 sketch)
 - Retrieve
 - Generate

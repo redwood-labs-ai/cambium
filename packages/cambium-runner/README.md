@@ -18,7 +18,7 @@ Host projects import `runGen` and supply their own schemas:
 import { runGen } from '@redwood-labs/cambium-runner';
 import * as schemas from './schemas.js';
 
-// `ir` is the JSON IR emitted by the Ruby compiler (or constructed programmatically).
+// `ir` is the JSON IR emitted by the Ruby compiler — load via JSON.parse(irText).
 const result = await runGen({ ir, schemas, mock: false });
 
 if (result.ok) {
@@ -56,6 +56,8 @@ import type {
   LogEvent, LogSink, LogDestination, RunEventName, FailReason,
 } from '@redwood-labs/cambium-runner';
 ```
+
+// IR is an opaque handle — obtain via JSON.parse(irText) or from a RunGenResult; its fields are not part of the public API.
 
 ## Compiling IR
 

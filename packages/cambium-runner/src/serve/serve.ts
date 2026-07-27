@@ -36,7 +36,7 @@ import {
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve as pathResolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runGenFromIr, type IR } from '../runner.js';
+import { runGenFromIr, type IR, type IRInternal } from '../runner.js';
 import { runPipelineFromIr } from '../pipeline.js';
 import { parseMemoryKeys } from '../memory/keys.js';
 import { loadGenCatalog, type GenCatalog } from './gen-catalog.js';
@@ -200,8 +200,8 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
       ? opts.shutdownTimeoutMs
       : DEFAULT_SHUTDOWN_TIMEOUT_MS;
 
-  // Per-(gen, method) IR cache populated at boot. Map<gen, Map<method, IR>>.
-  const cache = new Map<string, Map<string, IR>>();
+  // Per-(gen, method) IR cache populated at boot. Map<gen, Map<method, IRInternal>>.
+  const cache = new Map<string, Map<string, IRInternal>>();
   let booted = false;
   let catalogRef: GenCatalog | null = null;
 
@@ -216,9 +216,9 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
 
     for (const [name, entry] of catalog.entries) {
       const irMap = await compileBare(entry.genFilePath);
-      const methodMap = new Map<string, IR>();
+      const methodMap = new Map<string, IRInternal>();
       for (const [method, ir] of Object.entries(irMap)) {
-        methodMap.set(method, ir);
+        methodMap.set(method, ir as IRInternal);
       }
       cache.set(name, methodMap);
     }
@@ -383,7 +383,7 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
     // Clone the cached IR so we don't mutate the canonical copy when
     // injecting per-call input. JSON round-trip is the cheapest deep-clone
     // for IR (plain JSON objects throughout).
-    const ir = JSON.parse(JSON.stringify(cachedIr)) as IR;
+    const ir = JSON.parse(JSON.stringify(cachedIr)) as IRInternal;
     injectInput(ir, input);
 
     // RED-381 Phase F.3: route by IR kind. Pipeline IRs (kind: "Pipeline")
@@ -634,7 +634,7 @@ function addressOf(server: Server, bind: BindTarget): RunServeAddress {
 
 // ── input injection + helpers ─────────────────────────────────────
 
-function injectInput(ir: IR, input: unknown): void {
+function injectInput(ir: IRInternal, input: unknown): void {
   // The compile-time IR has exactly one context key (set by compile.rb,
   // either `grounded_in :name` source or the default 'document'). Per-call
   // input overrides it.
