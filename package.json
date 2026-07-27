@@ -60,6 +60,10 @@
   },
   "devDependencies": {
     "typescript": "5.9.3",
-    "vitest": "3.2.4"
+    "vitest": "3.2.7"
+  },
+  "overrides": {
+    "postcss": "8.5.19",
+    "vite": "7.3.6"
   }
 }
