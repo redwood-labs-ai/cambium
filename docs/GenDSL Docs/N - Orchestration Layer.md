@@ -173,7 +173,7 @@ When a `fan_out` has `concurrency > 1` and its branches share a grounded cacheab
 - **Zero inference** — a warm-up is a cache write with `max_tokens 16` whose completion is discarded, not an orchestration decision.
 - **Byte-identity** — the warm-up builds `(system, cacheablePrefix)` through the same assembler each branch uses, so the cache key matches. (Sliding-window memory recall augments `system` at runtime, after the warm-up; a gen with recall won't match and runs cold — write-only `:log` memory is unaffected.)
 - **Best-effort** — a warm-up failure never fails the fan-out; that group's branches just run cold. Outcomes surface in the `PipelineFanOut` trace `meta.prewarm`.
-- **On by default; opt out with `prewarm_cache false`.** Skipped for `concurrency 1` (branch 1 warms the rest), single-branch fan-outs, ungrounded/sub-floor prefixes, and `--mock` runs.
+- **On by default; opt out with `prewarm_cache false`.** Fan-out-level gates (entire prewarm skipped): `concurrency 1` (branch 1 warms the rest), single-branch fan-outs, `--mock` runs, and `prewarm_cache false`. Per-branch filter (inside `prewarmFanOut`): ungrounded branches and branches whose cacheable prefix is below the Anthropic cache floor (`MIN_CACHE_PREFIX_CHARS`) are excluded from the warm-up group; the prewarm still runs for the remaining grounded branches, so `meta.prewarm.groups` can be zero even when `meta.prewarm` is present.
 
 This replaces the per-workspace pattern of hand-written tier-matched warm-up gens wired in ahead of the reviewer fan-out.
 
