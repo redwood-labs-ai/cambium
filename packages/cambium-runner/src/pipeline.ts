@@ -1418,6 +1418,9 @@ export async function prewarmFanOut(
       tokens += r.value?.usage?.total_tokens ?? 0;
     } else {
       failed++;
+      process.stderr.write(
+        `[cambium] prewarm warm-up rejected: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}\n`,
+      );
     }
   }
   return { groups: groups.size, fired, failed, tokens };
