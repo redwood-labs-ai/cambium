@@ -390,7 +390,7 @@ export async function runPipelineFromIr(
   // (and cache) the branches will. Trace steps are dropped ([]) — warm-ups
   // are a cache side effect, not part of the pipeline trace.
   const { appPkgRoot } = resolveAppRoot(workspaceDir);
-  const engineDir = resolveEngineDir(opts.ir.entry?.source);
+  const engineDir = resolveEngineDir(ir.entry?.source);
   const providerRegistry = buildBuiltinRegistry();
   await providerRegistry.loadFromDir(join(appPkgRoot, 'app/providers'));
   if (engineDir) {
