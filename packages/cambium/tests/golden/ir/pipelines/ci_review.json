@@ -78,7 +78,8 @@
         "concurrency": 4,
         "pass_context": [
           "surface_map"
-        ]
+        ],
+        "prewarm_cache": false
       },
       {
         "kind": "Step",

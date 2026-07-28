@@ -451,4 +451,20 @@ end
     expectClass: 'Cambium::CompileError',
     expectMessage: 'operator :analyze on TestPipeline references bind(:nonexistent)',
   },
+  {
+    name: 'pipeline: prewarm_cache non-Boolean',
+    dsl: `
+class TestPipeline < Pipeline
+  fan_out :reviewers, collect_into: :reviews do
+    branch :security, agent: SecurityReviewer, method: :review
+    prewarm_cache :yes
+  end
+  def review(doc)
+  end
+end
+`.trim(),
+    filename: 'test_pipeline.pipeline.rb',
+    expectClass: 'ArgumentError',
+    expectMessage: 'prewarm_cache: must be true or false',
+  },
 ]
