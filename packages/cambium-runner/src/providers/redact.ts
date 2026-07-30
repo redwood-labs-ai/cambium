@@ -12,7 +12,7 @@ const PATTERNS: [RegExp, string][] = [
   // 2. Labelled API-key / secret / token field values
   [/((?:x-api-key|api[_-]key|api[_-]secret|access[_-]token|secret[_-]key)\s*[:=]\s*)\S+/gi, '$1[REDACTED]'],
   // 3. sk-* / ak-* / rk-* / tok-* prefixed secret tokens (≥8 chars after prefix)
-  [/\b(sk|ak|rk|tok)-[A-Za-z0-9\-_]{8,}/g, '[REDACTED]'],
+  [/\b(sk|ak|rk|tok)-[A-Za-z0-9\-_]{8,}/gi, '[REDACTED]'],
 ];
 
 const MAX_BODY_CHARS = 1500;

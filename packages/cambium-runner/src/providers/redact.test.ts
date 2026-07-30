@@ -52,6 +52,15 @@ describe('redactErrorBody', () => {
     expect(out).not.toContain('tok-validtoken12345');
   });
 
+  it('redacts uppercase-prefixed token (SK-, AK- etc.) — case-insensitive match', () => {
+    const out = redactErrorBody('invalid key SK-ANT-ABCD1234EFGH in request');
+    expect(out).toContain('[REDACTED]');
+    expect(out).not.toContain('SK-ANT-ABCD1234EFGH');
+    const out2 = redactErrorBody('rejected AK-XXXXXXXXXXXXXXXX');
+    expect(out2).toContain('[REDACTED]');
+    expect(out2).not.toContain('AK-XXXXXXXXXXXXXXXX');
+  });
+
   it('does not redact short sk- strings (below the 8-char post-prefix minimum)', () => {
     // 'sk-ab' is only 2 chars post-prefix — below the ≥8 lower bound
     const out = redactErrorBody('sk-ab is a short string');
