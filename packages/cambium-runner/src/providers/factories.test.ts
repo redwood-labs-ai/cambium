@@ -110,18 +110,20 @@ describe('openaiCompatible', () => {
     get();
   });
 
-  it('surfaces upstream error body when surfaceErrorBody is on', async () => {
-    stubFetch('boom detail', 500);
-    const p = openaiCompatible({ name: 'omlx', baseUrl: 'http://x', errorLabel: 'oMLX', surfaceErrorBody: true });
-    await expect(p.generateText({ model: 'm', system: 's', prompt: 'u' })).rejects.toThrow(
-      /oMLX error: HTTP 500 — boom detail/,
-    );
+  it('surfaces upstream error body by default, with credential-shaped content redacted', async () => {
+    stubFetch('{"error":"auth failed","x-api-key":"sk-ant-api03-faketoken1234"}', 401);
+    const p = openaiCompatible({ name: 'gw', baseUrl: 'http://x', errorLabel: 'gw' });
+    const err: Error = await p.generateText({ model: 'm', system: 's', prompt: 'u' }).catch((e) => e);
+    expect(err.message).toMatch(/gw error: HTTP 401 —/);
+    expect(err.message).not.toContain('sk-ant-api03-faketoken1234');
+    expect(err.message).toContain('[REDACTED]');
   });
 
-  it('hides upstream error body by default', async () => {
-    stubFetch('secret', 500);
-    const p = openaiCompatible({ name: 'gw', baseUrl: 'http://x' });
-    await expect(p.generateText({ model: 'm', system: 's', prompt: 'u' })).rejects.toThrow(/gw error: HTTP 500$/);
+  it('surfaces benign error body (e.g. billing) unredacted', async () => {
+    stubFetch('Your credit balance is too low to access the API.', 400);
+    const p = openaiCompatible({ name: 'gw', baseUrl: 'http://x', errorLabel: 'gw' });
+    const err: Error = await p.generateText({ model: 'm', system: 's', prompt: 'u' }).catch((e) => e);
+    expect(err.message).toContain('Your credit balance is too low');
   });
 
   it('generateWithTools sets tool_choice none when no tools, and returns raw tool_calls', async () => {
@@ -167,11 +169,19 @@ describe('anthropicCompatible', () => {
     await expect(p.generateText({ model: 'm', system: 's', prompt: 'u' })).rejects.toThrow('need a key');
   });
 
-  it('never surfaces the upstream error body (credential posture)', async () => {
-    stubFetch('401 body with key fragment', 401);
+  it('surfaces upstream error body, with credential-shaped content redacted (Anthropic path)', async () => {
+    stubFetch('{"error":{"type":"authentication_error"},"x-api-key":"sk-ant-api03-fakeXXXXXXXX"}', 401);
     const p = anthropicCompatible({ name: 'anthropic', baseUrl: 'https://x', apiKey: () => 'k', errorLabel: 'Anthropic' });
-    const err = await p.generateText({ model: 'm', system: 's', prompt: 'u' }).catch((e) => e);
-    expect(String(err.message)).toBe('Anthropic error: HTTP 401');
-    expect(String(err.message)).not.toContain('fragment');
+    const err: Error = await p.generateText({ model: 'm', system: 's', prompt: 'u' }).catch((e) => e);
+    expect(err.message).toMatch(/Anthropic error: HTTP 401 —/);
+    expect(err.message).not.toContain('sk-ant-api03-fakeXXXXXXXX');
+    expect(err.message).toContain('[REDACTED]');
+  });
+
+  it('surfaces benign error body (Anthropic path) unredacted', async () => {
+    stubFetch('{"error":{"message":"Your credit balance is too low to access the API."}}', 400);
+    const p = anthropicCompatible({ name: 'anthropic', baseUrl: 'https://x', apiKey: () => 'k', errorLabel: 'Anthropic' });
+    const err: Error = await p.generateText({ model: 'm', system: 's', prompt: 'u' }).catch((e) => e);
+    expect(err.message).toContain('Your credit balance is too low');
   });
 });

@@ -12,6 +12,7 @@
 import { ProviderRegistry, defineProvider } from './registry.js';
 import { openaiCompatible, anthropicCompatible } from './factories.js';
 import { ProviderHttpError, ProviderConnectionError } from './types.js';
+import { redactErrorBody } from './redact.js';
 import { normalizeOmlxBaseUrl, validateProviderBaseUrl } from './base-url-validator.js';
 import { buildOllamaChatRequest, normalizeOllamaChatResponse } from './ollama.js';
 
@@ -33,7 +34,6 @@ export const omlxProvider = openaiCompatible({
   structuredOutputs: () => (process.env.CAMBIUM_OMLX_STRUCTURED_OUTPUTS ?? '1') === '1',
   responseFormat: () => (process.env.CAMBIUM_OMLX_RESPONSE_FORMAT ?? '0') === '1',
   reasoningContentFallback: true,
-  surfaceErrorBody: true,
 });
 
 /** Anthropic Messages API. Native document input supported; prompt caching on
@@ -84,7 +84,10 @@ export const ollamaProvider = defineProvider({
         `Ollama connection failed: ${(fetchErr as Error).message ?? String(fetchErr)}`,
       );
     }
-    if (!res.ok) throw new ProviderHttpError(res.status, `Ollama error: HTTP ${res.status}`);
+    if (!res.ok) {
+      const errBody = redactErrorBody(await res.text().catch(() => ''));
+      throw new ProviderHttpError(res.status, `Ollama error: HTTP ${res.status}${errBody ? ` — ${errBody}` : ''}`);
+    }
     const json: any = await res.json();
     return {
       text: json.response as string,
@@ -124,7 +127,10 @@ export const ollamaProvider = defineProvider({
         `Ollama connection failed: ${(fetchErr as Error).message ?? String(fetchErr)}`,
       );
     }
-    if (!res.ok) throw new ProviderHttpError(res.status, `Ollama error: HTTP ${res.status}`);
+    if (!res.ok) {
+      const errBody = redactErrorBody(await res.text().catch(() => ''));
+      throw new ProviderHttpError(res.status, `Ollama error: HTTP ${res.status}${errBody ? ` — ${errBody}` : ''}`);
+    }
     const json: any = await res.json();
     const normalized = normalizeOllamaChatResponse(json);
     // Inline tool-call markup parsing is applied by the dispatcher.
