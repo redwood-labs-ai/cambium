@@ -8,7 +8,7 @@ class CambiumDiffAnalyzer < GenModel
   model :default
   system :cambium_diff_analyzer
   temperature 0.1
-  max_tokens 1500
+  max_tokens 32000
 
   returns CambiumDiffAnalysis
 
