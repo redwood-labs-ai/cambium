@@ -85,16 +85,22 @@ jobs:
           # Local inference: the CI review gens declare `model :default`,
           # which app/config/models.rb resolves to "omlx:Qwen3.5-27B-4bit".
           # The Forgejo runner reaches oMLX over Tailscale — set
-          # CAMBIUM_OMLX_BASEURL as a repo secret pointing at the
-          # HTTPS URL fronted by `tailscale serve` (e.g.
-          # `https://<machine>.<tailnet>.ts.net`). We probe /v1/models
-          # before each run; if the endpoint isn't reachable we fall
-          # back to --mock with a warning instead of hanging.
+          # CAMBIUM_OMLX_BASEURL as a repo secret pointing at the oMLX
+          # endpoint on the tailnet (e.g. `http://<tailnet-ip>:<port>`).
+          # We probe /v1/models before each run; if the endpoint isn't
+          # reachable we fall back to --mock with a warning instead of
+          # hanging.
           CAMBIUM_OMLX_BASEURL: ${{ secrets.CAMBIUM_OMLX_BASEURL }}
           # Optional bearer token. Harmless if unset and oMLX accepts
           # anonymous requests; required if oMLX is started with
           # `--api-key`.
           CAMBIUM_OMLX_API_KEY: ${{ secrets.CAMBIUM_OMLX_API_KEY }}
+          # Allow a plaintext http:// base URL to a non-localhost host.
+          # The runner otherwise refuses to send the bearer token over
+          # cleartext. Safe here: the endpoint is a Tailscale IP, so the
+          # link is WireGuard-encrypted end-to-end. Remove this if the
+          # base URL is switched to https://.
+          CAMBIUM_ALLOW_PRIVATE_PROVIDER_BASEURL: "1"
         run: |
           # Auth header for the probe goes into a bash array so the
           # `-H` flag and its value stay as two separate argv tokens
