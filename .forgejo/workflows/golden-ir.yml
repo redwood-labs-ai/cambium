@@ -43,18 +43,34 @@ jobs:
 
       - name: Setup Ruby
         # Cambium's Ruby surface is stdlib-only (see CLAUDE.md
-        # "Dependency policy"), so the system Ruby from apt is
-        # sufficient. We avoid ruby/setup-ruby@v1 because Forgejo's
-        # action mirror tracks upstream's runs.using bump to node24,
-        # while the Forgejo runner currently maxes out at node20 —
-        # the action setup fails before any step runs.
+        # "Dependency policy") — no gems, so no ruby-dev / native-
+        # extension toolchain is needed; plain `ruby` is enough and
+        # skips a large recommends chain. We avoid ruby/setup-ruby@v1
+        # because Forgejo's action mirror tracks upstream's runs.using
+        # bump to node24, while the Forgejo runner currently maxes out
+        # at node20 — the action setup fails before any step runs.
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ruby ruby-dev
+          apt-get install -y --no-install-recommends ruby
           ruby --version
 
+      # setup-node's `cache: 'npm'` only caches ~/.npm (the download
+      # cache), not node_modules — `npm ci` still rebuilds it every run.
+      # Cache node_modules keyed on the lockfile and skip install on a
+      # hit. Safe because postinstall scripts are forbidden (CLAUDE.md),
+      # so an exact-lockfile-match node_modules is fully deterministic.
+      - name: Cache node_modules
+        id: node-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+          key: node-modules-${{ runner.os }}-node22-${{ hashFiles('**/package-lock.json') }}
+
       - name: Install dependencies
-        run: npm ci
+        if: steps.node-cache.outputs.cache-hit != 'true'
+        run: npm ci --prefer-offline --no-audit --no-fund
 
       - name: Run golden IR tests
         run: npm run test:golden
