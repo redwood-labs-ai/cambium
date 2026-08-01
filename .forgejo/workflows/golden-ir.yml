@@ -17,7 +17,13 @@
 
 name: Golden IR Corpus
 
-on: [push, pull_request]
+on:
+  # `push` only for main so post-merge/direct commits still get a run;
+  # feature branches are covered once by `pull_request` (avoids the
+  # duplicate push+PR run for a branch with an open PR).
+  push:
+    branches: [main]
+  pull_request:
 
 jobs:
   golden:
