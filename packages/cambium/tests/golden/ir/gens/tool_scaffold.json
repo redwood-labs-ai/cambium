@@ -7,7 +7,7 @@
       "source": "packages/cambium/app/gens/tool_scaffold.cmb.rb"
     },
     "model": {
-      "id": "omlx:Qwen3.5-27B-4bit",
+      "id": "omlx:orinth-1.0-35b@q8_0",
       "temperature": 0.2,
       "max_tokens": 1500
     },
