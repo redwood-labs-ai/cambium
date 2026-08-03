@@ -1477,7 +1477,8 @@ module Cambium
       #   budget :research_defaults
       #
       # Slots: per_tool, per_run. Same per-slot mixing rule as `security`.
-      # Metric supported in v1: max_calls only.
+      # per_run metrics: max_calls (positive integer), max_tokens (positive integer),
+      # max_duration ("Ns"/"Nm"/"Nh"). per_tool metrics: max_calls only.
       def budget(*args, **opts)
         if args.length > 1
           raise ArgumentError, "budget takes at most one positional arg (a pack symbol)"

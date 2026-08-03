@@ -219,6 +219,61 @@ describe('trackBudgetFromTraceStep', () => {
   })
 })
 
+describe('parseBudget — fail-closed on malformed values', () => {
+  it('throws on malformed per_run.max_duration', () => {
+    expect(() => parseBudget({ budget: { per_run: { max_duration: '5 minutes' } } }))
+      .toThrow('[cambium] invalid budget per_run.max_duration "5 minutes"');
+  })
+
+  it('throws on malformed legacy max_duration', () => {
+    expect(() => parseBudget({ constraints: { budget: { max_duration: 'five minutes' } } }))
+      .toThrow('[cambium] invalid budget max_duration "five minutes"');
+  })
+
+  it('throws on NaN max_tokens in per_run', () => {
+    expect(() => parseBudget({ budget: { per_run: { max_tokens: 'lots' } } }))
+      .toThrow('[cambium] invalid budget per_run.max_tokens');
+  })
+
+  it('throws on zero max_tokens in per_run', () => {
+    expect(() => parseBudget({ budget: { per_run: { max_tokens: 0 } } }))
+      .toThrow('[cambium] invalid budget per_run.max_tokens');
+  })
+
+  it('throws on negative max_calls in per_run', () => {
+    expect(() => parseBudget({ budget: { per_run: { max_calls: -1 } } }))
+      .toThrow('[cambium] invalid budget per_run.max_calls');
+  })
+
+  it('throws on non-integer max_calls in per_run', () => {
+    expect(() => parseBudget({ budget: { per_run: { max_calls: 1.5 } } }))
+      .toThrow('[cambium] invalid budget per_run.max_calls');
+  })
+
+  it('throws on NaN max_tool_calls in legacy shape', () => {
+    expect(() => parseBudget({ constraints: { budget: { max_tool_calls: 'many' } } }))
+      .toThrow('[cambium] invalid budget max_tool_calls');
+  })
+
+  it('throws on zero max_tool_calls in legacy shape', () => {
+    expect(() => parseBudget({ constraints: { budget: { max_tool_calls: 0 } } }))
+      .toThrow('[cambium] invalid budget max_tool_calls');
+  })
+
+  it('does not throw on absent metrics (empty budget is valid)', () => {
+    expect(() => parseBudget({})).not.toThrow();
+    expect(() => parseBudget({ budget: { per_run: {} } })).not.toThrow();
+    expect(() => parseBudget({ budget: {} })).not.toThrow();
+  })
+
+  it('valid well-formed values still parse correctly', () => {
+    const b = parseBudget({ budget: { per_run: { max_calls: 10, max_tokens: 5000, max_duration: '5m' } } });
+    expect(b.limits.max_tool_calls).toBe(10);
+    expect(b.limits.max_tokens).toBe(5000);
+    expect(b.limits.max_duration_ms).toBe(300_000);
+  })
+})
+
 describe('parseBudget — deprecation warning', () => {
   let errorSpy: ReturnType<typeof vi.spyOn>;
 

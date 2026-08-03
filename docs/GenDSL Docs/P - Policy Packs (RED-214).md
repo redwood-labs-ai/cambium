@@ -57,6 +57,8 @@ The `per_run:` hash accepts:
 
 All three limits are enforced at runtime. Unknown keys raise `ArgumentError` at compile time.
 
+> **Note — `max_duration` enforcement timing:** `max_duration` is checked post-step (via `budget.check()` after each generation or tool step completes), not pre-call like `max_calls`. This means a single long-running step can overshoot the wall-clock deadline before the violation surfaces; the budget is refused before the *next* step dispatches.
+
 A pack can declare any subset of `network`, `filesystem`, `exec`, and
 `budget`. Slots not declared by the pack stay empty when used.
 

@@ -202,6 +202,36 @@ export function trackBudgetFromTraceStep(budget: Budget, step: any): void {
   }
 }
 
+/** Parse a duration string ("30s", "5m", "1h") into milliseconds.
+ * Returns the ms value on success.
+ * Throws a clear error when the value is present but not well-formed.
+ */
+function parseDurationMs(val: unknown, context: string): number {
+  const str = String(val);
+  const m = str.match(/^(\d+)(s|m|h)$/);
+  if (!m) {
+    throw new Error(
+      `[cambium] invalid budget ${context} "${str}": expected a duration like "30s", "5m", "1h"`,
+    );
+  }
+  const n = Number(m[1]);
+  const unit = m[2];
+  return unit === 's' ? n * 1000 : unit === 'm' ? n * 60_000 : n * 3600_000;
+}
+
+/** Assert that a count field is a positive integer (NaN, ≤0, or non-integer are rejected).
+ * `val` is only validated when it is not null/undefined — absent fields pass through.
+ */
+function assertPositiveInt(val: unknown, fieldName: string): number {
+  const n = Number(val);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(
+      `[cambium] invalid budget ${fieldName} ${JSON.stringify(val)}: expected a positive integer`,
+    );
+  }
+  return n;
+}
+
 /**
  * Parse budget from IR policies.
  *
@@ -210,8 +240,13 @@ export function trackBudgetFromTraceStep(budget: Budget, step: any): void {
  *
  * Also reads the legacy `policies.constraints.budget` shape for any gen
  * that still declares `constrain :budget, max_tool_calls: N, max_duration: "5m"`.
- * Legacy max_tokens / max_tool_calls / max_duration land on per-run limits;
- * if both are present, top-level wins per-metric.
+ * Legacy max_tokens / max_tool_calls / max_duration land on per-run limits.
+ * When both shapes are present, `policies.budget` (top-level) is used; the
+ * legacy path is only reached when `policies.budget` is absent.
+ *
+ * Fail-closed: any budget metric that is PRESENT but malformed (bad duration
+ * format, non-positive-integer count) throws immediately so the run is refused
+ * rather than silently uncapped. Absent metrics never throw.
  */
 export function parseBudget(policies: any): Budget {
   if (!legacyConstraintsBudgetWarned && policies?.constraints?.budget != null) {
@@ -228,37 +263,35 @@ export function parseBudget(policies: any): Budget {
 
   let maxDurationMs: number | undefined;
   const legacyDuration = legacy?.max_duration;
-  if (legacyDuration) {
-    const m = String(legacyDuration).match(/^(\d+)(s|m|h)$/);
-    if (m) {
-      const val = Number(m[1]);
-      const unit = m[2];
-      maxDurationMs = unit === 's' ? val * 1000 : unit === 'm' ? val * 60_000 : val * 3600_000;
-    }
+  if (legacyDuration != null) {
+    maxDurationMs = parseDurationMs(legacyDuration, 'max_duration');
   }
 
   const perRun = isTopLevel ? (top.per_run ?? {}) : {};
   const perTool = isTopLevel ? (top.per_tool ?? {}) : {};
 
-  if (perRun.max_duration) {
-    const m = String(perRun.max_duration).match(/^(\d+)(s|m|h)$/);
-    if (m) {
-      const val = Number(m[1]);
-      const unit = m[2];
-      maxDurationMs = unit === 's' ? val * 1000 : unit === 'm' ? val * 60_000 : val * 3600_000;
-    }
+  if (perRun.max_duration != null) {
+    maxDurationMs = parseDurationMs(perRun.max_duration, 'per_run.max_duration');
   }
 
   const runLimits: BudgetLimits = {
-    max_tokens:      perRun.max_tokens      ?? (legacy.max_tokens      != null ? Number(legacy.max_tokens)      : undefined),
-    max_tool_calls:  perRun.max_calls       ?? perRun.max_tool_calls   ?? (legacy.max_tool_calls  != null ? Number(legacy.max_tool_calls)  : undefined),
+    max_tokens: perRun.max_tokens != null
+      ? assertPositiveInt(perRun.max_tokens, 'per_run.max_tokens')
+      : (legacy.max_tokens != null ? assertPositiveInt(legacy.max_tokens, 'max_tokens') : undefined),
+    max_tool_calls: perRun.max_calls != null
+      ? assertPositiveInt(perRun.max_calls, 'per_run.max_calls')
+      : perRun.max_tool_calls != null
+        ? assertPositiveInt(perRun.max_tool_calls, 'per_run.max_tool_calls')
+        : (legacy.max_tool_calls != null ? assertPositiveInt(legacy.max_tool_calls, 'max_tool_calls') : undefined),
     max_duration_ms: maxDurationMs,
   };
 
   const perToolLimits: Record<string, PerToolLimits> = {};
   for (const [tool, limits] of Object.entries(perTool) as [string, any][]) {
     perToolLimits[tool] = {
-      max_calls: limits?.max_calls != null ? Number(limits.max_calls) : undefined,
+      max_calls: limits?.max_calls != null
+        ? assertPositiveInt(limits.max_calls, `per_tool.${tool}.max_calls`)
+        : undefined,
     };
   }
 

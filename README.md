@@ -11,7 +11,7 @@ class Analyst < GenModel
   uses :web_search, :calculator
   corrects :math
 
-  constrain :budget, max_tool_calls: 4
+  budget per_run: { max_calls: 4 }
   grounded_in :document, require_citations: true
 
   def analyze(document)
