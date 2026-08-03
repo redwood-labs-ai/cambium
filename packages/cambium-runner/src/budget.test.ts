@@ -115,6 +115,41 @@ describe('parseBudget (new policies.budget shape)', () => {
     const b = parseBudget({ budget: { per_run: { max_tool_calls: 50 } } });
     expect(b.limits.max_tool_calls).toBe(50);
   })
+
+  it('parses per_run.max_tokens', () => {
+    const b = parseBudget({ budget: { per_run: { max_tokens: 5000 } } });
+    expect(b.limits.max_tokens).toBe(5000);
+  })
+
+  it('parses per_run.max_duration with minutes', () => {
+    const b = parseBudget({ budget: { per_run: { max_duration: '5m' } } });
+    expect(b.limits.max_duration_ms).toBe(300_000);
+  })
+
+  it('parses per_run.max_duration with seconds', () => {
+    const b = parseBudget({ budget: { per_run: { max_duration: '30s' } } });
+    expect(b.limits.max_duration_ms).toBe(30_000);
+  })
+
+  it('parses per_run.max_duration with hours', () => {
+    const b = parseBudget({ budget: { per_run: { max_duration: '1h' } } });
+    expect(b.limits.max_duration_ms).toBe(3_600_000);
+  })
+
+  it('per_run.max_duration wins over legacy max_duration when both present', () => {
+    const b = parseBudget({
+      budget: { per_run: { max_duration: '2m' } },
+      constraints: { budget: { max_duration: '1h' } },
+    });
+    expect(b.limits.max_duration_ms).toBe(120_000);
+  })
+
+  it('parses all three per_run metrics together', () => {
+    const b = parseBudget({ budget: { per_run: { max_tokens: 5000, max_duration: '5m', max_calls: 10 } } });
+    expect(b.limits.max_tokens).toBe(5000);
+    expect(b.limits.max_duration_ms).toBe(300_000);
+    expect(b.limits.max_tool_calls).toBe(10);
+  })
 })
 
 describe('Budget per-tool gating', () => {

@@ -194,6 +194,42 @@ end
     expectMessage: 'unsupported budget metric(s) for per_run: max_time',
   },
   {
+    name: 'budget: per_run max_tokens must be a positive Integer',
+    dsl: `
+class TestGen < GenModel
+  model "omlx:some-model"
+  system "inline"
+  budget per_run: { max_tokens: -1 }
+  returns do
+    field :result, String
+  end
+  def analyze(x)
+    generate "x" do; with context: x; end
+  end
+end
+`.trim(),
+    expectClass: 'ArgumentError',
+    expectMessage: 'budget per_run max_tokens: must be a positive Integer',
+  },
+  {
+    name: 'budget: per_run max_duration must match format',
+    dsl: `
+class TestGen < GenModel
+  model "omlx:some-model"
+  system "inline"
+  budget per_run: { max_duration: "5 minutes" }
+  returns do
+    field :result, String
+  end
+  def analyze(x)
+    generate "x" do; with context: x; end
+  end
+end
+`.trim(),
+    expectClass: 'ArgumentError',
+    expectMessage: 'budget per_run max_duration: must match',
+  },
+  {
     name: 'budget: unknown keys',
     dsl: `
 class TestGen < GenModel

@@ -338,14 +338,15 @@ module Cambium
     # (per_tool / per_run). Slot semantics chosen so the same per-slot
     # mixing rule used by `security` works for `budget`.
     def budget_slots(opts)
-      allowed_metrics = %w[max_calls]
+      allowed_tool_metrics = %w[max_calls]
+      allowed_run_metrics  = %w[max_calls max_tokens max_duration]
       slots = {}
       if (per_tool = opts[:per_tool] || opts['per_tool'])
         raise ArgumentError, "budget per_tool: must be a Hash" unless per_tool.is_a?(Hash)
         slots['per_tool'] = per_tool.each_with_object({}) do |(tool, limits), h|
           raise ArgumentError, "budget per_tool[#{tool}] must be a Hash" unless limits.is_a?(Hash)
           limits_str = limits.transform_keys(&:to_s)
-          unknown = limits_str.keys - allowed_metrics
+          unknown = limits_str.keys - allowed_tool_metrics
           raise ArgumentError, "unsupported budget metric(s) for #{tool}: #{unknown.join(', ')}" unless unknown.empty?
           h[tool.to_s] = limits_str
         end
@@ -353,8 +354,21 @@ module Cambium
       if (per_run = opts[:per_run] || opts['per_run'])
         raise ArgumentError, "budget per_run: must be a Hash" unless per_run.is_a?(Hash)
         per_run_str = per_run.transform_keys(&:to_s)
-        unknown = per_run_str.keys - allowed_metrics
+        unknown = per_run_str.keys - allowed_run_metrics
         raise ArgumentError, "unsupported budget metric(s) for per_run: #{unknown.join(', ')}" unless unknown.empty?
+        %w[max_calls max_tokens].each do |int_metric|
+          next unless per_run_str.key?(int_metric)
+          val = per_run_str[int_metric]
+          unless val.is_a?(Integer) && val > 0
+            raise ArgumentError, "budget per_run #{int_metric}: must be a positive Integer, got #{val.inspect}"
+          end
+        end
+        if per_run_str.key?('max_duration')
+          val = per_run_str['max_duration']
+          unless val.is_a?(String) && val.match?(/\A\d+(s|m|h)\z/)
+            raise ArgumentError, "budget per_run max_duration: must match /\\d+(s|m|h)/ (e.g. \"5m\"), got #{val.inspect}"
+          end
+        end
         slots['per_run'] = per_run_str
       end
       unknown = opts.keys.map(&:to_s) - %w[per_tool per_run]

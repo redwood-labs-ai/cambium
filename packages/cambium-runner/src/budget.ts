@@ -196,7 +196,7 @@ export function trackBudgetFromTraceStep(budget: Budget, step: any): void {
  * Parse budget from IR policies.
  *
  * Reads the new top-level `policies.budget` (RED-137) shape:
- *   { per_tool: { tavily: { max_calls, max_bytes } }, per_run: { max_calls } }
+ *   { per_tool: { tavily: { max_calls } }, per_run: { max_calls, max_tokens, max_duration } }
  *
  * Also reads the legacy `policies.constraints.budget` shape for any gen
  * that still declares `constrain :budget, max_tool_calls: N, max_duration: "5m"`.
@@ -221,6 +221,15 @@ export function parseBudget(policies: any): Budget {
 
   const perRun = isTopLevel ? (top.per_run ?? {}) : {};
   const perTool = isTopLevel ? (top.per_tool ?? {}) : {};
+
+  if (perRun.max_duration) {
+    const m = String(perRun.max_duration).match(/^(\d+)(s|m|h)$/);
+    if (m) {
+      const val = Number(m[1]);
+      const unit = m[2];
+      maxDurationMs = unit === 's' ? val * 1000 : unit === 'm' ? val * 60_000 : val * 3600_000;
+    }
+  }
 
   const runLimits: BudgetLimits = {
     max_tokens:      perRun.max_tokens      ?? (legacy.max_tokens      != null ? Number(legacy.max_tokens)      : undefined),
