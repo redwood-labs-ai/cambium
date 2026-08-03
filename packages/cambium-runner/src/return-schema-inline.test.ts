@@ -106,3 +106,25 @@ describe('RED-419 runner consumes inline returnSchema (STEP-003)', () => {
     expect(result.trace.final.schema_id).toBe('InlineOutput');
   });
 });
+
+describe('runGen structured result on malformed budget config', () => {
+  beforeEach(() => {
+    process.env.CAMBIUM_ALLOW_MOCK = '1';
+  });
+  afterEach(() => {
+    delete process.env.CAMBIUM_ALLOW_MOCK;
+  });
+
+  it('returns ok:false with BudgetParseFailed trace step on malformed budget (not an uncaught throw)', async () => {
+    const ir: any = blockFormIR(inlineSchema(['summary']));
+    // Inject a malformed per_run.max_tokens — parseBudget throws; runGen must catch it.
+    ir.policies.budget = { per_run: { max_tokens: 'lots' } };
+    const result = await runGen({ ir, schemas: {} });
+    expect(result.ok).toBe(false);
+    expect(result.errorMessage).toMatch(/Budget config invalid/);
+    const failStep = result.trace.steps.find((s: any) => s.type === 'BudgetParseFailed');
+    expect(failStep).toBeDefined();
+    expect(failStep.ok).toBe(false);
+    expect(failStep.errors[0].message).toContain('[cambium] invalid budget');
+  });
+});

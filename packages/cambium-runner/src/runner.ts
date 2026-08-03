@@ -1309,7 +1309,28 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   };
 
   // ── Budget tracking ─────────────────────────────────────────────────
-  const budget = parseBudget(ir.policies);
+  // parseBudget throws on malformed budget values (fail-closed). Catch
+  // here so a bad IR config produces a structured RunGenResult rather
+  // than an uncaught throw. Shape mirrors DocumentExtractionFailed above.
+  let budget: ReturnType<typeof parseBudget>;
+  try {
+    budget = parseBudget(ir.policies);
+  } catch (e: any) {
+    trace.steps.push({
+      type: 'BudgetParseFailed',
+      ok: false,
+      errors: [{ message: e?.message ?? String(e) }],
+    });
+    return {
+      ok: false,
+      output: null,
+      trace,
+      runId,
+      schemaId: schema.$id,
+      ir,
+      errorMessage: `Budget config invalid: ${e?.message ?? String(e)}`,
+    };
+  }
 
   /** Track usage/tool calls from a trace step and check budget. Throws on violation. */
   function budgetTrack(step: any): void {

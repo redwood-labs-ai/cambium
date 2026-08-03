@@ -260,6 +260,21 @@ describe('parseBudget — fail-closed on malformed values', () => {
       .toThrow('[cambium] invalid budget max_tool_calls');
   })
 
+  it('throws on malformed legacy constraints.budget.max_tokens (string)', () => {
+    expect(() => parseBudget({ constraints: { budget: { max_tokens: 'lots' } } }))
+      .toThrow('[cambium] invalid budget max_tokens');
+  })
+
+  it('throws on NaN per_tool max_calls (zero is not a positive integer)', () => {
+    expect(() => parseBudget({ budget: { per_tool: { search: { max_calls: 0 } } } }))
+      .toThrow('[cambium] invalid budget per_tool.search.max_calls');
+  })
+
+  it('throws on negative per_tool max_calls', () => {
+    expect(() => parseBudget({ budget: { per_tool: { search: { max_calls: -5 } } } }))
+      .toThrow('[cambium] invalid budget per_tool.search.max_calls');
+  })
+
   it('does not throw on absent metrics (empty budget is valid)', () => {
     expect(() => parseBudget({})).not.toThrow();
     expect(() => parseBudget({ budget: { per_run: {} } })).not.toThrow();
