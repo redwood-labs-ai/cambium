@@ -6,9 +6,31 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`budget per_run:` extended metrics.** The `budget` primitive's `per_run:` hash now accepts `max_tokens` (positive integer, token cap per run), `max_duration` (string `^(\d+)(s|m|h)$` — e.g. `"5m"`, `"30s"`, `"1h"`, enforced as elapsed wall time), and `max_calls` (positive integer, tool-call cap; aliased to `max_tool_calls` on read). All three are enforced at runtime by the existing `Budget` class. Unknown metrics continue to raise `ArgumentError` at compile time.
+
+  ```ruby
+  budget per_run: { max_tokens: 5000, max_duration: "5m", max_calls: 10 }
+  ```
+
 ### Changed
 
 - **`IR` type made opaque (Road to 1.0, Gate 1).** `export type IR` is now a phantom-branded opaque handle — reading its fields is a compile error. Consumers obtain `IR` via `JSON.parse(irText)` (any → IR) or from runner result objects (`RunGenResult.ir`). See `C - IR (Intermediate Representation)` § Two-level contract. Supersedes the RED-354 entry's "sharpening to a structured interface is a follow-up" note.
+
+### Deprecated
+
+- **`constrain :budget` / `policies.constraints.budget` (Road to 1.0, Gate 2).** The `constrain :budget, max_tool_calls: N, max_duration: "5m"` DSL form and its compiled IR shape `policies.constraints.budget` are deprecated and will be removed in Cambium 1.0. The runner now emits a one-time stderr warning when this shape is encountered. Migrate to the `budget` primitive:
+
+  ```ruby
+  # Before (deprecated):
+  constrain :budget, max_tool_calls: 10, max_tokens: 5000, max_duration: "5m"
+
+  # After:
+  budget per_run: { max_calls: 10, max_tokens: 5000, max_duration: "5m" }
+  ```
+
+- **`registerAppCorrectors` (Road to 1.0, Gate 2).** The `registerAppCorrectors` function remains deprecated (warned since 0.9.x). Migrate to `RunGenOptions.correctors` in `runGen` calls. Removal is scheduled for Cambium 1.0. No code change in this release — the existing one-time stderr warning remains in place.
 
 ## [0.8.1] — 2026-06-28 — The Provider Horizon
 

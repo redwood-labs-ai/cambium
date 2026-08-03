@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest'
-import { Budget, parseBudget, trackBudgetFromTraceStep } from './budget.js'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { Budget, parseBudget, trackBudgetFromTraceStep, _resetLegacyBudgetWarningForTests } from './budget.js'
 
 describe('Budget', () => {
   it('passes when within limits', () => {
@@ -217,4 +217,42 @@ describe('trackBudgetFromTraceStep', () => {
     expect(b.getToolUsage('tavily').calls).toBe(1);
     expect(b.getToolUsage('linear').calls).toBe(1);
   })
+})
+
+describe('parseBudget — deprecation warning', () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    _resetLegacyBudgetWarningForTests();
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  it('emits a deprecation warning on first use of constraints.budget', () => {
+    parseBudget({ constraints: { budget: { max_tool_calls: 5 } } });
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0][0]).toContain('[cambium]');
+    expect(errorSpy.mock.calls[0][0]).toContain('constraints.budget');
+    expect(errorSpy.mock.calls[0][0]).toContain('Cambium 1.0');
+  });
+
+  it('emits the warning only once across multiple calls (dedup)', () => {
+    parseBudget({ constraints: { budget: { max_tool_calls: 5 } } });
+    parseBudget({ constraints: { budget: { max_tokens: 1000 } } });
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not emit a warning for the new policies.budget shape', () => {
+    parseBudget({ budget: { per_run: { max_calls: 100 } } });
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it('legacy parse result is byte-for-byte unchanged after adding the warning', () => {
+    const b = parseBudget({ constraints: { budget: { max_tool_calls: 4, max_tokens: 500 } } });
+    expect(b.limits.max_tool_calls).toBe(4);
+    expect(b.limits.max_tokens).toBe(500);
+  });
 })

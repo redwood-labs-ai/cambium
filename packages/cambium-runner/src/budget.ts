@@ -26,6 +26,16 @@ export type BudgetViolation = {
   tool?: string;    // set when the violation is per-tool
 };
 
+let legacyConstraintsBudgetWarned = false;
+
+/**
+ * Test-only: reset the deprecation-warning flag between test cases.
+ * Production code must never call this.
+ */
+export function _resetLegacyBudgetWarningForTests(): void {
+  legacyConstraintsBudgetWarned = false;
+}
+
 export class Budget {
   readonly limits: BudgetLimits;
   readonly perTool: Record<string, PerToolLimits>;
@@ -204,6 +214,14 @@ export function trackBudgetFromTraceStep(budget: Budget, step: any): void {
  * if both are present, top-level wins per-metric.
  */
 export function parseBudget(policies: any): Budget {
+  if (!legacyConstraintsBudgetWarned && policies?.constraints?.budget != null) {
+    legacyConstraintsBudgetWarned = true;
+    console.error(
+      '[cambium] policies.constraints.budget is deprecated and will be removed in Cambium 1.0. ' +
+      'Use the `budget` primitive instead: `budget per_run: { max_calls: N, max_tokens: N, max_duration: "5m" }`.',
+    );
+  }
+
   const legacy = policies?.budget ?? policies?.constraints?.budget ?? {};
   const top = policies?.budget ?? null;
   const isTopLevel = top && (top.per_tool || top.per_run);

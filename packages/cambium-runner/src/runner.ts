@@ -1451,7 +1451,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
         },
       });
     } else if (ir.mode === 'agentic') {
-      const maxToolCalls = ir.policies?.constraints?.budget?.max_tool_calls ?? 20;
+      const maxToolCalls = budget.limits.max_tool_calls ?? 20;
       const toolsOpenAI = toolRegistry.toOpenAIFormat(toolsAllowed);
 
       const agenticResult = await handleAgenticGenerate(
