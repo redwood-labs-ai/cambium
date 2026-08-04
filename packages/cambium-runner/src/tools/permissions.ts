@@ -52,20 +52,21 @@ export type ExecScopedNetwork = 'none' | NetworkPolicy;
  *  a concrete `{ allowlist_paths: string[] }`. */
 export type ExecScopedFilesystem = 'none' | { allowlist_paths: string[] };
 
-/** RED-248 resolved exec policy.
+/** RED-248 / Gate-3 resolved exec policy.
  *
- *  The legacy `{ allowed: true }` DSL shape resolves on the Ruby side to
- *  `{ allowed: true, runtime: 'native' }` at parse time — the `:native`
- *  substrate is the deprecated fig-leaf. Runtime-side migration warnings
- *  for that path land in RED-249.
+ *  After Gate 3, the only path to `runtime: 'native'` in the IR is the
+ *  explicit `security exec: { unsafe_native: true }` DSL opt-in (DEC-001).
+ *  The `unsafe_native` field is `true` in that case, distinguishing it from
+ *  any hypothetically hand-crafted IR.
  *
- *  New-shape gens provide `runtime:` explicitly (required) and any of
- *  `cpu` / `memory` / `timeout` / `network` / `filesystem` /
- *  `max_output_bytes` the author cares to pin. Defaults applied here
- *  where the DSL didn't provide one. */
+ *  Sandboxed gens provide `runtime: 'wasm' | 'firecracker'` (required) and
+ *  any of `cpu` / `memory` / `timeout` / `network` / `filesystem` /
+ *  `max_output_bytes` the author cares to pin. Defaults applied here where
+ *  the DSL didn't provide one. */
 export type ExecPolicy = {
   allowed: boolean;
   runtime?: 'wasm' | 'firecracker' | 'native';
+  unsafe_native?: boolean;   // DEC-005: marks explicit opt-in to unsandboxed native
   cpu?: number;
   memory?: number;
   timeout?: number;
@@ -144,6 +145,9 @@ function buildExecPolicy(
       );
     }
     out.runtime = exec.runtime as ExecPolicy['runtime'];
+  }
+  if (exec.unsafe_native === true) {
+    out.unsafe_native = true;
   }
   // Re-enforce the Ruby-side bounds on numeric exec fields so a hand-crafted
   // or post-processed IR that bypasses the compile step can't smuggle out-of-
@@ -289,7 +293,7 @@ export function validateToolPermissions(
     violations.push({
       tool: def.name,
       permission: 'exec',
-      message: `Tool "${def.name}" requires exec but the gen's security policy does not set exec: { allowed: true }`,
+      message: `Tool "${def.name}" requires exec but the gen's security policy has no exec block, or exec is not allowed. Declare \`security exec: { runtime: :wasm | :firecracker }\` or the explicit sharp-knife \`security exec: { unsafe_native: true }\`.`,
     });
   }
 

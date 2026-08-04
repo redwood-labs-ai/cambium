@@ -208,18 +208,11 @@ module Cambium
       slots
     end
 
-    # RED-248: Normalize the `security exec:` slot. Accepts two shapes:
+    # RED-248 / Gate-3: Normalize the `security exec:` slot. Three shapes accepted:
     #
-    #   Legacy (back-compat):
-    #     security exec: { allowed: true }
-    #   Resolves to { 'allowed' => true, 'runtime' => 'native' }.
-    #   The :native substrate is the deprecated fig-leaf path; gens
-    #   using this shape run unsandboxed with a stderr warning emitted
-    #   at runtime.
-    #
-    #   New (RED-213):
+    #   Sandboxed (preferred — new shape, RED-213):
     #     security exec: {
-    #       runtime: :wasm | :firecracker | :native,
+    #       runtime: :wasm | :firecracker,
     #       cpu: 0.5,            # cores, 0.1–4.0
     #       memory: 256,         # MB, 16–4096
     #       timeout: 30,         # seconds, 1–600
@@ -228,11 +221,18 @@ module Cambium
     #       max_output_bytes: 50_000,
     #     }
     #
-    # Required in the new shape: `runtime`. Everything else has defaults
-    # applied by the TS-side policy parser; compile-time validation
-    # covers the ranges and enumerations authors commonly get wrong.
-    KNOWN_EXEC_KEYS     = %w[allowed runtime cpu memory timeout network filesystem max_output_bytes].freeze
-    KNOWN_EXEC_RUNTIMES = %w[wasm firecracker native].freeze
+    #   Unsandboxed sharp-knife opt-in (explicit, loud, discouraged):
+    #     security exec: { unsafe_native: true }
+    #   Emits { allowed: true, runtime: 'native', unsafe_native: true }.
+    #   Generates a `tool.exec.unsandboxed` trace step + stderr warning on every call.
+    #   CAMBIUM_STRICT_EXEC=1 makes this a hard compile error.
+    #
+    #   These shapes are now COMPILE ERRORS (removed in Gate 3):
+    #     security exec: { allowed: true }        # use runtime: :wasm/:firecracker or unsafe_native: true
+    #     security exec: { runtime: :native, ... } # use unsafe_native: true
+    KNOWN_EXEC_KEYS             = %w[allowed runtime cpu memory timeout network filesystem max_output_bytes unsafe_native].freeze
+    KNOWN_EXEC_RUNTIMES         = %w[wasm firecracker native].freeze
+    KNOWN_EXEC_RUNTIMES_SANDBOXED = %w[wasm firecracker].freeze
 
     def normalize_exec(ex)
       raise ArgumentError, "security exec: must be a Hash" unless ex.is_a?(Hash)
@@ -245,27 +245,40 @@ module Cambium
 
       out = { 'allowed' => ex_str.fetch('allowed', false) == true }
 
+      unsafe_native = ex_str.fetch('unsafe_native', false) == true
+
       if ex_str.key?('runtime')
         rt = ex_str['runtime'].to_s
-        unless KNOWN_EXEC_RUNTIMES.include?(rt)
+        # DEC-002: runtime: :native is now a compile error; use unsafe_native: true.
+        if rt == 'native'
+          raise CompileError,
+                "security exec runtime: :native is no longer accepted. " \
+                "To run code unsandboxed, use `security exec: { unsafe_native: true }` explicitly. " \
+                "To sandbox execution, use `runtime: :wasm` or `runtime: :firecracker`."
+        end
+        unless KNOWN_EXEC_RUNTIMES_SANDBOXED.include?(rt)
           raise ArgumentError,
-                "security exec runtime: must be one of :#{KNOWN_EXEC_RUNTIMES.join(', :')}; got :#{rt}"
+                "security exec runtime: must be one of :#{KNOWN_EXEC_RUNTIMES_SANDBOXED.join(', :')}; got :#{rt}"
         end
         out['runtime'] = rt
-      elsif out['allowed']
-        # Back-compat: `{ allowed: true }` with no runtime → :native.
-        # Emits a deprecation warning at runtime (RED-249).
+      elsif unsafe_native
+        # DEC-001 / DEC-003: explicit sharp-knife opt-in.
         out['runtime'] = 'native'
+        out['unsafe_native'] = true
+        out['allowed'] = true
+      elsif out['allowed']
+        # DEC-003: bare { allowed: true } with no runtime and no unsafe_native is now a compile error.
+        raise CompileError,
+              "security exec: { allowed: true } no longer defaults to unsandboxed native. " \
+              "Declare `runtime: :wasm` or `runtime: :firecracker` for sandboxed exec, " \
+              "or `unsafe_native: true` to explicitly opt into unsandboxed native (sharp knife)."
       end
 
-      # RED-249 strict-mode flag. When CAMBIUM_STRICT_EXEC=1, resolving
-      # to :native is a hard compile error (rather than a runtime
-      # warning). Off by default; opt-in for shops that want to block
-      # the fig-leaf path across the board.
+      # DEC-004: CAMBIUM_STRICT_EXEC=1 now prohibits even the explicit unsafe_native opt-in.
       if out['runtime'] == 'native' && ENV['CAMBIUM_STRICT_EXEC'] == '1'
         raise CompileError,
-              "security exec runtime: :native is blocked by CAMBIUM_STRICT_EXEC=1. " \
-              "Set runtime: :wasm or :firecracker explicitly."
+              "security exec: CAMBIUM_STRICT_EXEC=1 is set; unsandboxed native exec is prohibited " \
+              "in this environment. Use `runtime: :wasm` or `runtime: :firecracker`."
       end
 
       if ex_str.key?('cpu')

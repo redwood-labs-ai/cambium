@@ -1,13 +1,12 @@
 /**
- * `:native` substrate — back-compat fig-leaf (RED-213 design note §10).
+ * `:native` substrate — explicit unsandboxed sharp-knife opt-in.
  *
- * Runs code via `execSync` with no sandbox. Exists so existing gens with
- * `security exec: { allowed: true }` continue to compile and run; the
- * runner emits a `tool.exec.unsandboxed` trace step and a stderr
- * deprecation warning on every call (RED-249 wires those).
+ * Runs code via `execSync` with no sandbox. Active only when a gen explicitly
+ * declares `security exec: { unsafe_native: true }`. The runner emits a
+ * `tool.exec.unsandboxed` trace step and a stderr warning on every call.
  *
- * MUST NOT be the default for new gens. The scaffolder emits
- * `runtime: :wasm`; this path only exists for migration.
+ * MUST NOT be the default for new gens. The scaffolder emits `runtime: :wasm`.
+ * `CAMBIUM_STRICT_EXEC=1` blocks even this explicit path.
  */
 import { execSync } from 'node:child_process';
 import { writeFileSync, unlinkSync, mkdtempSync, rmSync } from 'node:fs';
