@@ -290,6 +290,9 @@ describe('buildExecPolicy — Gate-3 native enforcement (served IR)', () => {
     });
     expect(p.exec?.runtime).toBe('native');
     expect(p.exec?.unsafe_native).toBe(true);
+    // unsafe_native implies allowed (matches Ruby) — native is never left
+    // enabled with allowed:false relying on the dispatch guard as the only block.
+    expect(p.exec?.allowed).toBe(true);
   });
 
   it('{ allowed: true, runtime: "wasm" } is accepted unchanged (sandboxed path must not regress)', () => {

@@ -160,8 +160,13 @@ function buildExecPolicy(
   // cannot reach native execution without the explicit opt-in — AUD-004 pattern).
   if (exec.unsafe_native === true) {
     // Explicit sharp-knife opt-in: set runtime to native and carry the flag.
+    // unsafe_native implies allowed — mirrors the Ruby `normalize_exec` shape
+    // so a hand-crafted `{ unsafe_native: true }` behaves identically to a
+    // compiled gen, and native is never left enabled with `allowed: false`
+    // (which would rely on the dispatch guard as the only block).
     out.unsafe_native = true;
     out.runtime = 'native';
+    out.allowed = true;
     // CAMBIUM_STRICT_EXEC=1 blocks even the explicit opt-in (org lockdown).
     if (process.env['CAMBIUM_STRICT_EXEC'] === '1') {
       throw new Error(
