@@ -853,7 +853,7 @@ function generatePolicy(name, ctx) {
 #   allowlist_paths: %w[/data/in /tmp/cambium]
 
 # exec \\
-#   runtime: :wasm,          # :wasm | :firecracker | :native (deprecated)
+#   runtime: :wasm,          # :wasm | :firecracker (use unsafe_native: true for unsandboxed)
 #   language: :javascript,
 #   timeout: 30,
 #   memory: 256

@@ -94,7 +94,7 @@
       "    block_metadata: true,",
       "  }"
     ],
-    "description": "Tool egress policy (RED-137). Add filesystem: { roots: [...] } / exec: { allowed: true } as needed."
+    "description": "Tool egress policy (RED-137). Add filesystem: { roots: [...] } / exec: { runtime: :wasm } as needed."
   },
   "Budget config": {
     "prefix": "budget",
@@ -186,14 +186,22 @@
     "body": [
       "security \\",
       "  exec: {",
-      "    runtime: :${1|wasm,firecracker,native|},",
+      "    runtime: :${1|wasm,firecracker|},",
       "    language: :${2|javascript,python|},",
       "    timeout: ${3:30},",
       "    memory: ${4:256},",
       "    cpu: ${5:1}",
       "  }"
     ],
-    "description": "Sandboxed exec config (RED-248/254/258/259). :wasm and :firecracker are sandboxed; :native is deprecated."
+    "description": "Sandboxed exec config (RED-248/254/258/259). :wasm and :firecracker are sandboxed substrates."
+  },
+  "Exec unsandboxed opt-in": {
+    "prefix": "execunsafe",
+    "body": [
+      "security \\",
+      "  exec: { unsafe_native: true }"
+    ],
+    "description": "Explicit sharp-knife opt-in for unsandboxed native exec (Gate 3). Emits tool.exec.unsandboxed on every call. Prefer runtime: :wasm | :firecracker."
   },
   "Action in trigger": {
     "prefix": "action",

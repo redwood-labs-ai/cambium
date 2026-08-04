@@ -190,7 +190,7 @@ Documented in `C - Trace (observability).md` once the impl tickets land.
 Three rules:
 
 - **WASM works on Linux, macOS, and Windows.** `quickjs-emscripten` runs on Node's built-in `WebAssembly` support, which is cross-platform; this is the default precisely because it runs everywhere without special setup.
-- **Firecracker works on Linux with KVM only.** When a gen declares `runtime: :firecracker` and `available()` returns a non-null reason, the runner fails at startup with that reason. No fallback. Forces the user to consciously choose between (a) running the workload on a Firecracker-capable host, (b) downgrading to WASM with the language constraints, or (c) running `:native` with the deprecation warning if they accept the dev-mode risk.
+- **Firecracker works on Linux with KVM only.** When a gen declares `runtime: :firecracker` and `available()` returns a non-null reason, the runner fails at startup with that reason. No fallback. Forces the user to consciously choose between (a) running the workload on a Firecracker-capable host, (b) downgrading to WASM with the language constraints, or (c) using `security exec: { unsafe_native: true }` if they explicitly accept the unsandboxed risk.
 - **`:native` works everywhere.** Accessible only via `unsafe_native: true` (Gate 3). Emits the warning on every run. `CAMBIUM_STRICT_EXEC=1` blocks it.
 
 ### 10. Migration of existing `security exec: { allowed: true }` gens — Gate-3 complete
@@ -249,9 +249,9 @@ The decisions above settle most of the architecture. Each impl ticket below has 
 
 1. **Adapter interface + WASM substrate.** Foundational. Defines the `ExecSubstrate` interface, ships the `quickjs-emscripten` implementation, plumbs the `execute_code` builtin to dispatch through it. Includes the substrate-agnostic trace-event emission and the WASM-specific resource-limit + network-deny behavior. (Filesystem preopens and Pyodide Python are v1.5+; see open decisions.) **Largest ticket.**
 
-2. **DSL surface + Ruby parser.** Extends `security exec:` to accept the new shape. Preserves `{ allowed: true }` back-compat. Updates `parseSecurityPolicy` to emit the resolved `runtime`/`cpu`/`memory`/`timeout`/`network`/`filesystem` shape into `policies.security.exec`. Pack support follows from RED-214's per-slot mixing.
+2. **DSL surface + Ruby parser.** Extends `security exec:` to accept the new shape. Gate-3 complete: `{ allowed: true }` back-compat removed; `runtime: :native` is a compile error; `unsafe_native: true` is the explicit opt-in. Updates `parseSecurityPolicy` to emit the resolved `runtime`/`cpu`/`memory`/`timeout`/`network`/`filesystem` shape into `policies.security.exec`. Pack support follows from RED-214's per-slot mixing.
 
-3. **Trace event types + observability.** Adds the six `Exec*` step types to the runner's emission path. Updates `C - Trace (observability).md` with the rows. Wires the `tool.exec.unsandboxed` warning trace + stderr line for the `:native` migration path.
+3. **Trace event types + observability.** Adds the six `Exec*` step types to the runner's emission path. Updates `C - Trace (observability).md` with the rows. Wires the `tool.exec.unsandboxed` audit event and per-run stderr warning for the `unsafe_native: true` explicit opt-in path.
 
 4. **Escape-attempt fixtures + test bench.** The "looked secure, wasn't" test suite. Categories above; substrate-specific assertions; runs in the regular vitest suite.
 
@@ -263,7 +263,7 @@ Likely **6–7 actual tickets** after splitting where useful (e.g., Pyodide in W
 
 ## Acceptance for this design note
 
-- [x] Substrate selection (WASM + Firecracker + deprecated `:native`).
+- [x] Substrate selection (WASM + Firecracker + `:native` as explicit sharp-knife opt-in via `unsafe_native: true`).
 - [x] DSL surface for `security exec:`.
 - [x] Adapter interface (`ExecSubstrate`) defined.
 - [x] Inheritance semantics for filesystem and network.

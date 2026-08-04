@@ -114,7 +114,7 @@ Concretely:
 #                                    + budget.per_tool web_search + per_run
 
 security :research_defaults
-security exec: { allowed: true }     # ✓ pack didn't touch exec — fine
+security exec: { runtime: :wasm }    # ✓ pack didn't touch exec — fine
 
 security :research_defaults
 security network: { allowlist: [...] }  # ✗ pack defined network — error

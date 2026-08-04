@@ -36,7 +36,7 @@ Plugin tools live at `packages/<pkg>/app/tools/<name>.tool.json` (schema + permi
 
 ## Tool-specific trace events
 
-Most tools emit only a `ToolCall` step per dispatch. `execute_code` is the exception — because it runs LLM-supplied code inside a sandbox substrate, it emits a set of structured `Exec*` step types so the trace captures the sandbox lifecycle (RED-249). Every dispatch pushes an `ExecSpawned` step before the substrate runs, and exactly one of `ExecCompleted` / `ExecTimeout` / `ExecOOM` / `ExecEgressDenied` / `ExecCrashed` after. Gens using `runtime: :native` (the deprecated fig-leaf) additionally get a `tool.exec.unsandboxed` diagnostic step and a one-per-process stderr warning. The full meta shapes live in [[C - Trace (observability)]]'s step-types table.
+Most tools emit only a `ToolCall` step per dispatch. `execute_code` is the exception — because it runs LLM-supplied code inside a sandbox substrate, it emits a set of structured `Exec*` step types so the trace captures the sandbox lifecycle (RED-249). Every dispatch pushes an `ExecSpawned` step before the substrate runs, and exactly one of `ExecCompleted` / `ExecTimeout` / `ExecOOM` / `ExecEgressDenied` / `ExecCrashed` after. Gens using the explicit unsandboxed opt-in (`security exec: { unsafe_native: true }`) additionally get a `tool.exec.unsandboxed` audit event in the trace and a per-run stderr warning (deduplicated to once per `runGen` call). The full meta shapes live in [[C - Trace (observability)]]'s step-types table.
 
 ## See also
 
