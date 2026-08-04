@@ -34,7 +34,7 @@ class MorningDigest < Cambium::GenModel
   cron :daily, at: "9:00"
 
   memory :yesterday, scope: :schedule, strategy: :sliding_window, size: 1
-  write_memory_via :DigestMemoryAgent   # retro agent writes output
+  writes_memory_via :DigestMemoryAgent   # retro agent writes output
 
   def analyze(input)
     # ctx.memory[:yesterday] is auto-injected into the system prompt
@@ -58,7 +58,7 @@ Forcing example: a chat agent that remembers the user's last declared intent acr
 ```ruby
 class ChatAgent < Cambium::GenModel
   memory :last_intent, scope: :session, strategy: :sliding_window, size: 1
-  write_memory_via :IntentMemoryAgent
+  writes_memory_via :IntentMemoryAgent
 
   def respond(input)
     # ctx.memory[:last_intent] injected into prompt.
@@ -100,7 +100,7 @@ Forcing example: weekly audit gen reads last week's top findings to seed this we
 class WeeklyAudit < Cambium::GenModel
   cron :weekly
   memory :prior_findings, scope: :schedule, strategy: :sliding_window, size: 1
-  write_memory_via :AuditMemoryAgent
+  writes_memory_via :AuditMemoryAgent
   # ... same pattern as case 1
 end
 ```
@@ -117,7 +117,7 @@ Forcing example: trend-detection gen needs the last 7 days of `pattern_severity`
 class TrendDetector < Cambium::GenModel
   cron :daily
   memory :severity_log, scope: :schedule, strategy: :sliding_window, size: 7
-  write_memory_via :TrendMemoryAgent
+  writes_memory_via :TrendMemoryAgent
 end
 ```
 
@@ -195,7 +195,7 @@ Every pattern in cases 1–4 works today with:
 - `memory :<name>, scope: :session, ...` — works today.
 - `memory :<name>, scope: :global, ...` — works today.
 - `memory :<name>, scope: :<pool_name>, ...` — works today.
-- `write_memory_via :<AgentClass>` — works today (RED-215 phase 4).
+- `writes_memory_via :<AgentClass>` — works today (RED-215 phase 4).
 
 RED-273's impl ticket carries the one dependency this note creates: `:schedule` as a valid `scope:` value, with the runtime bucket path. That's ~15 LOC of Ruby validator + ~40 LOC of TS memory-backend routing; already in scope for RED-273.
 
@@ -216,6 +216,6 @@ RED-273's impl ticket carries the one dependency this note creates: `:schedule` 
 
 - [[P - Memory]] — the machinery that covers every case
 - [[N - Scheduled Gens (RED-273)]] — `scope: :schedule` makes cases 1, 3, 4 work for cron'd gens
-- RED-215 phase 4 — retro agents and `write_memory_via`
+- RED-215 phase 4 — retro agents and `writes_memory_via`
 - RED-238 — temporally-safe semantic memory query (shipped); original context for this ticket
 - RED-273 — companion design note; scheduled gens forced the question that closes RED-241

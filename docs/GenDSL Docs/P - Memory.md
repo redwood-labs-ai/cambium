@@ -18,7 +18,7 @@ Declare per-gen memory slots that persist across runs. The runtime handles SQLit
 - `retain:` (RED-239) accepts a duration string (`"30d"`), an entries cap (`{max_entries: N}`), or both (`{ttl: "7d", max_entries: N}`). Duration values MUST be positive and MUST NOT exceed 10 years. Prune runs before every read — a bucket that isn't read keeps its entries, but a stale entry never reaches the model.
 - Workspace-level memory policy (RED-239 v2) MAY be declared at `app/config/memory_policy.rb`. When present, every memory decl + pool in the workspace is checked at compile time against: `max_ttl` / `default_ttl` / `max_entries` / `require_keyed_by_for scope:` / `ban_scope` / `allowed_pools`. Policy enforcement is hard-error (no per-gen override); defaults fill in missing `retain` before enforcement.
 - Memory writes happen only after `finalOk`; a failed validation/repair run does NOT append.
-- When `write_memory_via :Agent` is declared, the primary runner invokes the retro agent and applies its `MemoryWrites`; trivial-default writer is bypassed. Retro-agent failures emit trace steps with `ok: false` but do NOT fail the primary run (best-effort writes — the primary's output is the contract).
+- When `writes_memory_via :Agent` is declared, the primary runner invokes the retro agent and applies its `MemoryWrites`; trivial-default writer is bypassed. Retro-agent failures emit trace steps with `ok: false` but do NOT fail the primary run (best-effort writes — the primary's output is the contract).
 - Retro agents have `mode :retro`, `reads_trace_of :primary`, `returns MemoryWrites`, and a `remember(ctx)` method. The framework always invokes them via that method name.
 - Memory subsystem deps (`better-sqlite3`, `sqlite-vec`) are `optionalDependencies`. Installs without memory use MUST succeed without them. Gens that declare `memory :...` without the deps MUST receive a clear plan-time error.
 - The runner MUST emit `memory.read`, `memory.write`, and (when implemented) `memory.prune` trace events per slot. Agent-authored writes carry `written_by: 'agent:<ClassName>'`.
@@ -113,7 +113,7 @@ class SupportAgent < GenModel
   memory :conversation, strategy: :sliding_window, size: 20
   memory :user_facts,   strategy: :semantic, top_k: 5
 
-  write_memory_via :support_memory_agent
+  writes_memory_via :support_memory_agent
 end
 ```
 
@@ -298,7 +298,7 @@ Don't make the method name configurable. The standardization is the feature.
 
 ### `mode :retro` suppresses memory machinery
 
-A retro agent never triggers its own memory reads/writes — the guard in `runner.ts` (`const memoryDecls = isRetroMode ? [] : ...`) empties the decl list for `:retro` gens. Both because it doesn't make sense semantically (the retro agent IS the write path) and because a retro agent accidentally declaring `write_memory_via` would otherwise recurse.
+A retro agent never triggers its own memory reads/writes — the guard in `runner.ts` (`const memoryDecls = isRetroMode ? [] : ...`) empties the decl list for `:retro` gens. Both because it doesn't make sense semantically (the retro agent IS the write path) and because a retro agent accidentally declaring `writes_memory_via` would otherwise recurse.
 
 ### Best-effort writes — the graceful-degradation invariant
 
@@ -352,7 +352,7 @@ Only pools actually referenced by this gen are inlined under `policies.memory_po
 
 ## Implementation reference
 
-- **Ruby:** `ruby/cambium/runtime.rb` (`MemoryPool`, `MemoryPoolBuilder`, `memory`/`write_memory_via`/`reads_trace_of` DSL), `ruby/cambium/compile.rb` (pool resolution + IR emission).
+- **Ruby:** `ruby/cambium/runtime.rb` (`MemoryPool`, `MemoryPoolBuilder`, `memory`/`writes_memory_via`/`reads_trace_of` DSL), `ruby/cambium/compile.rb` (pool resolution + IR emission).
 - **TS backend:** `packages/cambium-runner/src/memory/backend.ts` (dynamic-import `better-sqlite3` + `sqlite-vec`; `open`, `append`, `readRecent`, `initSemantic`, `appendSemantic`, `searchSemantic`).
 - **TS integration:** `packages/cambium-runner/src/memory/runner-integration.ts` (`planMemory`, `readMemoryForRun`, `commitMemoryWrites`), `packages/cambium-runner/src/memory/retro-agent.ts` (class→file, subprocess dispatch, apply-with-sanitization), `packages/cambium-runner/src/memory/path.ts` + `packages/cambium-runner/src/memory/keys.ts` + `packages/cambium-runner/src/memory/prompt-block.ts`.
 - **Embed provider:** `packages/cambium-runner/src/providers/embed.ts` (oMLX + Ollama + SHA-256-seeded mock).

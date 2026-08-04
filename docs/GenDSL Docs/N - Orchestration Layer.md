@@ -77,7 +77,7 @@ Three, and exactly three:
 
 Loops, `map_over :collection`, model-decided branching, and dynamic-fan-out are out of scope until a forcing case appears.
 
-**`branch_on` exhaustiveness is enforced at compile time.** Either every enum value of the signal is matched by an `on` clause, or an explicit `default do ... end` block is declared. Missing both is a compile error. Forces the author to acknowledge every reachable path — same "no surprises at runtime" stance as the rest of the pipeline DSL.
+**`branch_on` exhaustiveness is enforced at compile time.** Either every enum value of the signal is matched by a `match` clause, or an explicit `default do ... end` block is declared. Missing both is a compile error. Forces the author to acknowledge every reachable path — same "no surprises at runtime" stance as the rest of the pipeline DSL.
 
 ### State and bindings
 
@@ -151,7 +151,7 @@ class CIReview < Cambium::Pipeline
     concurrency 4
     on_branch_failure :continue
     require :all
-    pass_context :surface_map
+    context :surface_map
   end
 
   step :fix, gen: Fixer, method: :patch,
@@ -173,7 +173,7 @@ When a `fan_out` has `concurrency > 1` and its branches share a grounded cacheab
 - **Zero inference** — a warm-up is a cache write with `max_tokens 16` whose completion is discarded, not an orchestration decision.
 - **Byte-identity** — the warm-up builds `(system, cacheablePrefix)` through the same assembler each branch uses, so the cache key matches. (Sliding-window memory recall augments `system` at runtime, after the warm-up; a gen with recall won't match and runs cold — write-only `:log` memory is unaffected.)
 - **Best-effort** — a warm-up failure never fails the fan-out; that group's branches just run cold. Outcomes surface in the `PipelineFanOut` trace `meta.prewarm`.
-- **On by default; opt out with `prewarm_cache false`.** Fan-out-level gates (entire prewarm skipped): `concurrency 1` (branch 1 warms the rest), single-branch fan-outs, `--mock` runs, and `prewarm_cache false`. Per-branch filter (inside `prewarmFanOut`): ungrounded branches and branches whose cacheable prefix is below the Anthropic cache floor (`MIN_CACHE_PREFIX_CHARS`) are excluded from the warm-up group; the prewarm still runs for the remaining grounded branches, so `meta.prewarm.groups` can be zero even when `meta.prewarm` is present.
+- **On by default; opt out with `prewarm false`.** Fan-out-level gates (entire prewarm skipped): `concurrency 1` (branch 1 warms the rest), single-branch fan-outs, `--mock` runs, and `prewarm false`. Per-branch filter (inside `prewarmFanOut`): ungrounded branches and branches whose cacheable prefix is below the Anthropic cache floor (`MIN_CACHE_PREFIX_CHARS`) are excluded from the warm-up group; the prewarm still runs for the remaining grounded branches, so `meta.prewarm.groups` can be zero even when `meta.prewarm` is present.
 
 This replaces the per-workspace pattern of hand-written tier-matched warm-up gens wired in ahead of the reviewer fan-out.
 
@@ -216,11 +216,11 @@ Compiles to three branches calling `DocumentReviewer.review(aspect: <each>)`.
 step :triage, gen: TriageGen, method: :assess
 
 branch_on bind(:triage).severity do
-  on :critical do
+  match :critical do
     step :page_oncall, gen: PageOncall, method: :notify
     step :remediate,   gen: RemediateGen, method: :plan
   end
-  on :high do
+  match :high do
     step :remediate, gen: RemediateGen, method: :plan
   end
   default do
@@ -229,7 +229,7 @@ branch_on bind(:triage).severity do
 end
 ```
 
-Every reachable path is either an `on` clause or the `default` block. The compiler validates that `severity` is an enum field on `TriageGen`'s `returns` schema and that the `on` values are valid members of that enum.
+Every reachable path is either a `match` clause or the `default` block. The compiler validates that `severity` is an enum field on `TriageGen`'s `returns` schema and that the `match` values are valid members of that enum.
 
 ### Explicit output composition
 
@@ -352,7 +352,7 @@ A pipeline compiles to a top-level IR document with one entry per operator. Each
       "concurrency": 4,
       "on_branch_failure": "continue",
       "require": { "kind": "all" },
-      "pass_context": ["surface_map"],
+      "context": ["surface_map"],
       "collect_into": "reviews"
     },
     {
