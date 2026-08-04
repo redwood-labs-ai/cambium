@@ -113,7 +113,15 @@ export async function execute(input: ExecInput, ctx?: ToolContext): Promise<Exec
     );
   }
 
-  const runtime = (ctx.execPolicy.runtime ?? 'native') as SubstrateName;
+  if (!ctx.execPolicy.runtime) {
+    // Should not be reachable after buildExecPolicy's Gate-3 enforcement
+    // (which throws on allowed + no-runtime). Belt-and-suspenders guard
+    // for code paths that construct ctx.execPolicy outside the policy parser.
+    throw new Error(
+      'execute_code: no runtime resolved in exec policy',
+    );
+  }
+  const runtime = ctx.execPolicy.runtime as SubstrateName;
   const substrate = getSubstrate(runtime);
 
   const opts: ExecOpts = {
@@ -127,15 +135,16 @@ export async function execute(input: ExecInput, ctx?: ToolContext): Promise<Exec
     maxOutputBytes: ctx.execPolicy.maxOutputBytes ?? DEFAULTS.maxOutputBytes,
   };
 
-  // ── RED-249: structured trace events + :native deprecation surface ──
+  // ── RED-249: structured trace events + unsafe_native audit surface ──
 
-  // :native is the deprecated fig-leaf path. One stderr warning per
-  // run (not per call) + a structured trace event on every dispatch
-  // so the trace.json can be grepped for unsandboxed execs.
+  // :native is the explicit sharp-knife opt-in path (unsafe_native: true).
+  // One stderr warning per run (not per call) + a structured trace event
+  // on every dispatch so the trace.json carries the unsandboxed-exec audit
+  // marker regardless of which consumer reads it.
   //
   // Intentional ordering: `tool.exec.unsandboxed` is emitted BEFORE
   // `ExecSpawned` so a trace truncated mid-dispatch still carries the
-  // deprecation marker. Flag before spawn is safer than flag after.
+  // audit marker. Flag before spawn is safer than flag after.
   if (runtime === 'native') {
     emitNativeUnsandboxedWarning(ctx.toolName, ctx.emitStep);
     ctx.emitStep?.({

@@ -98,6 +98,15 @@ describe('execute_code (RED-248 dispatch)', () => {
     await expect(execute({ language: 'node', code: 'console.log("nope")' }, ctx))
       .rejects.toThrow(/exec is not allowed/);
   });
+
+  // Fix 2: belt-and-suspenders guard — if allowed is true but runtime is
+  // somehow undefined (should not occur after buildExecPolicy Gate-3
+  // enforcement), the tool throws rather than silently falling through.
+  it('throws when allowed is true but runtime is undefined (no silent native fallback)', async () => {
+    const ctx = ctxWithExec({ allowed: true });
+    await expect(execute({ language: 'node', code: 'console.log("hi")' }, ctx))
+      .rejects.toThrow(/no runtime resolved in exec policy/);
+  });
 });
 
 // RED-249: structured trace events on every dispatch.

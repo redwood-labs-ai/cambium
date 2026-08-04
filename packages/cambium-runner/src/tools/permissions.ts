@@ -121,7 +121,15 @@ export function buildSecurityPolicy(irPolicies: any): SecurityPolicy {
  *  from `security.network` above). Inheritance is wholesale — narrower-
  *  than-outer is permitted if authors explicitly pass a Hash; widening
  *  beyond the outer network is something the design note flagged as
- *  intersection-semantics but v1 doesn't enforce at parse time. */
+ *  intersection-semantics but v1 doesn't enforce at parse time.
+ *
+ *  Gate-3 runtime enforcement (mirrors the Ruby compile-time gate for
+ *  served IR that bypasses the compiler — AUD-004 pattern):
+ *  - `{ allowed: true }` with no runtime and no unsafe_native → throws.
+ *  - `runtime: 'native'` without `unsafe_native: true` → throws.
+ *  - `unsafe_native: true` → sets `runtime: 'native'`; CAMBIUM_STRICT_EXEC=1 → throws.
+ *  - Sandboxed runtimes (wasm / firecracker) → unchanged.
+ */
 /** Valid runtime names. Duplicated from `exec-substrate/registry.ts`'s
  *  `KNOWN_SUBSTRATES` on purpose — that module owns runtime dispatch,
  *  this one owns policy shape, and we don't want a cycle. A test locks
@@ -146,8 +154,36 @@ function buildExecPolicy(
     }
     out.runtime = exec.runtime as ExecPolicy['runtime'];
   }
+
+  // Gate-3 enforcement at the runner level (mirrors Ruby compile-time gate;
+  // re-runs here so served / hand-crafted IR that bypasses the compiler
+  // cannot reach native execution without the explicit opt-in — AUD-004 pattern).
   if (exec.unsafe_native === true) {
+    // Explicit sharp-knife opt-in: set runtime to native and carry the flag.
     out.unsafe_native = true;
+    out.runtime = 'native';
+    // CAMBIUM_STRICT_EXEC=1 blocks even the explicit opt-in (org lockdown).
+    if (process.env['CAMBIUM_STRICT_EXEC'] === '1') {
+      throw new Error(
+        'security exec: CAMBIUM_STRICT_EXEC=1 prohibits unsandboxed native exec in this environment.',
+      );
+    }
+  } else if (out.runtime === 'native') {
+    // runtime: 'native' without unsafe_native: true — reject. The only
+    // reachable path for a legitimately compiled gen is unsafe_native (Gate 3).
+    // A hand-crafted IR that sets runtime: 'native' directly must be rejected.
+    throw new Error(
+      `Invalid exec policy: runtime 'native' requires unsafe_native: true ` +
+      `(use runtime: :wasm | :firecracker to sandbox).`,
+    );
+  } else if (out.allowed && out.runtime === undefined) {
+    // Bare { allowed: true } with no runtime and no unsafe_native.
+    // Gate 3 removed this back-compat path — it can only be served / hand-crafted IR.
+    throw new Error(
+      `Invalid exec policy: exec is allowed but no runtime is specified. ` +
+      `Declare a sandboxed runtime (runtime: :wasm | :firecracker) ` +
+      `or use unsafe_native: true to explicitly opt into unsandboxed native.`,
+    );
   }
   // Re-enforce the Ruby-side bounds on numeric exec fields so a hand-crafted
   // or post-processed IR that bypasses the compile step can't smuggle out-of-
