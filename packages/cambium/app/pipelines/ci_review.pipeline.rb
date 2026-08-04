@@ -37,8 +37,8 @@ class CiReview < Pipeline
     concurrency 4
     on_branch_failure :continue
     require :all
-    pass_context :surface_map
-    prewarm_cache false
+    context :surface_map
+    prewarm false
   end
 
   step :fix, gen: Fixer, method: :patch,

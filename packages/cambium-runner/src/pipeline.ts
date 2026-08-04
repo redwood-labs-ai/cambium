@@ -463,7 +463,7 @@ export async function runPipelineFromIr(
   // bind() lookups resolve against the rehydrated stepResults; the full
   // `operators` list is still used below to compute the top-level dispatch
   // seed prior (the output of the operator immediately before the resume
-  // point), so a first-dispatched fan_out's pass_context reads the prior
+  // point), so a first-dispatched fan_out's context reads the prior
   // that was rehydrated rather than seeing `null`.
   let dispatchOps = operators;
   if (opts.replay) {
@@ -729,7 +729,7 @@ interface DispatchResult {
  * `seedPrior` is the output of the operator immediately preceding this
  * block (or null when nothing precedes it). The loop threads a running
  * `prevOutput`, updated as each result-producing operator (Step, FanOut)
- * completes, so a fan_out's `pass_context` reads the contextually-correct
+ * completes, so a fan_out's `context` reads the contextually-correct
  * prior even across a branch_on nesting boundary. A BranchOn records no
  * result, so it does NOT advance `prevOutput`.
  */
@@ -1309,7 +1309,7 @@ export function fanOutPrewarmEligible(
   branchCount: number,
   mock: boolean,
 ): boolean {
-  return op.prewarm_cache !== false && concurrency > 1 && branchCount > 1 && !mock;
+  return op.prewarm !== false && concurrency > 1 && branchCount > 1 && !mock;
 }
 
 /**
@@ -1451,11 +1451,11 @@ async function runFanOut(
     };
   }
 
-  // Build the shared pass_context map from the prior operator's output.
+  // Build the shared context map from the prior operator's output.
   // `priorResult` is threaded in by dispatchOperatorList — the output of
   // the operator immediately preceding this fan_out, resolved correctly
   // across branch_on nesting (null when no prior operator exists).
-  const passContextFields: string[] = op.pass_context ?? [];
+  const passContextFields: string[] = op.context ?? [];
   const passContext: Record<string, any> = {};
   for (const field of passContextFields) {
     passContext[field] = priorResult?.[field];
@@ -1649,7 +1649,7 @@ async function runBranch(
     }
   }
 
-  // Merge pass_context (from the prior step) + per-branch context
+  // Merge context (from the prior step) + per-branch context
   // (from homogeneous sugar's `as: :slot`) into the sub-gen's IR
   // context. Both layers contribute, with branch-specific context
   // winning on conflict.

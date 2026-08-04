@@ -1239,8 +1239,8 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   // WRITERS, not primary gens with their own memory. Skip the whole
   // memory machinery for them — a retro agent shouldn't have its own
   // memory block injected, and it shouldn't trigger a nested retro
-  // invocation on its own write_memory_via. This guard also prevents
-  // infinite recursion if someone accidentally sets write_memory_via
+  // invocation on its own writes_memory_via. This guard also prevents
+  // infinite recursion if someone accidentally sets writes_memory_via
   // on a retro agent.
   const isRetroMode = ir.mode === 'retro';
   const memoryDecls = isRetroMode ? [] : (ir.policies?.memory ?? []);
@@ -1994,7 +1994,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
 
   // ── Memory (RED-215 phase 3): commit turn on success ────────────────
   // Trivial-default write: one {input, output} entry per writable
-  // bucket. If the gen declared write_memory_via, defer to the retro
+  // bucket. If the gen declared writes_memory_via, defer to the retro
   // agent (phase 4) — we emit a trace note so the run's memory story
   // is visible even before the agent runtime lands.
   if (memoryPlans.length > 0) {
@@ -2027,7 +2027,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
           ok: false,
           errors: [{
             message:
-              `write_memory_via :${agentClass} declared but no .cmb.rb file found. ` +
+              `writes_memory_via :${agentClass} declared but no .cmb.rb file found. ` +
               'Searched sibling of primary and the framework app/gens/ fallback.',
           }],
         });

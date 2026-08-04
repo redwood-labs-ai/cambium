@@ -33,7 +33,7 @@ const PASS_CONTEXT = { raw_diff: LONG_DIFF, diff_surface: 'ruby_dsl, runner' };
 const UNIFIED_SYSTEM = 'You are a unified reviewer.';
 
 /** A reviewer sub-IR: shared system + returns + grounding, raw_diff arrives
- *  via pass_context (empty own context), tier set by model id. */
+ *  via context (empty own context), tier set by model id. */
 function reviewerIr(modelId: string, overrides: Record<string, any> = {}): any {
   return {
     id: 'reviewer',
@@ -74,7 +74,7 @@ function fiveBranchMemo(): Map<string, any> {
 }
 
 describe('fanOutPrewarmEligible', () => {
-  const op = {}; // prewarm_cache unset → default on
+  const op = {}; // prewarm unset → default on
 
   it('multi-branch, concurrency > 1, not mock → eligible', () => {
     expect(fanOutPrewarmEligible(op, 5, 5, false)).toBe(true);
@@ -88,8 +88,8 @@ describe('fanOutPrewarmEligible', () => {
   it('--mock → not eligible (no real cache)', () => {
     expect(fanOutPrewarmEligible(op, 5, 5, true)).toBe(false);
   });
-  it('prewarm_cache: false → not eligible', () => {
-    expect(fanOutPrewarmEligible({ prewarm_cache: false }, 5, 5, false)).toBe(false);
+  it('prewarm: false → not eligible', () => {
+    expect(fanOutPrewarmEligible({ prewarm: false }, 5, 5, false)).toBe(false);
   });
 });
 

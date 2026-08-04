@@ -77,7 +77,7 @@ export function resolveDefaultCli(override?: string): string | null {
 /**
  * RED-215 phase 4: retro memory-agent dispatch.
  *
- * After a primary gen completes successfully with `write_memory_via
+ * After a primary gen completes successfully with `writes_memory_via
  * :SomeAgent` declared, the primary runner spawns the agent as a
  * separate `cambium run` subprocess, hands it a JSON context describing
  * the run, and applies the structured writes returned from its

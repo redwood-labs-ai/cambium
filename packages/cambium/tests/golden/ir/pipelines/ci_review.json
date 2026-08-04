@@ -76,10 +76,10 @@
           "kind": "all"
         },
         "concurrency": 4,
-        "pass_context": [
+        "context": [
           "surface_map"
         ],
-        "prewarm_cache": false
+        "prewarm": false
       },
       {
         "kind": "Step",

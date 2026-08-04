@@ -1781,7 +1781,7 @@ module Cambium
 
       # RED-215: declare a memory slot the gen wants read-injected
       # before generation (and, when a memory agent is wired up via
-      # `write_memory_via`, written to after generation).
+      # `writes_memory_via`, written to after generation).
       #
       #   memory :conversation, strategy: :sliding_window, size: 20
       #   memory :activity_log, strategy: :log,            scope: :global
@@ -1880,8 +1880,8 @@ module Cambium
       # primary gen and decides what to commit to memory. Value is the
       # class name (or snake_case form) of another GenModel; phase 4
       # wires the runtime scheduling.
-      def write_memory_via(agent_name)
-        _cambium_defaults[:write_memory_via] = agent_name.to_s
+      def writes_memory_via(agent_name)
+        _cambium_defaults[:writes_memory_via] = agent_name.to_s
       end
 
       # RED-215: for a retro-mode memory agent, declare which primary

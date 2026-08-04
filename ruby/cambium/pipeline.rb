@@ -71,17 +71,17 @@ module Cambium
 
   # DSL helpers used inside `fan_out` blocks.
   class FanOutDSL
-    attr_reader :_branches, :_concurrency, :_on_branch_failure, :_require_threshold, :_pass_context,
-                :_homogeneous, :_prewarm_cache
+    attr_reader :_branches, :_concurrency, :_on_branch_failure, :_require_threshold, :_context,
+                :_homogeneous, :_prewarm
 
     def initialize
       @_branches            = []
       @_concurrency         = nil
       @_on_branch_failure   = 'continue'
       @_require_threshold   = { 'kind' => 'all' }
-      @_pass_context        = nil
+      @_context             = nil
       @_homogeneous         = nil  # set when `agent ...; over ...` sugar is used
-      @_prewarm_cache       = nil  # nil = default (runner prewarms); false = opt out
+      @_prewarm             = nil  # nil = default (runner prewarms); false = opt out
     end
 
     # Heterogeneous form: one explicit branch per call.
@@ -141,22 +141,22 @@ module Cambium
       end
     end
 
-    # pass_context :surface_map, :other_field — copy these fields from
+    # context :surface_map, :other_field — copy these fields from
     # the upstream step's output into every branch's input context.
-    def pass_context(*fields)
-      @_pass_context = fields.map(&:to_s)
+    def context(*fields)
+      @_context = fields.map(&:to_s)
     end
 
-    # prewarm_cache false — opt out of the runner's automatic per-tier
+    # prewarm false — opt out of the runner's automatic per-tier
     # prompt-cache warm-up. Default (unset) lets the runner prime the shared
     # cacheable prefix once per (model tier × prefix) before dispatching
     # branches, so branches read the cache instead of racing cold. Only
     # meaningful when concurrency > 1 and branches share a grounded prefix.
-    def prewarm_cache(value)
+    def prewarm(value)
       unless value == true || value == false
-        raise ArgumentError, "prewarm_cache: must be true or false (got #{value.inspect})"
+        raise ArgumentError, "prewarm: must be true or false (got #{value.inspect})"
       end
-      @_prewarm_cache = value
+      @_prewarm = value
     end
   end
 
@@ -169,11 +169,11 @@ module Cambium
       @_default  = nil
     end
 
-    # on :critical do ... end — value(s) match this branch.
-    # on :low, :info do ... end — multiple values fold into the same branch.
-    def on(*values, &block)
-      raise ArgumentError, "branch_on on() requires at least one value" if values.empty?
-      raise ArgumentError, "branch_on on() requires a block" unless block
+    # match :critical do ... end — value(s) match this branch.
+    # match :low, :info do ... end — multiple values fold into the same branch.
+    def match(*values, &block)
+      raise ArgumentError, "branch_on match() requires at least one value" if values.empty?
+      raise ArgumentError, "branch_on match() requires a block" unless block
 
       body = BranchBodyDSL.new
       body.instance_eval(&block)
@@ -194,7 +194,7 @@ module Cambium
     end
   end
 
-  # Shared operator-building shape, used inside `branch_on` `on`/`default`
+  # Shared operator-building shape, used inside `branch_on` `match`/`default`
   # blocks AND inside `fan_out` (when fan_out grows nested operators in v1.5+).
   # The Pipeline class also recapitulates these methods so its class body
   # records into _cambium_pipeline_defaults['operators'].
@@ -597,7 +597,7 @@ module Cambium
       end
 
       # branch_on bind(:triage).severity do
-      #   on :critical do ... end
+      #   match :critical do ... end
       #   default do ... end
       # end
       def branch_on(signal_ref, &block)
@@ -650,12 +650,12 @@ module Cambium
           'require'           => dsl._require_threshold
         }
         op['concurrency']   = dsl._concurrency  if dsl._concurrency
-        op['pass_context']  = dsl._pass_context if dsl._pass_context
+        op['context']       = dsl._context if dsl._context
         op['_homogeneous']  = dsl._homogeneous  if dsl._homogeneous
         # Emit whenever explicitly set (true or false); absent when unset,
         # which keeps existing pipeline IR byte-identical and lets the runner
         # default to on.
-        op['prewarm_cache'] = dsl._prewarm_cache unless dsl._prewarm_cache.nil?
+        op['prewarm'] = dsl._prewarm unless dsl._prewarm.nil?
         op
       end
 
@@ -933,7 +933,7 @@ module Cambium
           validate_with!(op['with'], op['id'], input_names, prior_op_ids, klass)
         when 'FanOut'
           # fan_out branches don't carry `with:` clauses in v1; the
-          # `pass_context` field is validated by FanOutDSL at decl time.
+          # `context` field is validated by FanOutDSL at decl time.
         when 'BranchOn'
           validate_branch_on!(op, input_names, prior_op_ids, klass)
         end
@@ -972,7 +972,7 @@ module Cambium
 
         unless has_on || has_default
           raise Cambium::CompileError,
-                "branch_on on #{klass.name} declares neither an `on` clause nor a " \
+                "branch_on on #{klass.name} declares neither a `match` clause nor a " \
                 "`default` block — the operator would never fire."
         end
 

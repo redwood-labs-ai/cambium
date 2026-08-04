@@ -1143,8 +1143,8 @@ class ${pascal} < Pipeline
   #   concurrency 2
   #   on_branch_failure :continue
   #   require :all
-  #   pass_context :summary
-  #   # prewarm_cache false  # default on: with concurrency > 1 and a shared
+  #   context :summary
+  #   # prewarm false        # default on: with concurrency > 1 and a shared
   #   #                      # grounded prefix, the runner auto-warms the
   #   #                      # provider prompt cache once per model tier
   #   #                      # before dispatch (N - Orchestration Layer).
@@ -1152,7 +1152,7 @@ class ${pascal} < Pipeline
 
   # Example branch_on (deterministic conditional, REQUIRES a default block):
   # branch_on bind(:triage).severity do
-  #   on :critical do
+  #   match :critical do
   #     step :urgent, gen: TODOUrgent, method: :handle
   #   end
   #   default do

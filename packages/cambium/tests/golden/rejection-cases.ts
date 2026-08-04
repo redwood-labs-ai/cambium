@@ -499,7 +499,7 @@ class TestPipeline < Pipeline
   input :doc, schema: AnalysisReport
   step :analyze, gen: Analyzer, method: :analyze, with: { ctx: bind(:input).doc }
   branch_on bind(:analyze).severity do
-    on :high do
+    match :high do
       step :remediate, gen: Analyzer, method: :analyze
     end
   end
@@ -525,12 +525,12 @@ end
     expectMessage: 'operator :analyze on TestPipeline references bind(:nonexistent)',
   },
   {
-    name: 'pipeline: prewarm_cache non-Boolean',
+    name: 'pipeline: prewarm non-Boolean',
     dsl: `
 class TestPipeline < Pipeline
   fan_out :reviewers, collect_into: :reviews do
     branch :security, agent: SecurityReviewer, method: :review
-    prewarm_cache :yes
+    prewarm :yes
   end
   def review(doc)
   end
@@ -538,6 +538,6 @@ end
 `.trim(),
     filename: 'test_pipeline.pipeline.rb',
     expectClass: 'ArgumentError',
-    expectMessage: 'prewarm_cache: must be true or false',
+    expectMessage: 'prewarm: must be true or false',
   },
 ]

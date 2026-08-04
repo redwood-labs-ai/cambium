@@ -269,7 +269,7 @@ class P < Pipeline
     concurrency 2
     on_branch_failure :continue
     require :at_least, 1
-    pass_context :surface_map
+    context :surface_map
   end
   def run(pr); end
 end
@@ -283,14 +283,14 @@ end
     expect(fan.concurrency).toBe(2)
     expect(fan.on_branch_failure).toBe('continue')
     expect(fan.require).toEqual({ kind: 'at_least', n: 1 })
-    expect(fan.pass_context).toEqual(['surface_map'])
+    expect(fan.context).toEqual(['surface_map'])
     expect(fan.branches).toEqual([
       { id: 'security', agent: 'Analyst', method: 'analyze' },
       { id: 'perf',     agent: 'Analyst', method: 'analyze' },
     ])
   })
 
-  it('defaults: on_branch_failure="continue", require={kind:"all"}, no concurrency, no pass_context', () => {
+  it('defaults: on_branch_failure="continue", require={kind:"all"}, no concurrency, no context', () => {
     const body = `
 class P < Pipeline
   input :pr, schema: AnalysisReport
@@ -306,45 +306,45 @@ end
     expect(fan.on_branch_failure).toBe('continue')
     expect(fan.require).toEqual({ kind: 'all' })
     expect(fan.concurrency).toBeUndefined()
-    expect(fan.pass_context).toBeUndefined()
+    expect(fan.context).toBeUndefined()
     // Default-on prewarm emits NO key — existing pipeline IR stays byte-identical.
-    expect(fan.prewarm_cache).toBeUndefined()
+    expect(fan.prewarm).toBeUndefined()
   })
 
-  it('prewarm_cache false emits the opt-out key; true emits true', () => {
+  it('prewarm false emits the opt-out key; true emits true', () => {
     const mk = (val: string) => `
 class P < Pipeline
   input :pr, schema: AnalysisReport
   fan_out :reviewers, collect_into: :reviews do
     branch :a, agent: Analyst, method: :analyze
-    prewarm_cache ${val}
+    prewarm ${val}
   end
   def run(pr); end
 end
 `
     const off = compilePipeline(mk('false'))
     expect(off.stderr).toBe('')
-    expect(off.ir.operators[0].prewarm_cache).toBe(false)
+    expect(off.ir.operators[0].prewarm).toBe(false)
 
     const on = compilePipeline(mk('true'))
     expect(on.stderr).toBe('')
-    expect(on.ir.operators[0].prewarm_cache).toBe(true)
+    expect(on.ir.operators[0].prewarm).toBe(true)
   })
 
-  it('prewarm_cache rejects non-Boolean values', () => {
+  it('prewarm rejects non-Boolean values', () => {
     const body = `
 class P < Pipeline
   input :pr, schema: AnalysisReport
   fan_out :reviewers, collect_into: :reviews do
     branch :a, agent: Analyst, method: :analyze
-    prewarm_cache :yes
+    prewarm :yes
   end
   def run(pr); end
 end
 `
     const { ir, stderr } = compilePipeline(body)
     expect(ir).toBeNull()
-    expect(stderr).toContain('prewarm_cache')
+    expect(stderr).toContain('prewarm')
   })
 
   it('captures homogeneous-fan-out sugar (agent + over + as)', () => {
@@ -394,11 +394,11 @@ class P < Pipeline
   input :pr, schema: AnalysisReport
   step :triage, gen: Analyst, method: :analyze
   branch_on bind(:triage).severity do
-    on :critical do
+    match :critical do
       step :page, gen: Analyst, method: :analyze
       step :remediate, gen: Analyst, method: :analyze
     end
-    on :high do
+    match :high do
       step :remediate, gen: Analyst, method: :analyze
     end
     default do
@@ -430,13 +430,13 @@ end
     expect(br.default).toEqual([])
   })
 
-  it('allows multiple values per on clause', () => {
+  it('allows multiple values per match clause', () => {
     const body = `
 class P < Pipeline
   input :pr, schema: AnalysisReport
   step :triage, gen: Analyst, method: :analyze
   branch_on bind(:triage).severity do
-    on :low, :info do
+    match :low, :info do
     end
     default do
     end
@@ -454,7 +454,7 @@ end
 class P < Pipeline
   input :pr, schema: AnalysisReport
   branch_on :severity do
-    on :critical do; end
+    match :critical do; end
     default do; end
   end
   def run(pr); end
@@ -631,13 +631,13 @@ end
     expect(stderr).toMatch(/references step :ghost/)
   })
 
-  it('validates bind() refs inside nested operators (branch_on `on` body)', () => {
+  it('validates bind() refs inside nested operators (branch_on `match` body)', () => {
     const body = `
 class P < Pipeline
   input :pr, schema: AnalysisReport
   step :triage, gen: Analyst, method: :analyze
   branch_on bind(:triage).severity do
-    on :critical do
+    match :critical do
       step :remediate, gen: Analyst, method: :analyze,
         with: { ctx: bind(:nope).field }
     end
@@ -658,7 +658,7 @@ class P < Pipeline
   input :pr, schema: AnalysisReport
   step :triage, gen: Analyst, method: :analyze
   branch_on bind(:triage).severity do
-    on :critical do; end
+    match :critical do; end
     default do
       step :fallback, gen: Analyst, method: :analyze,
         with: { ctx: bind(:input).missing }
@@ -681,8 +681,8 @@ class P < Pipeline
   input :pr, schema: AnalysisReport
   step :triage, gen: Analyst, method: :analyze
   branch_on bind(:triage).severity do
-    on :critical do; end
-    on :high do; end
+    match :critical do; end
+    match :high do; end
   end
   def run(pr); end
 end
@@ -692,7 +692,7 @@ end
     expect(stderr).toMatch(/branch_on .* requires an explicit `default do \.\.\. end` block/)
   })
 
-  it('rejects branch_on with no on clauses and no default (empty operator)', () => {
+  it('rejects branch_on with no match clauses and no default (empty operator)', () => {
     const body = `
 class P < Pipeline
   input :pr, schema: AnalysisReport
@@ -704,7 +704,7 @@ end
 `
     const { ir, stderr } = compilePipeline(body)
     expect(ir).toBeNull()
-    expect(stderr).toMatch(/declares neither an `on` clause nor a `default` block/)
+    expect(stderr).toMatch(/declares neither a `match` clause nor a `default` block/)
   })
 
   it('rejects branch_on whose signal references an undeclared step', () => {
@@ -712,7 +712,7 @@ end
 class P < Pipeline
   input :pr, schema: AnalysisReport
   branch_on bind(:ghost).severity do
-    on :a do; end
+    match :a do; end
     default do; end
   end
   def run(pr); end
@@ -729,7 +729,7 @@ end
 class P < Pipeline
   input :pr, schema: AnalysisReport
   branch_on bind(:input).pr do
-    on :critical do; end
+    match :critical do; end
     default do; end
   end
   def run(pr); end
@@ -740,14 +740,14 @@ end
     expect(stderr).toMatch(/branch_on .* must use a bind\(:step_id\)\.field signal/)
   })
 
-  it('accepts branch_on with both on clauses AND an explicit default', () => {
+  it('accepts branch_on with both match clauses AND an explicit default', () => {
     const body = `
 class P < Pipeline
   input :pr, schema: AnalysisReport
   step :triage, gen: Analyst, method: :analyze
   branch_on bind(:triage).severity do
-    on :critical do; end
-    on :high do; end
+    match :critical do; end
+    match :high do; end
     default do; end
   end
   def run(pr); end
@@ -878,7 +878,7 @@ describe('RED-381 Phase A.3: canonical CI Review fixture', () => {
     expect(fanOut.concurrency).toBe(4)
     expect(fanOut.on_branch_failure).toBe('continue')
     expect(fanOut.require).toEqual({ kind: 'all' })
-    expect(fanOut.pass_context).toEqual(['surface_map'])
+    expect(fanOut.context).toEqual(['surface_map'])
     expect(fanOut.branches.map((b: any) => b.id)).toEqual([
       'security',
       'architectural',

@@ -666,8 +666,8 @@ end
     expect(fan.meta.succeeded).toBe(3);
   });
 
-  it('pass_context wiring on a top-level fan_out compiles + dispatches (structural)', () => {
-    // recon → fan_out with pass_context :summary.
+  it('context wiring on a top-level fan_out compiles + dispatches (structural)', () => {
+    // recon → fan_out with context :summary.
     //
     // STRUCTURAL ONLY: under --mock, mockGenerate returns a fixed summary
     // and cannot carry an upstream-derived sentinel into a branch's
@@ -684,7 +684,7 @@ class P < Pipeline
   fan_out :reviewers, collect_into: :reviews do
     branch :a, agent: Analyst, method: :analyze
     branch :b, agent: Analyst, method: :analyze
-    pass_context :summary
+    context :summary
   end
   def run(doc); end
 end
@@ -693,7 +693,7 @@ end
     const result = runPipelineCli(pipePath, 'run', join(REPO_ROOT, FIXTURE));
     expect(result.status).toBe(0);
     const trace = readRunTrace(result.stderr);
-    // The fan-out completes; pass_context plumbing didn't throw.
+    // The fan-out completes; context plumbing didn't throw.
     expect(trace.operators[1].type).toBe('PipelineFanOut');
     expect(trace.operators[1].ok).toBe(true);
   });
@@ -1322,17 +1322,17 @@ describe('RED-381 Phase D: branch_on conditional routing', () => {
     return trace;
   }
 
-  it('emits a PipelineBranchOn trace step and fires the default block when no on clause matches', () => {
+  it('emits a PipelineBranchOn trace step and fires the default block when no match clause matches', () => {
     // Analyst's mock returns summary="Mock analysis (model provider not
-    // available).", which won't match any `on` literal here — the
+    // available).", which won't match any `match` literal here — the
     // default block fires.
     const pipePath = writePipelineWorkspace(`
 class P < Pipeline
   input :doc, schema: AnalysisReport
   step :triage, gen: Analyst, method: :analyze
   branch_on bind(:triage).summary do
-    on :critical do; end
-    on :info, :debug do; end
+    match :critical do; end
+    match :info, :debug do; end
     default do
       step :fallback, gen: Analyst, method: :analyze
     end
@@ -1360,9 +1360,9 @@ end
     expect(br.operators[0].id).toBe('fallback');
   });
 
-  it('runs the matching `on` block and skips others', () => {
+  it('runs the matching `match` block and skips others', () => {
     // SignalAgent returns an output whose `summary` field is exactly
-    // "critical" so we can deterministically match an `on` clause.
+    // "critical" so we can deterministically match a `match` clause.
     const signalAgentBody = `
 class SignalAgent < GenModel
   model "omlx:stub"
@@ -1386,7 +1386,7 @@ class P < Pipeline
   input :doc, schema: AnalysisReport
   step :triage, gen: SignalAgent, method: :analyze
   branch_on bind(:triage).summary do
-    on "Mock analysis (model provider not available)." do
+    match "Mock analysis (model provider not available)." do
       step :critical_action, gen: Analyst, method: :analyze
     end
     default do
@@ -1404,7 +1404,7 @@ end
     expect(br.type).toBe('PipelineBranchOn');
     expect(br.default_fired).toBe(false);
     expect(br.fired_branch).toEqual(['Mock analysis (model provider not available).']);
-    // The matched on block's nested step appears under br.operators.
+    // The matched match block's nested step appears under br.operators.
     expect(br.operators).toHaveLength(1);
     expect(br.operators[0].id).toBe('critical_action');
   });
@@ -1415,7 +1415,7 @@ class P < Pipeline
   input :doc, schema: AnalysisReport
   step :triage, gen: Analyst, method: :analyze
   branch_on bind(:triage).summary do
-    on :critical do; end
+    match :critical do; end
     default do
       step :pre, gen: Analyst, method: :analyze
       fan_out :reviewers, collect_into: :reviews do
@@ -1460,7 +1460,7 @@ class P < Pipeline
   input :doc, schema: AnalysisReport
   step :triage, gen: Analyst, method: :analyze
   branch_on bind(:triage).summary do
-    on :critical do; end
+    match :critical do; end
     default do
       step :bad, gen: FailAgent, method: :analyze
     end
@@ -1485,7 +1485,7 @@ class P < Pipeline
   input :doc, schema: AnalysisReport
   step :triage, gen: Analyst, method: :analyze
   branch_on bind(:triage).summary do
-    on :critical do; end
+    match :critical do; end
     default do
       step :a, gen: Analyst, method: :analyze
       step :b, gen: Analyst, method: :analyze
