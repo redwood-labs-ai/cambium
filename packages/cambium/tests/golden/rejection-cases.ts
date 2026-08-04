@@ -138,6 +138,43 @@ end
     expectMessage: 'unknown security keys: bogus_key',
   },
 
+  {
+    name: 'security: exec { allowed: true } no longer defaults to native (Gate 3)',
+    dsl: `
+class TestGen < GenModel
+  model "omlx:some-model"
+  system "inline"
+  security exec: { allowed: true }
+  returns do
+    field :result, String
+  end
+  def analyze(x)
+    generate "x"
+  end
+end
+`.trim(),
+    expectClass: 'Cambium::CompileError',
+    expectMessage: 'no longer defaults to unsandboxed native',
+  },
+  {
+    name: 'security: exec runtime: :native is a compile error (Gate 3)',
+    dsl: `
+class TestGen < GenModel
+  model "omlx:some-model"
+  system "inline"
+  security exec: { runtime: :native }
+  returns do
+    field :result, String
+  end
+  def analyze(x)
+    generate "x"
+  end
+end
+`.trim(),
+    expectClass: 'Cambium::CompileError',
+    expectMessage: 'runtime: :native is no longer accepted',
+  },
+
   // ── budget ────────────────────────────────────────────────────────────────
   {
     name: 'budget: per_tool not a Hash',

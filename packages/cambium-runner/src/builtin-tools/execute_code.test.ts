@@ -199,7 +199,7 @@ describe('execute_code — :native deprecation (RED-249)', () => {
     } finally {
       (process.stderr as any).write = originalWrite;
     }
-    const warnings = captured.filter(c => c.includes('WARNING: execute_code uses exec runtime :native'));
+    const warnings = captured.filter(c => c.includes('WARNING: execute_code runs with unsafe_native exec'));
     expect(warnings.length).toBe(1);
   });
 
@@ -221,7 +221,7 @@ describe('execute_code — :native deprecation (RED-249)', () => {
     } finally {
       (process.stderr as any).write = originalWrite;
     }
-    const warnings = captured.filter(c => c.includes('WARNING: execute_code uses exec runtime :native'));
+    const warnings = captured.filter(c => c.includes('WARNING: execute_code runs with unsafe_native exec'));
     expect(warnings.length).toBe(2);
   });
 });
