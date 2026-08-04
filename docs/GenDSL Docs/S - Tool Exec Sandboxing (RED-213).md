@@ -36,9 +36,9 @@ Microvirt isolation via Firecracker microVMs on a Linux host with KVM. Engine-mo
 
 Cold-start ~125ms, warm pool ~10ms. Linux-only. Requires KVM access (so: not in unprivileged containers; not on macOS without a Linux VM). When a gen declares `runtime: :firecracker` on a host where Firecracker isn't available, the runner errors at startup with a clear message.
 
-### `:native` (back-compat fig-leaf, deprecated)
+### `:native` (explicit sharp-knife opt-out via `unsafe_native: true`)
 
-Today's behavior — `execSync` with no isolation. Continues to compile so existing in-tree gens don't break, but emits a `tool.exec.unsandboxed` trace event and a stderr deprecation warning on every run. Future strict-mode flag (`CAMBIUM_STRICT_EXEC=1`) hard-fails on it. New scaffolds default to `:wasm`.
+`execSync` with no isolation. As of Gate 3 (0.9 release), `:native` is only accessible via the explicit `security exec: { unsafe_native: true }` opt-out. `security exec: { allowed: true }` with no runtime and `security exec: { runtime: :native }` are compile errors. Emits a `tool.exec.unsandboxed` trace event and a stderr warning on every call. `CAMBIUM_STRICT_EXEC=1` additionally blocks `unsafe_native: true` for org-wide lockdown. New scaffolds default to `:wasm`.
 
 ### Why two, not one
 
@@ -114,13 +114,14 @@ The handler for `execute_code` selects the substrate based on `ir.policies.secur
 
 ### 1. Substrate selection — settled
 
-WASM (default) + Firecracker (opt-in) + `:native` (deprecated back-compat). See above.
+WASM (default) + Firecracker (opt-in) + `:native` (explicit sharp-knife opt-out via `unsafe_native: true`). See above.
 
 ### 2. DSL surface — settled
 
 ```ruby
+# Sandboxed (preferred):
 security exec: {
-  runtime: :wasm,                  # :wasm (default for new gens) | :firecracker | :native (deprecated)
+  runtime: :wasm,                  # :wasm (default for new gens) | :firecracker
   cpu: 0.5,                        # cores; range 0.1–4.0
   memory: 256,                     # MB; range 16–4096
   timeout: 30,                     # seconds; range 1–600
@@ -128,11 +129,15 @@ security exec: {
   filesystem: :none,               # :none | :inherit | { allowlist_paths: [...] }
   max_output_bytes: 50_000,
 }
+
+# Explicit sharp-knife opt-in (unsandboxed, loud, discouraged):
+security exec: { unsafe_native: true }
 ```
 
-- **Required field:** `runtime`. Everything else has sensible defaults.
+- **Sandboxed gens:** `runtime:` is required. Everything else has sensible defaults.
+- **Unsandboxed opt-in:** `unsafe_native: true` emits `{ allowed: true, runtime: 'native', unsafe_native: true }` in the IR. Every call emits `tool.exec.unsandboxed` in the trace and a per-run stderr warning. `CAMBIUM_STRICT_EXEC=1` blocks this at compile time.
+- **Gate-3 compile errors (removed forms):** `{ allowed: true }` with no runtime and `{ runtime: :native }` are both compile errors. Authors must migrate.
 - **Inheritance semantics:** `network: :inherit` means "the sandbox sees the same allowlist the gen's `security network:` block declares." Author can narrow further (intersection) but never widen. Same shape for `filesystem: :inherit`.
-- **Back-compat:** the existing `{ allowed: true }` form continues to compile. It resolves to `runtime: :native` and emits a deprecation warning. A future strict-mode flag (`CAMBIUM_STRICT_EXEC=1`) makes this a hard error.
 - **Policy packs (RED-214):** `exec:` slots can be bundled in a pack. The per-slot mixing rule applies — `security :research_defaults` providing `exec` and the gen also providing `exec` is a compile error.
 
 ### 3. Resource limits live with `security exec:`, not `budget:`
@@ -186,15 +191,16 @@ Three rules:
 
 - **WASM works on Linux, macOS, and Windows.** `quickjs-emscripten` runs on Node's built-in `WebAssembly` support, which is cross-platform; this is the default precisely because it runs everywhere without special setup.
 - **Firecracker works on Linux with KVM only.** When a gen declares `runtime: :firecracker` and `available()` returns a non-null reason, the runner fails at startup with that reason. No fallback. Forces the user to consciously choose between (a) running the workload on a Firecracker-capable host, (b) downgrading to WASM with the language constraints, or (c) running `:native` with the deprecation warning if they accept the dev-mode risk.
-- **`:native` works everywhere.** Stays compile-valid for the deprecation period. Emits the warning on every run.
+- **`:native` works everywhere.** Accessible only via `unsafe_native: true` (Gate 3). Emits the warning on every run. `CAMBIUM_STRICT_EXEC=1` blocks it.
 
-### 10. Migration of existing `security exec: { allowed: true }` gens — settled
+### 10. Migration of existing `security exec: { allowed: true }` gens — Gate-3 complete
 
-Path (a) from the ticket: continue working with warning.
+`{ allowed: true }` with no `runtime:` is now a compile error. Authors must migrate:
 
-- The `{ allowed: true }` shape is rewritten at compile time to `{ allowed: true, runtime: :native }`.
-- The runner emits a `tool.exec.unsandboxed` trace event on every `execute_code` call AND a stderr line: `WARNING: gen <name> uses exec runtime :native (no sandbox). Set runtime: :wasm or :firecracker to remove this warning.`
-- A future strict-mode environment variable (`CAMBIUM_STRICT_EXEC=1`) makes this a hard compile error. Default is opt-in until at least one external user is running an exec-using gen in production.
+- To sandbox execution: change to `security exec: { runtime: :wasm }` (or `:firecracker`).
+- To retain unsandboxed native (explicitly): change to `security exec: { unsafe_native: true }`.
+
+The `unsafe_native: true` path emits `tool.exec.unsandboxed` in the trace and a per-run stderr warning on every call. `CAMBIUM_STRICT_EXEC=1` additionally blocks `unsafe_native: true` at compile time (org-wide lockdown).
 
 ### 11. Escape testing — settled (categories)
 

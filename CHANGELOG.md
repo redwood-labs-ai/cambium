@@ -6,6 +6,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **`security exec:` strict default (Road to 1.0, Gate 3).** `security exec: { allowed: true }` (with no explicit `runtime:`) and `security exec: { runtime: :native }` are now compile errors by default. Unsandboxed native execution is available only via the explicit opt-out `security exec: { unsafe_native: true }`, which continues to emit the `tool.exec.unsandboxed` trace step and a per-run stderr warning. `CAMBIUM_STRICT_EXEC=1` now additionally prohibits `unsafe_native: true` (org-wide lockdown). Migrate existing gens with `{ allowed: true }` to `{ runtime: :wasm }` (sandboxed, recommended) or `{ unsafe_native: true }` (explicit sharp-knife).
+
 ### Added
 
 - **`budget per_run:` extended metrics.** The `budget` primitive's `per_run:` hash now accepts `max_tokens` (positive integer, token cap per run), `max_duration` (string `^(\d+)(s|m|h)$` — e.g. `"5m"`, `"30s"`, `"1h"`, enforced as elapsed wall time), and `max_calls` (positive integer, tool-call cap; aliased to `max_tool_calls` on read). All three are enforced at runtime by the existing `Budget` class. Unknown metrics continue to raise `ArgumentError` at compile time.

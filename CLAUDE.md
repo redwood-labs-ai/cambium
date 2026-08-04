@@ -174,7 +174,7 @@ Mostly sole-source — this cluster IS the documentation of the gate order until
 
 Full invariants: [`S - Tool Exec Sandboxing (RED-213)`](docs/GenDSL%20Docs/S%20-%20Tool%20Exec%20Sandboxing%20%28RED-213%29.md) (substrates, WASM, deny-by-default) and [`S - Firecracker Substrate (RED-251)`](docs/GenDSL%20Docs/S%20-%20Firecracker%20Substrate%20%28RED-251%29.md) (snapshots, filesystem/network allowlists, netns mechanics, operational traps). Danger summary:
 
-- **`security exec: { allowed: true }` silently means unsandboxed `:native`** — every dispatch emits a `tool.exec.unsandboxed` trace step; `CAMBIUM_STRICT_EXEC=1` promotes it to a compile error.
+- **`security exec: { allowed: true }` and `runtime: :native` are compile errors** (Gate 3, default strict). Unsandboxed native is available only via the explicit sharp-knife `security exec: { unsafe_native: true }`, which still emits `tool.exec.unsandboxed` on every dispatch. `CAMBIUM_STRICT_EXEC=1` prohibits even the explicit opt-in (org-wide lockdown).
 - **`execute_code` with no `security exec:` block refuses to dispatch** (deny-by-default).
 - **Firecracker operational traps**: rebuild the rootfs after any `crates/cambium-agent/` change — a stale agent looks like success with surprising guest behavior; wipe `$CAMBIUM_FC_SNAPSHOT_DIR` after a Firecracker binary upgrade (the cache doesn't key on FC version); network-enabled runs are cold-boot-only and not concurrency-safe in v1.
 
