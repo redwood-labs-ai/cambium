@@ -5,6 +5,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 ## Start here
 - [[00 - Getting Started]]
 - [[01 - Core Concepts]]
+- [`COMPATIBILITY.md`](../../COMPATIBILITY.md) (repo root, not a graph node) — the 1.0 semver promise: the six promised surfaces, the additivity rule per surface, the deprecation register. The capstone the `C - IR` / `C - Serve Mode` / `C - Trace` surfaces ground out in.
 
 ## Primitives (language surface)
 - [[P - GenModel]]

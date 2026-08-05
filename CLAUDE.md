@@ -112,6 +112,9 @@ The spec drafts are in `docs/` (root level):
 - `docs/Generation Engineering DSL (Rails-style) - Spec Draft.md`
 - `docs/Generation Engineering DSL — Reference Implementation (v0).md`
 
+The 1.0 compatibility promise is at the repo root:
+- `COMPATIBILITY.md` — which surfaces semver covers (DSL vocab, IR JSON shape, serve `/v1` wire, trace vocab, runner library API, CLI); what "additive" means per surface; the deprecation register. Before you break any of those six surfaces, read it.
+
 Read these docs before making architectural decisions or adding new primitives.
 
 ## Development

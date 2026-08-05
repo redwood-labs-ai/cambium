@@ -94,7 +94,7 @@ GET /v1/healthz
 
 ### Versioning
 
-The `/v1/` prefix is locked from the first release. Breaking wire-format changes go to `/v2/`. Additive response fields are NOT breaking — clients MUST ignore unknown fields. Renaming a field, removing one, or narrowing an enum IS breaking.
+The `/v1/` prefix is locked from the first release. Breaking wire-format changes go to `/v2/`. Additive response fields are NOT breaking — clients MUST ignore unknown fields. Renaming a field, removing one, or narrowing an enum IS breaking. This surface is one of the six the 1.0 promise covers — see [`COMPATIBILITY.md`](../../COMPATIBILITY.md) § Serve `/v1` wire format, which also explains why adding an `error.kind` value is a `/v2` boundary.
 
 ### error.kind enum (closed in v1)
 

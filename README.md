@@ -122,6 +122,10 @@ Full documentation is in [`docs/GenDSL Docs/`](docs/GenDSL%20Docs/) — a knowle
 - [`01 - Core Concepts.md`](docs/GenDSL%20Docs/01%20-%20Core%20Concepts.md)
 - [`Generation Engineering DSL — Docs Map`](docs/GenDSL%20Docs/Generation%20Engineering%20DSL%20%E2%80%94%20Docs%20Map%20%28Knowledge%20Graph%29.md)
 
+The 1.0 compatibility promise — which surfaces semver covers, what "additive" means per surface, and the deprecation register — is at the repo root:
+
+- [`COMPATIBILITY.md`](COMPATIBILITY.md)
+
 ## Engine mode
 
 Host projects that want to compose Cambium IR and invoke the runtime directly (rather than via the CLI) use `@redwood-labs/cambium-runner` as a library:

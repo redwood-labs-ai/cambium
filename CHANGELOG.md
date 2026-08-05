@@ -23,6 +23,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`COMPATIBILITY.md` — the 1.0 compatibility promise (Road to 1.0, Gate 6).** A repo-root document formalizing which six surfaces semver covers — Ruby DSL vocabulary, IR JSON shape, serve `/v1` wire format, trace step vocabulary, runner library API, CLI surface — the precise additivity rule per surface, the explicit *not-promised* list (IR TypeScript type, runner internals, `--mock` bytes, golden snapshot bytes), and the deprecation register (`registerAppCorrectors`, `policies.constraints.budget` — deprecated 0.9 → removed 1.0). Also proves the three headline post-1.0 deferrals (retrieval/corpora, streaming, async retro-agents) each have an additive landing path. `error.kind` is frozen at 11 values; cooperative cancellation is modeled as a non-error outcome rather than a 12th kind.
+
 - **`budget per_run:` extended metrics.** The `budget` primitive's `per_run:` hash now accepts `max_tokens` (positive integer, token cap per run), `max_duration` (string `^(\d+)(s|m|h)$` — e.g. `"5m"`, `"30s"`, `"1h"`, enforced as elapsed wall time), and `max_calls` (positive integer, tool-call cap; aliased to `max_tool_calls` on read). All three are enforced at runtime by the existing `Budget` class. Unknown metrics continue to raise `ArgumentError` at compile time.
 
   ```ruby

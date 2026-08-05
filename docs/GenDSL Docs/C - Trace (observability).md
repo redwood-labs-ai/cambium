@@ -100,3 +100,4 @@ Operator ordering rule: `operators[]` reflects compile-time declaration order, N
 - [[S - Tool Sandboxing (RED-137)]]
 - [[P - Memory]]
 - [[N - Orchestration Layer]] — Pipeline trace shape, operator semantics, budget enforcement
+- [`COMPATIBILITY.md`](../../COMPATIBILITY.md) § Trace step vocabulary — the 1.0 promise for this surface (framework-owned, additive: new step types OK, existing types never change shape)
