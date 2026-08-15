@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { execSync } from 'node:child_process'
-import { writeFileSync, mkdtempSync } from 'node:fs'
+import { writeFileSync, mkdtempSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -42,10 +42,31 @@ function writeGen(body: string): string {
   return path
 }
 
+const WORKSPACE_MODELS_RB = 'packages/cambium/app/config/models.rb'
+
+/**
+ * Read an alias literal straight out of the workspace config.
+ *
+ * The contract under test is "the compiler resolves the symbol to
+ * whatever models.rb says" — NOT "the workspace happens to run model X".
+ * Hardcoding the literal here couples the suite to whichever models the
+ * dev server is pointed at, and silently goes red whenever those are
+ * retuned. Parsing the config is an independent path from the Ruby
+ * resolver, so the failure modes that matter (compiler ignores the
+ * config, resolves to the wrong alias, or doesn't resolve at all) are
+ * still caught.
+ */
+function workspaceAlias(name: string): string {
+  const src = readFileSync(WORKSPACE_MODELS_RB, 'utf8')
+  const m = src.match(new RegExp(`^${name}\\s+"([^"]+)"`, 'm'))
+  if (!m) throw new Error(`alias :${name} is not defined in ${WORKSPACE_MODELS_RB}`)
+  return m[1]
+}
+
 describe('model aliases (RED-237)', () => {
   it('resolves `model :default` to the literal from packages/cambium/app/config/models.rb', () => {
-    // The workspace's models.rb defines :default → "omlx:Qwen3.5-27B-4bit".
-    // A fresh gen that references :default gets that literal in its IR.
+    // A fresh gen that references :default gets whatever literal the
+    // workspace's models.rb maps it to.
     const gen = writeGen(`
 class AliasedGen < GenModel
   model :default
@@ -59,7 +80,7 @@ class AliasedGen < GenModel
 end
 `)
     const ir = compile(gen, 'analyze', FIXTURE_ARG)
-    expect(ir.model.id).toBe('omlx:Qwen3.5-27B-4bit')
+    expect(ir.model.id).toBe(workspaceAlias('default'))
   })
 
   it('resolves `model :fast` to the distinct literal for the fast alias', () => {
@@ -76,7 +97,12 @@ class FastGen < GenModel
 end
 `)
     const ir = compile(gen, 'analyze', FIXTURE_ARG)
-    expect(ir.model.id).toBe('omlx:gemma-4-31b-it-8bit')
+    const fast = workspaceAlias('fast')
+    expect(ir.model.id).toBe(fast)
+    // ":fast is a distinct alias" is the actual claim — guard it, so a
+    // config where both aliases point at the same model can't make this
+    // test vacuously pass.
+    expect(fast).not.toBe(workspaceAlias('default'))
   })
 
   it('passes a literal `model "omlx:..."` string through unchanged', () => {
