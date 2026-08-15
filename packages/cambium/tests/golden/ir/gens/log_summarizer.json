@@ -1,0 +1,50 @@
+{
+  "summarize": {
+    "version": "0.2",
+    "entry": {
+      "class": "LogSummarizer",
+      "method": "summarize",
+      "source": "packages/cambium/app/gens/log_summarizer.cmb.rb"
+    },
+    "model": {
+      "id": "omlx:orinth-1.0-35b@q8_0",
+      "temperature": 0.1,
+      "max_tokens": 800
+    },
+    "system": "You are a document summarizer. You distill long documents into concise, accurate summaries that capture the key points without adding interpretation or speculation.",
+    "mode": null,
+    "policies": {
+      "tools_allowed": [],
+      "correctors": [],
+      "constraints": {},
+      "grounding": null,
+      "security": null,
+      "budget": null,
+      "memory": [],
+      "memory_pools": {},
+      "memory_write_via": null,
+      "log": [],
+      "log_profiles": [],
+      "schedules": []
+    },
+    "reads_trace_of": null,
+    "returnSchemaId": "LogSummary",
+    "context": {
+      "document": ""
+    },
+    "enrichments": [],
+    "signals": [],
+    "triggers": [],
+    "steps": [
+      {
+        "id": "generate_1",
+        "type": "Generate",
+        "prompt": "extract key events and error patterns from these logs",
+        "with": {
+          "context": ""
+        },
+        "returns": "LogSummary"
+      }
+    ]
+  }
+}

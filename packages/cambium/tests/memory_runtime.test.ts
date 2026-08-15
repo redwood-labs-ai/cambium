@@ -197,11 +197,11 @@ end
     expect(prune.meta.max_entries).toBe(1);
   }, 90_000);
 
-  it('routes writes through the retro agent when write_memory_via is declared', () => {
+  it('routes writes through the retro agent when writes_memory_via is declared', () => {
     // Phase 3 stubbed this as a `memory_write_deferred` no-op. Phase 4
     // replaces that with real agent invocation; the fuller retro-flow
     // assertions live in retro_agent_runtime.test.ts. Here we just
-    // confirm the default writer DOES NOT run when write_memory_via is
+    // confirm the default writer DOES NOT run when writes_memory_via is
     // present — i.e. no entry with `written_by: 'default'` appears.
     const id = 'test-' + randomUUID();
     sessionIds.push(id);
@@ -213,7 +213,7 @@ class DeferredWriteGen < GenModel
   returns AnalysisReport
 
   memory :conversation, strategy: :sliding_window, size: 2
-  write_memory_via :SupportMemoryAgent
+  writes_memory_via :SupportMemoryAgent
 
   def analyze(x)
     generate "Analyze: #{x}" do

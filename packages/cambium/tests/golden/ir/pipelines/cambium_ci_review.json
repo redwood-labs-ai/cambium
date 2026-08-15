@@ -1,0 +1,63 @@
+{
+  "review": {
+    "version": "0.2",
+    "kind": "Pipeline",
+    "name": "CambiumCiReview",
+    "entry": {
+      "class": "CambiumCiReview",
+      "method": "review",
+      "source": "packages/cambium/app/pipelines/cambium_ci_review.pipeline.rb"
+    },
+    "input": {
+      "diff": {
+        "schema": "PullRequestDiff"
+      }
+    },
+    "policies": {
+      "budget": {
+        "tokens": 100000
+      },
+      "bind_defaults": "explicit",
+      "memory": [],
+      "schedules": [],
+      "log": [],
+      "log_profiles": []
+    },
+    "operators": [
+      {
+        "kind": "Step",
+        "id": "analyze",
+        "gen": "CambiumDiffAnalyzer",
+        "method": "analyze",
+        "with": [
+          {
+            "param": "diff",
+            "from": {
+              "input": "diff"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "Step",
+        "id": "review",
+        "gen": "CambiumPrReviewer",
+        "method": "review",
+        "with": [
+          {
+            "param": "analysis",
+            "from": {
+              "step": "analyze"
+            }
+          }
+        ]
+      }
+    ],
+    "output": {
+      "kind": "last_step"
+    },
+    "context": {
+      "_pipeline_arg": ""
+    }
+  }
+}

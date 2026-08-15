@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildAnthropicMessagesRequest, normalizeAnthropicMessagesResponse, MIN_USER_CACHE_CHARS } from './anthropic.js';
+import { buildAnthropicMessagesRequest, normalizeAnthropicMessagesResponse, MIN_USER_CACHE_CHARS, acceptsSamplingParams } from './anthropic.js';
 
 describe('buildAnthropicMessagesRequest', () => {
   it('extracts system role to top-level system with cache_control', () => {
@@ -66,6 +66,41 @@ describe('buildAnthropicMessagesRequest', () => {
       temperature: 0.7,
     });
     expect(body.max_tokens).toBe(500);
+    expect(body.temperature).toBe(0.7);
+  });
+
+  it('omits temperature for models that do not accept sampling params (claude-opus-4-8)', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-opus-4-8',
+      messages: [{ role: 'user', content: 'q' }],
+    });
+    expect(body.temperature).toBeUndefined();
+  });
+
+  it('omits temperature for an unknown future model', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-5-0',
+      messages: [{ role: 'user', content: 'q' }],
+    });
+    expect(body.temperature).toBeUndefined();
+  });
+
+  it('sends temperature for a model on the accept list (claude-sonnet-4-6)', () => {
+    // Belt-and-suspenders: existing test at line 52 already covers this,
+    // but explicit coverage of the guard path for an accepted model.
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [{ role: 'user', content: 'q' }],
+    });
+    expect(body.temperature).toBe(0.2);
+  });
+
+  it('sends explicit temperature for an accepted model', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-haiku-4-5-20251001',
+      messages: [{ role: 'user', content: 'q' }],
+      temperature: 0.7,
+    });
     expect(body.temperature).toBe(0.7);
   });
 
@@ -639,6 +674,42 @@ describe('buildAnthropicMessagesRequest with cacheUserPrefix', () => {
     });
     // Defensive: no empty text block anywhere in the message.
     expect(blocks.some((b: any) => b.type === 'text' && b.text === '')).toBe(false);
+  });
+});
+
+describe('acceptsSamplingParams', () => {
+  // Rejecting models — temperature must be OMITTED
+  it('returns false for claude-opus-4-7', () => {
+    expect(acceptsSamplingParams('claude-opus-4-7')).toBe(false);
+  });
+  it('returns false for claude-opus-4-8', () => {
+    expect(acceptsSamplingParams('claude-opus-4-8')).toBe(false);
+  });
+  it('returns false for an unknown/future model id', () => {
+    expect(acceptsSamplingParams('claude-sonnet-5-0')).toBe(false);
+  });
+  it('returns false for a completely unknown id', () => {
+    expect(acceptsSamplingParams('claude-unknown-model')).toBe(false);
+  });
+
+  // Accepting models — temperature must be PRESENT
+  it('returns true for claude-sonnet-4-6', () => {
+    expect(acceptsSamplingParams('claude-sonnet-4-6')).toBe(true);
+  });
+  it('returns true for claude-opus-4-6', () => {
+    expect(acceptsSamplingParams('claude-opus-4-6')).toBe(true);
+  });
+  it('returns true for claude-haiku-4-5', () => {
+    expect(acceptsSamplingParams('claude-haiku-4-5')).toBe(true);
+  });
+  it('returns true for claude-haiku-4-5-20251001 (date suffix)', () => {
+    expect(acceptsSamplingParams('claude-haiku-4-5-20251001')).toBe(true);
+  });
+  it('returns true for claude-3-5-sonnet-20241022 (claude-3.5 family)', () => {
+    expect(acceptsSamplingParams('claude-3-5-sonnet-20241022')).toBe(true);
+  });
+  it('returns true for claude-3-opus-20240229 (claude-3 family)', () => {
+    expect(acceptsSamplingParams('claude-3-opus-20240229')).toBe(true);
   });
 });
 

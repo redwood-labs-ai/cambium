@@ -25,7 +25,7 @@ class Analyst < GenModel
 
   memory :conversation, strategy: :sliding_window, size: 20   # RED-215
   memory :facts,        scope: :support_team, top_k: 5
-  write_memory_via :SupportMemoryAgent
+  writes_memory_via :SupportMemoryAgent
 
   def analyze(document)
     generate "analyze incident transcript" do

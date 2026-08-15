@@ -10,7 +10,7 @@
 
 The `:wasm` substrate (RED-254) handles the 95th-percentile `execute_code` case — JS compute, JSON transforms, schema validation, simple algorithmic work — with a memory cap, a wall-clock timeout, and implicit-deny on everything else. It doesn't handle Python with numpy, Node with `fs` / `fetch` / `child_process`, or any workload that genuinely needs host-kernel APIs. That's the `:firecracker` substrate's job.
 
-This note settles the architecture for Firecracker: how the host talks to the guest, how VMs are lifecycle-managed, what runs inside the VM, and what the security surface looks like. The parent design note (`S - Tool Exec Sandboxing (RED-213).md`) pinned the substrate-selection tier (WASM default, Firecracker upgrade, `:native` deprecated back-compat) and the adapter interface (`ExecSubstrate`). This note is what actually fills the Firecracker adapter.
+This note settles the architecture for Firecracker: how the host talks to the guest, how VMs are lifecycle-managed, what runs inside the VM, and what the security surface looks like. The parent design note (`S - Tool Exec Sandboxing (RED-213).md`) pinned the substrate-selection tier (WASM default, Firecracker upgrade, `:native` explicit sharp-knife opt-out via `unsafe_native: true`) and the adapter interface (`ExecSubstrate`). This note is what actually fills the Firecracker adapter.
 
 ---
 

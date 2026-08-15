@@ -26,6 +26,7 @@ import type {
   GenerateWithToolsResult,
 } from './types.js';
 import { ProviderHttpError, ProviderConnectionError } from './types.js';
+import { redactErrorBody } from './redact.js';
 import { normalizeModelName, type ModelNameTransform } from './registry.js';
 import {
   buildAnthropicMessagesRequest,
@@ -74,10 +75,6 @@ export type OpenAICompatibleConfig = {
   /** Fall back to `message.reasoning_content` when `content` is empty (thinking
    *  models that leak the final answer into the reasoning channel). */
   reasoningContentFallback?: boolean;
-  /** Include up to 1.5 KB of the upstream response body in HTTP-error
-   *  messages. Safe for server-internal endpoints (oMLX/vLLM); leave off for
-   *  endpoints whose error bodies may echo credentials. */
-  surfaceErrorBody?: boolean;
 };
 
 /**
@@ -98,7 +95,7 @@ export function openaiCompatible(config: OpenAICompatibleConfig): CambiumProvide
   const url = () => `${resolveBaseUrl().replace(/\/$/, '')}/v1/chat/completions`;
 
   const errBodyOf = async (res: Response): Promise<string> =>
-    config.surfaceErrorBody ? (await res.text().catch(() => '')).slice(0, 1500) : '';
+    redactErrorBody(await res.text().catch(() => ''));
 
   return {
     name: config.name,
@@ -266,8 +263,8 @@ const DEFAULT_ANTHROPIC_VERSION = '2023-06-01';
 
 /**
  * Build a full `CambiumProvider` for an Anthropic-Messages-compatible endpoint
- * (`POST {baseUrl}/v1/messages`). HTTP-error messages deliberately omit the
- * upstream body — Anthropic 401/403 bodies can echo credential fragments.
+ * (`POST {baseUrl}/v1/messages`). HTTP-error messages include the upstream body,
+ * redacted of credential-shaped content, for legible diagnostics.
  */
 export function anthropicCompatible(config: AnthropicCompatibleConfig): CambiumProvider {
   const toWire = normalizeModelName(config.modelName);
@@ -324,7 +321,10 @@ export function anthropicCompatible(config: AnthropicCompatibleConfig): CambiumP
           `${errorLabel} connection failed: ${(fetchErr as Error).message ?? String(fetchErr)}`,
         );
       }
-      if (!res.ok) throw new ProviderHttpError(res.status, `${errorLabel} error: HTTP ${res.status}`);
+      if (!res.ok) {
+        const errBody = redactErrorBody(await res.text().catch(() => ''));
+        throw new ProviderHttpError(res.status, `${errorLabel} error: HTTP ${res.status}${errBody ? ` — ${errBody}` : ''}`);
+      }
       const json: any = await res.json();
       const normalized = normalizeAnthropicMessagesResponse(json);
       return { text: normalized.message.content ?? '', usage: normalized.usage };
@@ -350,7 +350,10 @@ export function anthropicCompatible(config: AnthropicCompatibleConfig): CambiumP
           `${errorLabel} connection failed: ${(fetchErr as Error).message ?? String(fetchErr)}`,
         );
       }
-      if (!res.ok) throw new ProviderHttpError(res.status, `${errorLabel} error: HTTP ${res.status}`);
+      if (!res.ok) {
+        const errBody = redactErrorBody(await res.text().catch(() => ''));
+        throw new ProviderHttpError(res.status, `${errorLabel} error: HTTP ${res.status}${errBody ? ` — ${errBody}` : ''}`);
+      }
       const json: any = await res.json();
       const normalized = normalizeAnthropicMessagesResponse(json);
       // Inline tool-call markup parsing is applied by the dispatcher.

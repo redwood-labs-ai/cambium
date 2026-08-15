@@ -78,6 +78,29 @@ export type AnthropicMessagesRequestOpts = {
 export const MIN_USER_CACHE_CHARS = 4096;
 
 /**
+ * Returns true for Anthropic model ids that accept sampling parameters
+ * (temperature, top_p, top_k). Newer models (Opus 4.7+, Fable 5, Mythos 5)
+ * removed these fields entirely — sending them produces HTTP 400.
+ *
+ * Accept-list rather than deny-list: an unknown/future model id falls through
+ * to `false` and the parameter is omitted, which is always safe. The model
+ * uses its own default sampling; we never 400.
+ *
+ * Model ids arrive as bare wire names with no "anthropic:" prefix
+ * (e.g. "claude-sonnet-4-6", "claude-haiku-4-5-20251001").
+ */
+const TEMPERATURE_ACCEPT_PREFIXES = [
+  'claude-3',         // claude-3-opus-*, claude-3-sonnet-*, claude-3-haiku-*, claude-3-5-*
+  'claude-opus-4-6',  // NOT claude-opus-4-7, claude-opus-4-8
+  'claude-sonnet-4-6',
+  'claude-haiku-4-5',
+];
+
+export function acceptsSamplingParams(model: string): boolean {
+  return TEMPERATURE_ACCEPT_PREFIXES.some((p) => model.startsWith(p));
+}
+
+/**
  * Build the request body for Anthropic's POST /v1/messages endpoint.
  *
  * Extracts the `system` message (if any) to the top-level `system` field,
@@ -263,9 +286,11 @@ export function buildAnthropicMessagesRequest(opts: AnthropicMessagesRequestOpts
   const body: Record<string, any> = {
     model: opts.model,
     max_tokens: opts.max_tokens ?? 1200,
-    temperature: opts.temperature ?? 0.2,
     messages: translatedMessages,
   };
+  if (acceptsSamplingParams(opts.model)) {
+    body.temperature = opts.temperature ?? 0.2;
+  }
 
   if (systemText) {
     body.system = useCache

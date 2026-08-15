@@ -56,9 +56,9 @@ Look at the trace (`runs/<run_id>/trace.json`) and help them tune the agent — 
 - **`grounded_in`**: citation enforcement with verbatim quote verification; `verify: :field_values` adds value-level cross-checks (RED-392). See [`P - grounded_in`](docs/GenDSL%20Docs/P%20-%20grounded_in.md).
 - **`mode :agentic`**: multi-turn tool-use loop (model calls tools during generation)
 - **`system`**: `:symbol` resolves to `app/systems/<name>.system.md`, string is inline
-- **`security`** / **`budget`**: tool-execution policy + per-tool/per-run call caps; inline kwargs or a policy-pack symbol (`security :research_defaults` → `app/policies/<name>.policy.rb`), one source per slot. See [`S - Tool Sandboxing (RED-137)`](docs/GenDSL%20Docs/S%20-%20Tool%20Sandboxing%20%28RED-137%29.md) and [`P - Policy Packs (RED-214)`](docs/GenDSL%20Docs/P%20-%20Policy%20Packs%20%28RED-214%29.md).
+- **`security`** / **`budget`**: tool-execution policy + per-tool/per-run resource caps (`per_run:` supports `max_calls`, `max_tokens`, `max_duration`; `per_tool:` supports `max_calls`); inline kwargs or a policy-pack symbol (`security :research_defaults` → `app/policies/<name>.policy.rb`), one source per slot. `constrain :budget` is deprecated — use the `budget` primitive. See [`S - Tool Sandboxing (RED-137)`](docs/GenDSL%20Docs/S%20-%20Tool%20Sandboxing%20%28RED-137%29.md) and [`P - Policy Packs (RED-214)`](docs/GenDSL%20Docs/P%20-%20Policy%20Packs%20%28RED-214%29.md).
 - **Plugin tools**: paired `.tool.json` + `.tool.ts` under `app/tools/`, auto-discovered (RED-209); a plugin with a builtin's name wins — that's the override hook.
-- **`memory`**: per-gen memory slots (`:sliding_window`, `:semantic`, `:log`) over per-bucket SQLite; scopes `:session` / `:global` / named pools under `app/memory_pools/`; retro write agents via `write_memory_via` (entry method always `remember(ctx)`). Deps are `optionalDependencies`. See [`P - Memory`](docs/GenDSL%20Docs/P%20-%20Memory.md).
+- **`memory`**: per-gen memory slots (`:sliding_window`, `:semantic`, `:log`) over per-bucket SQLite; scopes `:session` / `:global` / named pools under `app/memory_pools/`; retro write agents via `writes_memory_via` (entry method always `remember(ctx)`). Deps are `optionalDependencies`. See [`P - Memory`](docs/GenDSL%20Docs/P%20-%20Memory.md).
 - **`Pipeline`**: declarative multi-gen orchestration via `step` / `fan_out` / `branch_on` with rollup IR/trace/budget; lives in `app/pipelines/<name>.pipeline.rb`; **zero inference at the orchestration layer**. Served through the same `/v1/run` endpoint as gens. See [`N - Orchestration Layer`](docs/GenDSL%20Docs/N%20-%20Orchestration%20Layer.md).
 - **`cambium replay`** (CLI verb, not a declaration): re-execute a prior run's post-Generate tail against its recorded output, skipping Generate; pipelines resume the operator DAG from the first incomplete operator. See [`P - cambium replay`](docs/GenDSL%20Docs/P%20-%20cambium%20replay.md).
 
@@ -111,6 +111,9 @@ Prefix key: **P** = Primitive, **C** = Compilation/Runtime, **D** = Data, **S** 
 The spec drafts are in `docs/` (root level):
 - `docs/Generation Engineering DSL (Rails-style) - Spec Draft.md`
 - `docs/Generation Engineering DSL — Reference Implementation (v0).md`
+
+The 1.0 compatibility promise is at the repo root:
+- `COMPATIBILITY.md` — which surfaces semver covers (DSL vocab, IR JSON shape, serve `/v1` wire, trace vocab, runner library API, CLI); what "additive" means per surface; the deprecation register. Before you break any of those six surfaces, read it.
 
 Read these docs before making architectural decisions or adding new primitives.
 
@@ -174,7 +177,7 @@ Mostly sole-source — this cluster IS the documentation of the gate order until
 
 Full invariants: [`S - Tool Exec Sandboxing (RED-213)`](docs/GenDSL%20Docs/S%20-%20Tool%20Exec%20Sandboxing%20%28RED-213%29.md) (substrates, WASM, deny-by-default) and [`S - Firecracker Substrate (RED-251)`](docs/GenDSL%20Docs/S%20-%20Firecracker%20Substrate%20%28RED-251%29.md) (snapshots, filesystem/network allowlists, netns mechanics, operational traps). Danger summary:
 
-- **`security exec: { allowed: true }` silently means unsandboxed `:native`** — every dispatch emits a `tool.exec.unsandboxed` trace step; `CAMBIUM_STRICT_EXEC=1` promotes it to a compile error.
+- **`security exec: { allowed: true }` and `runtime: :native` are compile errors** (Gate 3, default strict). Unsandboxed native is available only via the explicit sharp-knife `security exec: { unsafe_native: true }`, which still emits `tool.exec.unsandboxed` on every dispatch. `CAMBIUM_STRICT_EXEC=1` prohibits even the explicit opt-in (org-wide lockdown).
 - **`execute_code` with no `security exec:` block refuses to dispatch** (deny-by-default).
 - **Firecracker operational traps**: rebuild the rootfs after any `crates/cambium-agent/` change — a stale agent looks like success with surprising guest behavior; wipe `$CAMBIUM_FC_SNAPSHOT_DIR` after a Firecracker binary upgrade (the cache doesn't key on FC version); network-enabled runs are cold-boot-only and not concurrency-safe in v1.
 
@@ -223,7 +226,8 @@ One line per invariant; full text behind each pointer.
 
 Full invariants: [`N - Orchestration Layer`](docs/GenDSL%20Docs/N%20-%20Orchestration%20Layer.md) (budget rollup, advisory concurrency, `branch_on` exhaustiveness, `:pipeline_run` memory plumbing, trace types) and [`C - Serve Mode`](docs/GenDSL%20Docs/C%20-%20Serve%20Mode.md) (catalog name-uniqueness, extension checks). Danger summary:
 
-- **Zero inference at the orchestration layer is a hard invariant** — LLM calls happen only inside sub-gens via `runGenFromIr`; an operator whose behavior depends on a model decision doesn't ship.
+- **Zero inference at the orchestration layer is a hard invariant** — LLM calls happen only inside sub-gens via `runGenFromIr`; an operator whose behavior depends on a model decision doesn't ship. The one pipeline-layer `generateText` (fan-out cache prewarm) is a cache write with a discarded completion, not a decision — it never reads its own output.
+- **Fan-out cache prewarm is automatic, byte-identical, and best-effort** — a `fan_out` with `concurrency > 1` and a shared grounded prefix fires one warm-up per distinct (model tier × prefix) before dispatch, via `buildGenSystem`/`buildCacheablePrefix` (the SAME assemblers `handleGenerate` uses — reuse them, never re-derive the prefix, or the cache key drifts). Outer "Off" gates (entire prewarm skipped): `concurrency 1` / single-branch / `--mock` / `prewarm false`. Per-branch filter inside `prewarmFanOut`: ungrounded branches and branches whose cacheable prefix is below `MIN_CACHE_PREFIX_CHARS` are excluded individually; the prewarm still fires for remaining eligible branches. A warm-up failure never fails the fan-out. See [`N - Orchestration Layer`](docs/GenDSL%20Docs/N%20-%20Orchestration%20Layer.md) § Fan-out cache prewarm.
 - **Budget rollup is cooperative pre-dispatch, not preemptive** — a sub-gen that starts under budget and overshoots is not interrupted mid-flight; `PipelineBudgetExceeded` fires after, and the next operator never dispatches.
 - **New operators require new trace step types** plus a `C - Trace` row — same additivity rule as the gen side.
 

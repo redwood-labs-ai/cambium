@@ -29,7 +29,7 @@ Roughly, the runner does this per IR:
 4. **Memory: plan + read** — open each bucket, read per strategy, inject the `## Memory` block into `ir.system` (skipped when `ir.mode === 'retro'` to prevent nested memory on retro agents)
 5. Load enrichments, run enrichment sub-agents
 6. Execute IR steps (`Generate` → `Validate` → `Repair` loop → `Correct` → `GroundingCheck` → `ExtractSignals` → triggers)
-7. **Memory: commit** — if `finalOk`, either append one trivial-default `{input, output}` entry per bucket, OR invoke the retro agent (when `write_memory_via` is set) and apply its `MemoryWrites` tagged `written_by: 'agent:<ClassName>'`
+7. **Memory: commit** — if `finalOk`, either append one trivial-default `{input, output}` entry per bucket, OR invoke the retro agent (when `writes_memory_via` is set) and apply its `MemoryWrites` tagged `written_by: 'agent:<ClassName>'`
 8. Close backends + write `ir.json`, `trace.json`, `output.json`
 
 ## Model providers

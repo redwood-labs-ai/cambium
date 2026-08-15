@@ -1,0 +1,77 @@
+{
+  "review": {
+    "version": "0.2",
+    "kind": "Pipeline",
+    "name": "SamplePipeline",
+    "entry": {
+      "class": "SamplePipeline",
+      "method": "review",
+      "source": "packages/cambium/app/pipelines/sample_pipeline.pipeline.rb"
+    },
+    "input": {
+      "document": {
+        "schema": "AnalysisReport"
+      }
+    },
+    "policies": {
+      "budget": {
+        "tokens": 50000,
+        "tool_calls": 50
+      },
+      "bind_defaults": "explicit",
+      "memory": [
+        {
+          "name": "findings",
+          "scope": "pipeline_run",
+          "strategy": "log"
+        }
+      ],
+      "schedules": [],
+      "log": [],
+      "log_profiles": []
+    },
+    "operators": [
+      {
+        "kind": "Step",
+        "id": "triage",
+        "gen": "Analyst",
+        "method": "analyze",
+        "with": [
+          {
+            "param": "document",
+            "from": {
+              "input": "document"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "Step",
+        "id": "remediate",
+        "gen": "Analyst",
+        "method": "analyze",
+        "with": [
+          {
+            "param": "document",
+            "from": {
+              "step": "triage",
+              "field": "summary"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "Step",
+        "id": "summary",
+        "gen": "Analyst",
+        "method": "analyze"
+      }
+    ],
+    "output": {
+      "kind": "last_step"
+    },
+    "context": {
+      "_pipeline_arg": ""
+    }
+  }
+}

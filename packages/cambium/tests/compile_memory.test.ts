@@ -418,7 +418,7 @@ end
     expect(stderr).toMatch(/unknown retain key/)
   })
 
-  it('emits write_memory_via and reads_trace_of into IR', () => {
+  it('emits writes_memory_via and reads_trace_of into IR', () => {
     const gen = writeGen(`
 class RetroGen < GenModel
   model "omlx:stub"
@@ -428,7 +428,7 @@ class RetroGen < GenModel
   reads_trace_of :primary_agent
 
   memory :notes, strategy: :log
-  write_memory_via :MemoryAgent
+  writes_memory_via :MemoryAgent
 
   def go(x)
     generate "x" do

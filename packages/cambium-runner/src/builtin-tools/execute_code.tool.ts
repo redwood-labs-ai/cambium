@@ -1,25 +1,26 @@
 /**
  * execute_code — dispatches through the exec substrate registry (RED-248).
  *
- * The gen's `security exec:` block determines which substrate runs the
- * code. The legacy `{ allowed: true }` DSL shape resolves to the `:native`
- * substrate (fig-leaf / back-compat). New-shape gens declare `runtime:`
- * explicitly along with `cpu` / `memory` / `timeout` / `network` /
- * `filesystem` / `max_output_bytes` — defaults applied here for anything
- * the author didn't pin.
+ * The gen's `security exec:` block determines which substrate runs the code.
+ * Gate 3 (Road to 1.0) removed the legacy `{ allowed: true }` fallback —
+ * `{ allowed: true }` with no `runtime:` is now a compile error. The two
+ * accepted shapes are:
+ *   - Sandboxed: `{ runtime: :wasm | :firecracker, ... }` — preferred.
+ *   - Sharp-knife opt-in: `{ unsafe_native: true }` — explicit unsandboxed
+ *     native. Emits `tool.exec.unsandboxed` and a stderr warning every call.
  *
- * RED-249: structured trace events emitted on every dispatch. The
- * dispatch path pushes `ExecSpawned` before calling the substrate, then
- * one of `ExecCompleted` / `ExecTimeout` / `ExecOOM` / `ExecEgressDenied`
- * / `ExecCrashed` based on `ExecResult.status`. The `:native` path also
- * emits `tool.exec.unsandboxed` at dispatch time and writes a stderr
- * deprecation warning — the gen ran unsandboxed, the trace carries the
- * evidence, the stderr line nudges the author toward a real substrate.
+ * RED-249: structured trace events emitted on every dispatch. The dispatch
+ * path pushes `ExecSpawned` before calling the substrate, then one of
+ * `ExecCompleted` / `ExecTimeout` / `ExecOOM` / `ExecEgressDenied` /
+ * `ExecCrashed` based on `ExecResult.status`. The `:native` path also emits
+ * `tool.exec.unsandboxed` at dispatch time and writes a stderr warning on
+ * every run (deduplicated per-run) — the gen ran unsandboxed, the trace
+ * carries the evidence, the warning nudges the author toward a real substrate.
  *
- * No exec policy on ctx means the tool was called without going through
- * the runner's policy wiring (or a gen with no `security exec:` block at
- * all). We refuse rather than silently run native — running arbitrary
- * code without a declared policy is the scenario RED-213 exists to close.
+ * No exec policy on ctx means the tool was called without going through the
+ * runner's policy wiring (or a gen with no `security exec:` block at all).
+ * We refuse rather than silently run native — running arbitrary code without
+ * a declared policy is the scenario RED-213 exists to close.
  */
 import type { ToolContext } from '../tools/tool-context.js';
 import { getSubstrate } from '../exec-substrate/registry.js';
@@ -40,7 +41,7 @@ type ExecOutput = { stdout: string; stderr: string; exit_code: number };
 const _warnedPerRun = new WeakMap<object, Set<string>>();
 const _warnedNoRunCtx = new Set<string>();
 
-function emitNativeDeprecationWarning(toolName: string, emitStep: unknown) {
+function emitNativeUnsandboxedWarning(toolName: string, emitStep: unknown) {
   let seen: Set<string>;
   if (emitStep) {
     const existing = _warnedPerRun.get(emitStep as object);
@@ -54,8 +55,9 @@ function emitNativeDeprecationWarning(toolName: string, emitStep: unknown) {
   if (seen.has(toolName)) return;
   seen.add(toolName);
   process.stderr.write(
-    `WARNING: ${toolName} uses exec runtime :native (no sandbox). ` +
-    `Set runtime: :wasm or :firecracker in the gen's \`security exec:\` block to remove this warning.\n`,
+    `WARNING: ${toolName} runs with unsafe_native exec (no sandbox). ` +
+    `This was explicitly opted in via \`security exec: { unsafe_native: true }\`. ` +
+    `Switch to \`runtime: :wasm\` or \`runtime: :firecracker\` to sandbox execution.\n`,
   );
 }
 
@@ -93,8 +95,8 @@ export async function execute(input: ExecInput, ctx?: ToolContext): Promise<Exec
   if (!ctx?.execPolicy) {
     throw new Error(
       'execute_code: no security exec policy available. The gen must declare a ' +
-      '`security exec:` block (either legacy `{ allowed: true }` for back-compat ' +
-      'or the new `{ runtime: :wasm | :firecracker | :native, ... }` shape).',
+      '`security exec:` block (`{ runtime: :wasm | :firecracker }` for sandboxed exec ' +
+      'or `{ unsafe_native: true }` for explicitly unsandboxed native).',
     );
   }
 
@@ -105,13 +107,21 @@ export async function execute(input: ExecInput, ctx?: ToolContext): Promise<Exec
   // native substrate via the `runtime ?? 'native'` fallback below.
   if (!ctx.execPolicy.allowed) {
     throw new Error(
-      'execute_code: exec is not allowed by the gen security policy ' +
-      '(security exec: { allowed: false }). Remove `uses :execute_code` ' +
-      'or set `security exec: { allowed: true, runtime: :wasm | ... }`.',
+      'execute_code: exec is not allowed by the gen security policy. ' +
+      'Remove `uses :execute_code` or declare `security exec: { runtime: :wasm | :firecracker }` ' +
+      '(or `unsafe_native: true` to explicitly opt into unsandboxed native).',
     );
   }
 
-  const runtime = (ctx.execPolicy.runtime ?? 'native') as SubstrateName;
+  if (!ctx.execPolicy.runtime) {
+    // Should not be reachable after buildExecPolicy's Gate-3 enforcement
+    // (which throws on allowed + no-runtime). Belt-and-suspenders guard
+    // for code paths that construct ctx.execPolicy outside the policy parser.
+    throw new Error(
+      'execute_code: no runtime resolved in exec policy',
+    );
+  }
+  const runtime = ctx.execPolicy.runtime as SubstrateName;
   const substrate = getSubstrate(runtime);
 
   const opts: ExecOpts = {
@@ -125,20 +135,21 @@ export async function execute(input: ExecInput, ctx?: ToolContext): Promise<Exec
     maxOutputBytes: ctx.execPolicy.maxOutputBytes ?? DEFAULTS.maxOutputBytes,
   };
 
-  // ── RED-249: structured trace events + :native deprecation surface ──
+  // ── RED-249: structured trace events + unsafe_native audit surface ──
 
-  // :native is the deprecated fig-leaf path. One stderr warning per
-  // run (not per call) + a structured trace event on every dispatch
-  // so the trace.json can be grepped for unsandboxed execs.
+  // :native is the explicit sharp-knife opt-in path (unsafe_native: true).
+  // One stderr warning per run (not per call) + a structured trace event
+  // on every dispatch so the trace.json carries the unsandboxed-exec audit
+  // marker regardless of which consumer reads it.
   //
   // Intentional ordering: `tool.exec.unsandboxed` is emitted BEFORE
   // `ExecSpawned` so a trace truncated mid-dispatch still carries the
-  // deprecation marker. Flag before spawn is safer than flag after.
+  // audit marker. Flag before spawn is safer than flag after.
   if (runtime === 'native') {
-    emitNativeDeprecationWarning(ctx.toolName, ctx.emitStep);
+    emitNativeUnsandboxedWarning(ctx.toolName, ctx.emitStep);
     ctx.emitStep?.({
       type: 'tool.exec.unsandboxed',
-      meta: { tool: ctx.toolName, deprecated: true },
+      meta: { tool: ctx.toolName, deprecated: true, explicit_opt_in: ctx.execPolicy.unsafe_native === true },
     });
   }
 

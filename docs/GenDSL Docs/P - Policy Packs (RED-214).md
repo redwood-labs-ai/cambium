@@ -12,6 +12,8 @@ review) repeat the same allowlist/budget boilerplate. The opinionated
 move: bundle them into named **policy packs** that a gen references by
 symbol, the same way `system :analyst` resolves to a file.
 
+> **Deprecated shape:** `constrain :budget, max_tool_calls: N` (and its compiled form `policies.constraints.budget`) is deprecated and will be removed in Cambium 1.0. The runner emits a one-time stderr warning. Use `budget per_run: { max_calls: N }` (shown below) instead.
+
 ```ruby
 # Before — repeated in every research gen:
 security network: { allowlist: %w[api.tavily.com api.exa.ai] }
@@ -44,6 +46,18 @@ budget \
   per_tool: { web_search: { max_calls: 5 } },
   per_run:  { max_calls: 20 }
 ```
+
+The `per_run:` hash accepts:
+
+| Key | Type | Description |
+|---|---|---|
+| `max_calls` | positive integer | Maximum total tool invocations for this run. |
+| `max_tokens` | positive integer | Maximum total tokens (prompt + completion) for this run. |
+| `max_duration` | `"Ns"` / `"Nm"` / `"Nh"` | Maximum wall-clock elapsed time (e.g. `"5m"`, `"30s"`, `"1h"`). |
+
+All three limits are enforced at runtime. Unknown keys raise `ArgumentError` at compile time.
+
+> **Note — `max_duration` enforcement timing:** `max_duration` is checked post-step (via `budget.check()` after each generation or tool step completes), not pre-call like `max_calls`. This means a single long-running step can overshoot the wall-clock deadline before the violation surfaces; the budget is refused before the *next* step dispatches.
 
 A pack can declare any subset of `network`, `filesystem`, `exec`, and
 `budget`. Slots not declared by the pack stay empty when used.
@@ -100,7 +114,7 @@ Concretely:
 #                                    + budget.per_tool web_search + per_run
 
 security :research_defaults
-security exec: { allowed: true }     # ✓ pack didn't touch exec — fine
+security exec: { runtime: :wasm }    # ✓ pack didn't touch exec — fine
 
 security :research_defaults
 security network: { allowlist: [...] }  # ✗ pack defined network — error

@@ -127,20 +127,23 @@ describe('buildSecurityPolicy', () => {
 
   it('parses filesystem and exec blocks', () => {
     const p = buildSecurityPolicy({
-      security: { filesystem: { roots: ['./examples'] }, exec: { allowed: true } },
+      security: { filesystem: { roots: ['./examples'] }, exec: { runtime: 'wasm' } },
     });
     expect(p.filesystem?.roots).toEqual(['./examples']);
-    expect(p.exec?.allowed).toBe(true);
+    expect(p.exec?.runtime).toBe('wasm');
   });
 });
 
 // RED-248: resolved ExecPolicy shape + :inherit semantics
 describe('buildSecurityPolicy — exec (RED-248)', () => {
-  it('legacy { allowed: true, runtime: "native" } carries both fields through', () => {
-    const p = buildSecurityPolicy({
-      security: { exec: { allowed: true, runtime: 'native' } },
-    });
-    expect(p.exec).toMatchObject({ allowed: true, runtime: 'native' });
+  // Gate-3: { allowed: true, runtime: 'native' } without unsafe_native is now rejected
+  // at the runner level (mirrors the Ruby compile-time gate for served / hand-crafted IR).
+  it('rejects { allowed: true, runtime: "native" } without unsafe_native (Gate-3 runner enforcement)', () => {
+    expect(() =>
+      buildSecurityPolicy({
+        security: { exec: { allowed: true, runtime: 'native' } },
+      }),
+    ).toThrow(/runtime 'native' requires unsafe_native: true/);
   });
 
   it('new shape: runtime + cpu + memory + timeout + max_output_bytes all populate', () => {
@@ -242,6 +245,80 @@ describe('buildSecurityPolicy — exec (RED-248)', () => {
         security: { exec: { runtime: '__proto__' } },
       }),
     ).toThrow(/Invalid security\.exec\.runtime/);
+  });
+});
+
+// Gate-3 runner-level enforcement: native execution is ONLY reachable via
+// explicit unsafe_native: true, and NEVER when CAMBIUM_STRICT_EXEC=1.
+// These tests cover hand-crafted / served IR shapes that bypass the Ruby
+// compiler — the runtime gate must hold regardless (AUD-004 pattern).
+describe('buildExecPolicy — Gate-3 native enforcement (served IR)', () => {
+  it('rejects { allowed: true, runtime: "native" } without unsafe_native', () => {
+    expect(() =>
+      buildSecurityPolicy({
+        security: { exec: { allowed: true, runtime: 'native' } },
+      }),
+    ).toThrow(/runtime 'native' requires unsafe_native: true/);
+  });
+
+  it('rejects bare { allowed: true } with no runtime and no unsafe_native', () => {
+    expect(() =>
+      buildSecurityPolicy({
+        security: { exec: { allowed: true } },
+      }),
+    ).toThrow(/no runtime is specified/);
+  });
+
+  it('rejects { allowed: true, unsafe_native: false } (explicit false is not opt-in)', () => {
+    expect(() =>
+      buildSecurityPolicy({
+        security: { exec: { allowed: true, unsafe_native: false } },
+      }),
+    ).toThrow(/no runtime is specified/);
+  });
+
+  it('accepts { allowed: true, runtime: "native", unsafe_native: true } and resolves runtime to native', () => {
+    const p = buildSecurityPolicy({
+      security: { exec: { allowed: true, runtime: 'native', unsafe_native: true } },
+    });
+    expect(p.exec).toMatchObject({ allowed: true, runtime: 'native', unsafe_native: true });
+  });
+
+  it('also resolves runtime to native when only unsafe_native: true is set (no runtime field)', () => {
+    const p = buildSecurityPolicy({
+      security: { exec: { unsafe_native: true } },
+    });
+    expect(p.exec?.runtime).toBe('native');
+    expect(p.exec?.unsafe_native).toBe(true);
+    // unsafe_native implies allowed (matches Ruby) — native is never left
+    // enabled with allowed:false relying on the dispatch guard as the only block.
+    expect(p.exec?.allowed).toBe(true);
+  });
+
+  it('{ allowed: true, runtime: "wasm" } is accepted unchanged (sandboxed path must not regress)', () => {
+    const p = buildSecurityPolicy({
+      security: { exec: { allowed: true, runtime: 'wasm' } },
+    });
+    expect(p.exec).toMatchObject({ allowed: true, runtime: 'wasm' });
+    expect(p.exec?.unsafe_native).toBeUndefined();
+  });
+
+  it('rejects unsafe_native: true when CAMBIUM_STRICT_EXEC=1', () => {
+    const prior = process.env['CAMBIUM_STRICT_EXEC'];
+    process.env['CAMBIUM_STRICT_EXEC'] = '1';
+    try {
+      expect(() =>
+        buildSecurityPolicy({
+          security: { exec: { allowed: true, runtime: 'native', unsafe_native: true } },
+        }),
+      ).toThrow(/CAMBIUM_STRICT_EXEC=1 prohibits unsandboxed native exec/);
+    } finally {
+      if (prior === undefined) {
+        delete process.env['CAMBIUM_STRICT_EXEC'];
+      } else {
+        process.env['CAMBIUM_STRICT_EXEC'] = prior;
+      }
+    }
   });
 });
 

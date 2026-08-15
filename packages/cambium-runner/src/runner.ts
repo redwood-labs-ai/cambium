@@ -59,13 +59,35 @@ import { getGroundingDocument } from './context.js';
 import { resolveAppRoot } from './app-root.js';
 import { resolveEngineDir, findEngineDirFromCwd } from './engine-root.js';
 
-// RED-354: exported so consumers can write
-//   import type { IR } from '@redwood-labs/cambium-runner';
-//   const ir: IR = { ...irData };
-// instead of `as any`-casting at every call site. The type is still
-// loose (alias for `any`) — sharpening to a structured interface is a
-// follow-up; the export gives consumers a stable name to import today.
-export type IR = any;
+// Road to 1.0 — Gate 1 ("IR is Arel").
+//
+// `IR` is an **opaque, phantom-branded** handle. Consumers obtain IR
+// objects by calling `cambium compile` (or `runGen` / `runGenFromIr`),
+// and pass them back to runner functions — they do NOT read fields off
+// the type. The TS type deliberately encodes that contract: field access
+// on a value typed as `IR` is a compile error.
+//
+// Consumer path (unchanged at runtime):
+//   const ir: IR = JSON.parse(irText);   // JSON.parse → any → IR  ✓
+//   await runGen({ ir, schemas });        // passes through opaque  ✓
+//
+// The IR *JSON shape* is the promised, golden-pinned data contract —
+// documented in `docs/GenDSL Docs/C - IR (Intermediate Representation).md`.
+// The exported *TypeScript type* is the unpromised opaque handle; Gate 6's
+// compatibility document will formalize the distinction.
+//
+// Internally, the runner reads IR fields through `IRInternal` (= any),
+// cast once at each public-boundary entry. `IRInternal` is exported
+// from this module but intentionally NOT re-exported from `src/index.ts`,
+// so it is package-private (Node blocks deep imports of `dist/runner.js`
+// via the package `exports` map).
+declare const IR_BRAND: unique symbol;
+export type IR = { readonly [IR_BRAND]: never };
+
+// Package-private internal alias. Used by runner.ts, pipeline.ts, and
+// serve/serve.ts to read IR fields after casting from the public opaque
+// type at the public-boundary entry point. MUST NOT appear in index.ts.
+export type IRInternal = any;
 
 type Args = {
   irPath: string;
@@ -750,8 +772,11 @@ class BudgetExceededError extends Error {
 }
 
 export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
+  // Cast the public opaque IR to the package-private internal alias so
+  // field reads below compile. One cast at the public boundary; the rest
+  // of the function body is untyped-field-access-friendly via IRInternal.
+  const ir: IRInternal = opts.ir as IRInternal;
   const {
-    ir,
     schemas: contractsMod,
     mock: mockFlag = false,
     memoryKeys = [],
@@ -1214,8 +1239,8 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   // WRITERS, not primary gens with their own memory. Skip the whole
   // memory machinery for them — a retro agent shouldn't have its own
   // memory block injected, and it shouldn't trigger a nested retro
-  // invocation on its own write_memory_via. This guard also prevents
-  // infinite recursion if someone accidentally sets write_memory_via
+  // invocation on its own writes_memory_via. This guard also prevents
+  // infinite recursion if someone accidentally sets writes_memory_via
   // on a retro agent.
   const isRetroMode = ir.mode === 'retro';
   const memoryDecls = isRetroMode ? [] : (ir.policies?.memory ?? []);
@@ -1284,7 +1309,28 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   };
 
   // ── Budget tracking ─────────────────────────────────────────────────
-  const budget = parseBudget(ir.policies);
+  // parseBudget throws on malformed budget values (fail-closed). Catch
+  // here so a bad IR config produces a structured RunGenResult rather
+  // than an uncaught throw. Shape mirrors DocumentExtractionFailed above.
+  let budget: ReturnType<typeof parseBudget>;
+  try {
+    budget = parseBudget(ir.policies);
+  } catch (e: any) {
+    trace.steps.push({
+      type: 'BudgetParseFailed',
+      ok: false,
+      errors: [{ message: e?.message ?? String(e) }],
+    });
+    return {
+      ok: false,
+      output: null,
+      trace,
+      runId,
+      schemaId: schema.$id,
+      ir,
+      errorMessage: `Budget config invalid: ${e?.message ?? String(e)}`,
+    };
+  }
 
   /** Track usage/tool calls from a trace step and check budget. Throws on violation. */
   function budgetTrack(step: any): void {
@@ -1426,7 +1472,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
         },
       });
     } else if (ir.mode === 'agentic') {
-      const maxToolCalls = ir.policies?.constraints?.budget?.max_tool_calls ?? 20;
+      const maxToolCalls = budget.limits.max_tool_calls ?? 20;
       const toolsOpenAI = toolRegistry.toOpenAIFormat(toolsAllowed);
 
       const agenticResult = await handleAgenticGenerate(
@@ -1948,7 +1994,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
 
   // ── Memory (RED-215 phase 3): commit turn on success ────────────────
   // Trivial-default write: one {input, output} entry per writable
-  // bucket. If the gen declared write_memory_via, defer to the retro
+  // bucket. If the gen declared writes_memory_via, defer to the retro
   // agent (phase 4) — we emit a trace note so the run's memory story
   // is visible even before the agent runtime lands.
   if (memoryPlans.length > 0) {
@@ -1981,7 +2027,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
           ok: false,
           errors: [{
             message:
-              `write_memory_via :${agentClass} declared but no .cmb.rb file found. ` +
+              `writes_memory_via :${agentClass} declared but no .cmb.rb file found. ` +
               'Searched sibling of primary and the framework app/gens/ fallback.',
           }],
         });
@@ -2223,6 +2269,11 @@ export interface RunGenFromIrResult extends RunGenResult {
 
 export async function runGenFromIr(opts: RunGenFromIrOptions): Promise<RunGenFromIrResult> {
   const cwd = opts.cwd ?? process.cwd();
+  // Cast the public opaque IR to the package-private internal alias so
+  // entry.source and other field reads below compile. One cast per
+  // public-boundary entry; the casted value is threaded into runGen
+  // as `opts.ir` (still typed as IR on the public interface).
+  const irInternal: IRInternal = opts.ir as IRInternal;
 
   // RED-330: generate the run id and emit the run dir + trace path to
   // stderr BEFORE any heavy work (schema resolution, app correctors,
@@ -2251,7 +2302,7 @@ export async function runGenFromIr(opts: RunGenFromIrOptions): Promise<RunGenFro
   // an ancestor." Source-anchored detection still wins when the path
   // exists — the test in engine_mode_e2e (run-from-anywhere) keeps
   // working because the absolute path is reachable in-process.
-  const sourceFromIr = opts.ir.entry?.source;
+  const sourceFromIr = irInternal.entry?.source;
   const engineFromSource = resolveEngineDir(sourceFromIr);
   const engineFromCwd = !engineFromSource && sourceFromIr && !existsSync(sourceFromIr)
     ? findEngineDirFromCwd(cwd)
@@ -2293,7 +2344,7 @@ export async function runGenFromIr(opts: RunGenFromIrOptions): Promise<RunGenFro
   // where contracts loaded from the gen's workspace but plugins loaded from
   // cwd — the recurring Docker/CI/run-from-anywhere bug class. See the
   // "App-root resolution is single-sourced" invariant in CLAUDE.md.
-  const genfileDirFromSource = findGenfileDir(opts.ir.entry?.source);
+  const genfileDirFromSource = findGenfileDir(irInternal.entry?.source);
   const genfileDir = genfileDirFromSource ?? cwd;
   const genfile = resolveGenfileContracts(genfileDir);
   let appCorrectors: Record<string, CorrectorFn> | undefined;
@@ -2376,7 +2427,7 @@ export async function runGenFromIr(opts: RunGenFromIrOptions): Promise<RunGenFro
 async function main() {
   const { irPath, traceOut, outputOut, mock, memoryKeys, firedBy } = parseArgs(process.argv.slice(2));
   const irText = irPath === '-' ? readFileSync(0, 'utf8') : readFileSync(irPath, 'utf8');
-  const ir: IR = JSON.parse(irText);
+  const ir: IRInternal = JSON.parse(irText);
 
   const result = await runGenFromIr({
     ir,

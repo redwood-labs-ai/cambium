@@ -94,7 +94,7 @@
       "    block_metadata: true,",
       "  }"
     ],
-    "description": "Tool egress policy (RED-137). Add filesystem: { roots: [...] } / exec: { allowed: true } as needed."
+    "description": "Tool egress policy (RED-137). Add filesystem: { roots: [...] } / exec: { runtime: :wasm } as needed."
   },
   "Budget config": {
     "prefix": "budget",
@@ -177,7 +177,7 @@
   "Write memory via retro agent": {
     "prefix": "writemem",
     "body": [
-      "write_memory_via :${1:SupportMemoryAgent}"
+      "writes_memory_via :${1:SupportMemoryAgent}"
     ],
     "description": "Route memory writes through a retro agent instead of the trivial-default writer (RED-215 phase 4)."
   },
@@ -186,14 +186,22 @@
     "body": [
       "security \\",
       "  exec: {",
-      "    runtime: :${1|wasm,firecracker,native|},",
+      "    runtime: :${1|wasm,firecracker|},",
       "    language: :${2|javascript,python|},",
       "    timeout: ${3:30},",
       "    memory: ${4:256},",
       "    cpu: ${5:1}",
       "  }"
     ],
-    "description": "Sandboxed exec config (RED-248/254/258/259). :wasm and :firecracker are sandboxed; :native is deprecated."
+    "description": "Sandboxed exec config (RED-248/254/258/259). :wasm and :firecracker are sandboxed substrates."
+  },
+  "Exec unsandboxed opt-in": {
+    "prefix": "execunsafe",
+    "body": [
+      "security \\",
+      "  exec: { unsafe_native: true }"
+    ],
+    "description": "Explicit sharp-knife opt-in for unsandboxed native exec (Gate 3). Emits tool.exec.unsandboxed on every call. Prefer runtime: :wasm | :firecracker."
   },
   "Action in trigger": {
     "prefix": "action",
@@ -249,7 +257,8 @@
       "  concurrency ${8:2}",
       "  on_branch_failure :${9|continue,fail_fast|}",
       "  require :${10|all|}",
-      "  pass_context :${11:upstream_field}",
+      "  context :${11:upstream_field}",
+      "  # prewarm false",
       "end"
     ],
     "description": "Parallel pipeline fan-out (RED-381 Phase C). N branches against shared upstream context; downstream `bind(:fan_id)` returns the typed array."
@@ -258,7 +267,7 @@
     "prefix": "branchon",
     "body": [
       "branch_on bind(:${1:upstream_step}).${2:signal_field} do",
-      "  on :${3:critical} do",
+      "  match :${3:critical} do",
       "    step :${4:urgent_action}, gen: ${5:UrgentGen}, method: :${6:handle}",
       "  end",
       "  default do",

@@ -118,7 +118,7 @@ class MorningDigest < Cambium::GenModel
 
   cron :daily, at: "9:00"
   memory :yesterday, scope: :schedule, strategy: :sliding_window, size: 1
-  write_memory_via :DigestMemoryAgent
+  writes_memory_via :DigestMemoryAgent
   log :app_default
 
   def analyze(input)

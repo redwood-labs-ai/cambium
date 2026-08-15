@@ -11,7 +11,7 @@ class Analyst < GenModel
   uses :web_search, :calculator
   corrects :math
 
-  constrain :budget, max_tool_calls: 4
+  budget per_run: { max_calls: 4 }
   grounded_in :document, require_citations: true
 
   def analyze(document)
@@ -121,6 +121,10 @@ Full documentation is in [`docs/GenDSL Docs/`](docs/GenDSL%20Docs/) — a knowle
 - [`00 - Getting Started.md`](docs/GenDSL%20Docs/00%20-%20Getting%20Started.md)
 - [`01 - Core Concepts.md`](docs/GenDSL%20Docs/01%20-%20Core%20Concepts.md)
 - [`Generation Engineering DSL — Docs Map`](docs/GenDSL%20Docs/Generation%20Engineering%20DSL%20%E2%80%94%20Docs%20Map%20%28Knowledge%20Graph%29.md)
+
+The 1.0 compatibility promise — which surfaces semver covers, what "additive" means per surface, and the deprecation register — is at the repo root:
+
+- [`COMPATIBILITY.md`](COMPATIBILITY.md)
 
 ## Engine mode
 

@@ -853,7 +853,7 @@ function generatePolicy(name, ctx) {
 #   allowlist_paths: %w[/data/in /tmp/cambium]
 
 # exec \\
-#   runtime: :wasm,          # :wasm | :firecracker | :native (deprecated)
+#   runtime: :wasm,          # :wasm | :firecracker (use unsafe_native: true for unsandboxed)
 #   language: :javascript,
 #   timeout: 30,
 #   memory: 256
@@ -1143,12 +1143,16 @@ class ${pascal} < Pipeline
   #   concurrency 2
   #   on_branch_failure :continue
   #   require :all
-  #   pass_context :summary
+  #   context :summary
+  #   # prewarm false        # default on: with concurrency > 1 and a shared
+  #   #                      # grounded prefix, the runner auto-warms the
+  #   #                      # provider prompt cache once per model tier
+  #   #                      # before dispatch (N - Orchestration Layer).
   # end
 
   # Example branch_on (deterministic conditional, REQUIRES a default block):
   # branch_on bind(:triage).severity do
-  #   on :critical do
+  #   match :critical do
   #     step :urgent, gen: TODOUrgent, method: :handle
   #   end
   #   default do

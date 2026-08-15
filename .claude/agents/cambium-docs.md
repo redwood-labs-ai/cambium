@@ -126,7 +126,7 @@ Where to look when checking invariants:
 - `README.md` — "Key features" + project-structure tree; user-facing surface.
 
 ### DSL source (inventory sources for code ↔ docs alignment)
-- `ruby/cambium/runtime.rb` — DSL methods on `GenModel` class-level (e.g. `model`, `memory`, `write_memory_via`).
+- `ruby/cambium/runtime.rb` — DSL methods on `GenModel` class-level (e.g. `model`, `memory`, `writes_memory_via`).
 - `ruby/cambium/compile.rb` — IR emission shape (the `ir = { ... }` block toward the bottom).
 
 ### Meta-tooling (CLI + VS Code — parity surfaces)

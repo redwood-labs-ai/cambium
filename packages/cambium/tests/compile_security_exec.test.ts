@@ -1,11 +1,15 @@
 /**
- * RED-248: compile-time validation of the `security exec:` DSL shape.
+ * RED-248 / Gate-3: compile-time validation of the `security exec:` DSL shape.
  *
- * Two shapes accepted:
- *   - Legacy: `{ allowed: true|false }` — resolves to runtime: 'native'
- *     when allowed, runs unsandboxed (fig-leaf back-compat).
- *   - New (RED-213): `{ runtime:, cpu:, memory:, timeout:, network:,
- *     filesystem:, max_output_bytes: }` — runtime: required.
+ * Three shapes accepted after Gate 3:
+ *   - Sandboxed: `{ runtime: :wasm | :firecracker, cpu:, memory:, timeout:,
+ *     network:, filesystem:, max_output_bytes: }` — runtime: required.
+ *   - Sharp-knife opt-in: `{ unsafe_native: true }` — explicit unsandboxed
+ *     native; emits `tool.exec.unsandboxed` + stderr warning on every call.
+ *
+ * These shapes are now COMPILE ERRORS:
+ *   - `{ allowed: true }` with no runtime (DEC-003)
+ *   - `{ runtime: :native, ... }` (DEC-002)
  *
  * Range validation + unknown-key rejection happens at compile time so
  * authors get clear errors before the runner ever starts.
@@ -45,10 +49,10 @@ function writeGen(body: string): string {
   return gen;
 }
 
-describe('security exec: DSL (RED-248)', () => {
-  // ── Back-compat (legacy { allowed: true }) ──────────────────────────
+describe('security exec: DSL (RED-248 / Gate-3)', () => {
+  // ── Gate-3 compile errors ───────────────────────────────────────────
 
-  it('legacy `{ allowed: true }` resolves to runtime: native', () => {
+  it('{ allowed: true } with no runtime is now a compile error (Gate 3)', () => {
     const gen = writeGen(`
 class LegacyExec < GenModel
   model "omlx:stub"
@@ -58,12 +62,45 @@ class LegacyExec < GenModel
   def go(_x); generate "x" do; returns AnalysisReport; end; end
 end
 `);
+    const stderr = compileExpectError(gen, 'go');
+    expect(stderr).toMatch(/no longer defaults to unsandboxed native/);
+    expect(stderr).toMatch(/unsafe_native: true/);
+  });
+
+  it('runtime: :native is a compile error (Gate 3, DEC-002)', () => {
+    const gen = writeGen(`
+class NativeRuntime < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  security exec: { runtime: :native, cpu: 1, memory: 64, timeout: 5 }
+  def go(_x); generate "x" do; returns AnalysisReport; end; end
+end
+`);
+    const stderr = compileExpectError(gen, 'go');
+    expect(stderr).toMatch(/runtime: :native is no longer accepted/);
+    expect(stderr).toMatch(/unsafe_native: true/);
+  });
+
+  it('unsafe_native: true compiles to { allowed: true, runtime: "native", unsafe_native: true }', () => {
+    const gen = writeGen(`
+class UnsafeNativeExec < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  security exec: { unsafe_native: true }
+  def go(_x); generate "x" do; returns AnalysisReport; end; end
+end
+`);
     const ir = compile(gen, 'go');
     expect(ir.policies.security.exec).toMatchObject({
       allowed: true,
       runtime: 'native',
+      unsafe_native: true,
     });
   });
+
+  // ── allowed: false path (unchanged) ────────────────────────────────
 
   it('legacy `{ allowed: false }` does NOT auto-resolve runtime', () => {
     const gen = writeGen(`
@@ -248,8 +285,9 @@ end
   });
 });
 
-// RED-249: CAMBIUM_STRICT_EXEC=1 makes :native a hard compile error.
-describe('security exec: CAMBIUM_STRICT_EXEC=1 (RED-249)', () => {
+// DEC-004: CAMBIUM_STRICT_EXEC=1 now means org-wide lockdown — rejects even unsafe_native: true.
+// { allowed: true } and runtime: :native are already unconditional compile errors (Gate 3).
+describe('security exec: CAMBIUM_STRICT_EXEC=1 (DEC-004)', () => {
   function compileExpectErrorStrict(genPath: string, method: string): string {
     try {
       execSync(
@@ -262,7 +300,7 @@ describe('security exec: CAMBIUM_STRICT_EXEC=1 (RED-249)', () => {
     }
   }
 
-  it('rejects legacy { allowed: true } (which resolves to :native) under strict mode', () => {
+  it('rejects { allowed: true } under strict mode (still a compile error, same as non-strict)', () => {
     const gen = writeGen(`
 class StrictNative < GenModel
   model "omlx:stub"
@@ -273,10 +311,10 @@ class StrictNative < GenModel
 end
 `);
     const stderr = compileExpectErrorStrict(gen, 'go');
-    expect(stderr).toMatch(/blocked by CAMBIUM_STRICT_EXEC=1/);
+    expect(stderr).toMatch(/no longer defaults to unsandboxed native/);
   });
 
-  it('rejects explicit runtime: :native under strict mode', () => {
+  it('rejects runtime: :native under strict mode (still a compile error, same as non-strict)', () => {
     const gen = writeGen(`
 class StrictExplicitNative < GenModel
   model "omlx:stub"
@@ -287,7 +325,22 @@ class StrictExplicitNative < GenModel
 end
 `);
     const stderr = compileExpectErrorStrict(gen, 'go');
-    expect(stderr).toMatch(/blocked by CAMBIUM_STRICT_EXEC=1/);
+    expect(stderr).toMatch(/runtime: :native is no longer accepted/);
+  });
+
+  it('CAMBIUM_STRICT_EXEC=1 rejects even unsafe_native: true (DEC-004)', () => {
+    const gen = writeGen(`
+class StrictUnsafeNative < GenModel
+  model "omlx:stub"
+  system "inline"
+  returns AnalysisReport
+  security exec: { unsafe_native: true }
+  def go(_x); generate "x" do; returns AnalysisReport; end; end
+end
+`);
+    const stderr = compileExpectErrorStrict(gen, 'go');
+    expect(stderr).toMatch(/CAMBIUM_STRICT_EXEC=1 is set/);
+    expect(stderr).toMatch(/unsandboxed native exec is prohibited/);
   });
 
   it('still accepts runtime: :wasm under strict mode', () => {

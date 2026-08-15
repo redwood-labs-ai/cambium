@@ -4,6 +4,79 @@ All notable changes to Cambium are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Cambium adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — 2026-08-14 — The Contract
+
+The last-call release: every break Cambium wanted lands at once — strict exec by default, an opaque `IR` type, four DSL keyword renames — under a golden corpus that pins the DSL → IR mapping snapshot-by-snapshot, and a compatibility document that states, surface by surface, what 1.0 will promise.
+
+### Breaking Changes
+
+- **`security exec:` strict default (Road to 1.0, Gate 3).** `security exec: { allowed: true }` (with no explicit `runtime:`) and `security exec: { runtime: :native }` are now compile errors by default. Unsandboxed native execution is available only via the explicit opt-out `security exec: { unsafe_native: true }`, which continues to emit the `tool.exec.unsandboxed` trace step and a per-run stderr warning. `CAMBIUM_STRICT_EXEC=1` now additionally prohibits `unsafe_native: true` (org-wide lockdown). Migrate existing gens with `{ allowed: true }` to `{ runtime: :wasm }` (sandboxed, recommended) or `{ unsafe_native: true }` (explicit sharp-knife).
+
+- **DSL naming sweep (Road to 1.0, Gate 5).** Four DSL keywords renamed for naming-convention consistency. Old names are now loud errors (no deprecation shims).
+
+  | Old | New | Surface |
+  |-----|-----|---------|
+  | `write_memory_via` | `writes_memory_via` | `GenModel` class-level keyword (aligns tense with its twin `reads_trace_of`) |
+  | `prewarm_cache` | `prewarm` | `fan_out` block option; IR operator key `prewarm_cache` → `prewarm` |
+  | `pass_context` | `context` | `fan_out` block option; IR operator key `pass_context` → `context` |
+  | `on :value do` (inside `branch_on`) | `match :value do` | `branch_on` block value-matcher (gen-level trigger `on` is unchanged) |
+
+  `grounded_in` was reviewed in the same sweep and deliberately kept (its past-participle form is the clearer UX).
+
+### Added
+
+- **Golden IR corpus — the DSL → IR contract as a failing test (Road to 1.0, Gate 4).** The mapping from Ruby DSL to JSON IR *is* the 1.0 contract, and nothing pinned it directly before now. Two halves land together: an **acceptance** corpus (15 committed JSON snapshots — 12 gens + 3 pipelines — compiled from the in-tree sources and diffed on every run) and a **rejection** corpus (29 cases covering every DSL keyword family, pinning the exact error text malformed DSL produces, because a good error message is a promised surface too). `npm run test:golden` runs offline in ~1s; a Forgejo CI workflow (`.forgejo/workflows/golden-ir.yml`) enforces it on every push and PR. This landed *first* in the 0.9 window, deliberately — it is the safety net the rest of the release's breaks fell under.
+
+- **Automatic fan-out prompt-cache prewarm (contrib by kennethsqe, ref AIE-1046).** When a `fan_out` has `concurrency > 1` and its branches share a grounded cacheable prefix, the branches previously dispatched in one tick and raced cold — each writing its own copy of the shared prefix at full price. The runner now fires one tiny warm-up per distinct (model tier × prefix) before dispatch, so the branches read the prefix from cache instead; this removes the hand-written tier-matched warm-up gens workspaces were carrying. The prewarm path and the real gen path build the prefix through the *same* assemblers (`buildGenSystem` / `buildCacheablePrefix`, extracted from `handleGenerate`) — byte-identity is the cache-hit precondition. Best-effort by construction: every failure path is swallowed, and a warm-up that throws just leaves those branches on the cold path. Gated off for `concurrency 1`, single-branch, ungrounded, sub-floor prefixes, and `--mock`; opt out per fan-out with `prewarm false`. Adds IR field `operators[].prewarm` (absent when unset → IR byte-identical to 0.8.1 for existing pipelines) and trace field `PipelineFanOut.meta.prewarm`.
+
+- **`COMPATIBILITY.md` — the 1.0 compatibility promise (Road to 1.0, Gate 6).** A repo-root document formalizing which six surfaces semver covers — Ruby DSL vocabulary, IR JSON shape, serve `/v1` wire format, trace step vocabulary, runner library API, CLI surface — the precise additivity rule per surface, the explicit *not-promised* list (IR TypeScript type, runner internals, `--mock` bytes, golden snapshot bytes), and the deprecation register (`registerAppCorrectors`, `policies.constraints.budget` — deprecated 0.9 → removed 1.0). Also proves the three headline post-1.0 deferrals (retrieval/corpora, streaming, async retro-agents) each have an additive landing path. `error.kind` is frozen at 11 values; cooperative cancellation is modeled as a non-error outcome rather than a 12th kind.
+
+- **`budget per_run:` extended metrics.** The `budget` primitive's `per_run:` hash now accepts `max_tokens` (positive integer, token cap per run), `max_duration` (string `^(\d+)(s|m|h)$` — e.g. `"5m"`, `"30s"`, `"1h"`, enforced as elapsed wall time), and `max_calls` (positive integer, tool-call cap; aliased to `max_tool_calls` on read). All three are enforced at runtime by the existing `Budget` class. Unknown metrics continue to raise `ArgumentError` at compile time.
+
+  ```ruby
+  budget per_run: { max_tokens: 5000, max_duration: "5m", max_calls: 10 }
+  ```
+
+### Changed
+
+- **`IR` type made opaque (Road to 1.0, Gate 1).** `export type IR` is now a phantom-branded opaque handle — reading its fields is a compile error. Consumers obtain `IR` via `JSON.parse(irText)` (any → IR) or from runner result objects (`RunGenResult.ir`). See `C - IR (Intermediate Representation)` § Two-level contract. Supersedes the RED-354 entry's "sharpening to a structured interface is a follow-up" note.
+
+- **Provider errors surface the upstream body, uniformly and redacted.** Four divergent provider error paths collapse into one format — `{label} error: HTTP {status} — {redactedBody}` (body omitted when empty) — across all six throw sites in `factories.ts` (`openaiCompatible`, `anthropicCompatible`) and `builtins.ts` (Ollama `generateText` + `generateWithTools`). A pure helper, `redactErrorBody()` in `providers/redact.ts`, strips bearer tokens, labelled API-key/secret fields, and `sk-`/`ak-`/`rk-`/`tok-` prefixed tokens (case-insensitively) before truncating to 1500 chars. The `surfaceErrorBody` config knob is **removed** — body surfacing is always on now that it is redacted; custom providers built on the factories inherit the behavior and should drop the flag.
+
+### Fixed
+
+- **Anthropic: `temperature` omitted for models that reject sampling params.** Newer Anthropic models (Opus 4.7+, Fable 5, Mythos 5, and unknown future ids) removed support for `temperature`/`top_p`/`top_k` entirely — sending them produces an HTTP 400. The provider now checks an accept-list via the exported helper `acceptsSamplingParams(model)`: known-accepting prefixes (`claude-3*`, `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5`) continue to receive `temperature: opts.temperature ?? 0.2`; everything else — including unknown/future ids — falls through to omission, the safe default.
+
+### Security
+
+- **npm audit sweep — vitest RCE, `fast-uri` (shipped runtime dep), postcss/vite.** Clears four of five flagged advisories, including both that carried real exposure. `vitest` 3.2.4 → 3.2.7 closes a critical Vitest UI-server arbitrary file read/exec (GHSA-5xrq-8626-4rwp, dev tooling). `fast-uri` 3.1.0 → 3.1.4 — transitive under `ajv`, and therefore a *shipped* runtime dependency — closes a path traversal + host confusion pair (GHSA-q3j6-qgpj-74h6 and siblings); this is the one downstream-facing fix. `overrides` pins `postcss` 8.5.19 and `vite` 7.3.6 for three dev-chain highs (GHSA-6g55-p6wh-862q, GHSA-r28c-9q8g-f849, GHSA-fx2h-pf6j-xcff) — chosen as the oldest patched versions clearing the 7-day minimum-release-age gate, since `npm audit fix` wanted a 3-day-old postcss the age policy rejects. Deferred: the esbuild Windows dev-server file read (GHSA-g7r4-m6w7-qqqr) is unreachable in Cambium's usage and needs a `tsx` runtime-dep bump; tracked separately.
+
+### Deprecated
+
+- **`constrain :budget` / `policies.constraints.budget` (Road to 1.0, Gate 2).** The `constrain :budget, max_tool_calls: N, max_duration: "5m"` DSL form and its compiled IR shape `policies.constraints.budget` are deprecated and will be removed in Cambium 1.0. The runner now emits a one-time stderr warning when this shape is encountered. Migrate to the `budget` primitive:
+
+  ```ruby
+  # Before (deprecated):
+  constrain :budget, max_tool_calls: 10, max_tokens: 5000, max_duration: "5m"
+
+  # After:
+  budget per_run: { max_calls: 10, max_tokens: 5000, max_duration: "5m" }
+  ```
+
+- **`registerAppCorrectors` (Road to 1.0, Gate 2).** The `registerAppCorrectors` module-global remains deprecated — the runner has emitted a one-time stderr warning since the per-run corrector registry landed (RED-299), and 0.9 formalizes it in the `COMPATIBILITY.md` deprecation register. Migrate to `RunGenOptions.correctors` in `runGen` calls (per-`runGen`, no module-global state). Removal is scheduled for Cambium 1.0. No code change in this release.
+
+### Upgrade from 0.8.1
+
+Four mechanical renames and one default flip. Everything else in 0.9 is additive.
+
+1. **DSL renames** — old names now raise. `write_memory_via` → `writes_memory_via`; in `fan_out` blocks, `prewarm_cache` → `prewarm` and `pass_context` → `context`; inside `branch_on`, `on :value do` → `match :value do` (the gen-level trigger `on` is unchanged).
+2. **Exec sandboxing** — `security exec: { allowed: true }` and `runtime: :native` are now compile errors. Move to `{ runtime: :wasm }` (recommended) or, if you genuinely need unsandboxed native, the explicit `{ unsafe_native: true }` — which stays loud (`tool.exec.unsandboxed` trace step + per-run stderr warning) and can be prohibited org-wide with `CAMBIUM_STRICT_EXEC=1`.
+3. **Budgets** — `constrain :budget, …` still works but now warns. Move to `budget per_run: { max_calls:, max_tokens:, max_duration: }`; it is removed at 1.0.
+4. **Library consumers** — if you read fields off the exported `IR` type, that is now a compile error. Obtain the IR via `JSON.parse(irText)` or `RunGenResult.ir`. The IR *JSON shape* is unchanged and remains a promised, additive-only surface.
+5. **Custom providers** — drop the `surfaceErrorBody` flag if you passed it to `openaiCompatible` / `anthropicCompatible`; redacted body surfacing is now always on.
+
+Recompiled IR is byte-identical to 0.8.1 for any gen or pipeline that doesn't use the renamed keywords.
+
 ## [0.8.1] — 2026-06-28 — The Provider Horizon
 
 Parity closes: engine-mode custom providers land with the same guards, scaffolding, and LSP support as app-mode. A community contribution cuts fan-out input costs by more than half, and a security patch rolls undici forward past four advisories.

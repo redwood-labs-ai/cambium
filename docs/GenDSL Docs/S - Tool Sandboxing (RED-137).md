@@ -88,9 +88,11 @@ Budget state lives on the run context, not global. Counters per
 
 - `calls` — incremented before dispatch.
 
-(`max_bytes`, `max_tokens`, `max_cost_usd` are deferred — see Out of scope.
- `max_calls` is the runaway-loop case and lands real value today without
- requiring a tokenizer or cost reporting in the dispatch path.)
+Per-run limits (`per_run:`): `max_calls` (total tool invocations), `max_tokens`
+(total prompt + completion tokens), `max_duration` (wall-clock elapsed time,
+e.g. `"5m"`). See [[P - Policy Packs (RED-214)]] for the full shape and enforcement notes.
+
+(`max_bytes`, `max_cost_usd` remain deferred — see Out of scope.)
 
 Check happens **before** dispatch. Exceeding any limit raises
 `BudgetExceeded` with the limit, current value, and increment that would
@@ -134,9 +136,10 @@ New event types under `tool.*`:
   },
   "budget": {
     "per_tool": { "tavily": { "max_calls": 5 } },
-    "per_run":  { "max_calls": 100 }
+    "per_run":  { "max_calls": 100, "max_tokens": 5000, "max_duration": "5m" }
   }
-  // v1 supports max_calls only. See "Out of scope" for rationale.
+  // per_run supports: max_calls, max_tokens, max_duration ("Ns"/"Nm"/"Nh").
+  // per_tool supports: max_calls only.
 }
 ```
 
@@ -145,11 +148,9 @@ New event types under `tool.*`:
 - HTTPS cert pinning per host.
 - Outbound proxy enforcement.
 - Filesystem write sandboxing (read-only roots only for now).
-- Byte / token / USD cost budgets. Bytes don't track the real cost (model
-  tokens do); tokens need a tokenizer in the dispatch path and a per-model
-  strategy; USD needs a tool `_meta` convention for cost reporting.
-  `max_calls` covers the runaway-loop case cheaply; the rest lands as a
-  follow-up once we settle the tokenizer/`_meta` questions.
+- Byte / USD cost budgets. `max_bytes` doesn't track the real cost; USD needs
+  a tool `_meta` convention for cost reporting. (`max_tokens` and `max_duration`
+  shipped in the Gate 2 budget extension — they are no longer out of scope.)
 
 ## Test plan
 

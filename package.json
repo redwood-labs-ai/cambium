@@ -1,6 +1,6 @@
 {
   "name": "@redwood-labs/cambium",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "description": "Rails for generation engineering — CLI for building reliable LLM programs with Cambium's Ruby DSL.",
   "license": "MIT",
   "author": {
@@ -43,6 +43,7 @@
     "run": "node ./cli/cambium.mjs",
     "compile": "ruby ./ruby/cambium/compile.rb",
     "test": "npm run build && vitest run",
+    "test:golden": "vitest run packages/cambium/tests/golden",
     "build": "npm run build --workspace @redwood-labs/cambium-runner",
     "prepack": "node scripts/prepack.mjs",
     "postpack": "node scripts/postpack.mjs",
@@ -53,13 +54,17 @@
     "pre-publish-check": "node scripts/pre-publish-check.mjs"
   },
   "dependencies": {
-    "@redwood-labs/cambium-runner": "0.8.1",
+    "@redwood-labs/cambium-runner": "0.9.0",
     "dotenv": "17.4.2",
     "smol-toml": "1.6.1",
     "tsx": "4.21.0"
   },
   "devDependencies": {
     "typescript": "5.9.3",
-    "vitest": "3.2.4"
+    "vitest": "3.2.7"
+  },
+  "overrides": {
+    "postcss": "8.5.19",
+    "vite": "7.3.6"
   }
 }

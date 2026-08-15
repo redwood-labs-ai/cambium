@@ -26,6 +26,16 @@ export type BudgetViolation = {
   tool?: string;    // set when the violation is per-tool
 };
 
+let legacyConstraintsBudgetWarned = false;
+
+/**
+ * Test-only: reset the deprecation-warning flag between test cases.
+ * Production code must never call this.
+ */
+export function _resetLegacyBudgetWarningForTests(): void {
+  legacyConstraintsBudgetWarned = false;
+}
+
 export class Budget {
   readonly limits: BudgetLimits;
   readonly perTool: Record<string, PerToolLimits>;
@@ -192,46 +202,96 @@ export function trackBudgetFromTraceStep(budget: Budget, step: any): void {
   }
 }
 
+/** Parse a duration string ("30s", "5m", "1h") into milliseconds.
+ * Returns the ms value on success.
+ * Throws a clear error when the value is present but not well-formed.
+ */
+function parseDurationMs(val: unknown, context: string): number {
+  const str = String(val);
+  const m = str.match(/^(\d+)(s|m|h)$/);
+  if (!m) {
+    throw new Error(
+      `[cambium] invalid budget ${context} "${str}": expected a duration like "30s", "5m", "1h"`,
+    );
+  }
+  const n = Number(m[1]);
+  const unit = m[2];
+  return unit === 's' ? n * 1000 : unit === 'm' ? n * 60_000 : n * 3600_000;
+}
+
+/** Assert that a count field is a positive integer (NaN, ≤0, or non-integer are rejected).
+ * `val` is only validated when it is not null/undefined — absent fields pass through.
+ */
+function assertPositiveInt(val: unknown, fieldName: string): number {
+  const n = Number(val);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(
+      `[cambium] invalid budget ${fieldName} ${JSON.stringify(val)}: expected a positive integer`,
+    );
+  }
+  return n;
+}
+
 /**
  * Parse budget from IR policies.
  *
  * Reads the new top-level `policies.budget` (RED-137) shape:
- *   { per_tool: { tavily: { max_calls, max_bytes } }, per_run: { max_calls } }
+ *   { per_tool: { tavily: { max_calls } }, per_run: { max_calls, max_tokens, max_duration } }
  *
  * Also reads the legacy `policies.constraints.budget` shape for any gen
  * that still declares `constrain :budget, max_tool_calls: N, max_duration: "5m"`.
- * Legacy max_tokens / max_tool_calls / max_duration land on per-run limits;
- * if both are present, top-level wins per-metric.
+ * Legacy max_tokens / max_tool_calls / max_duration land on per-run limits.
+ * When both shapes are present, `policies.budget` (top-level) is used; the
+ * legacy path is only reached when `policies.budget` is absent.
+ *
+ * Fail-closed: any budget metric that is PRESENT but malformed (bad duration
+ * format, non-positive-integer count) throws immediately so the run is refused
+ * rather than silently uncapped. Absent metrics never throw.
  */
 export function parseBudget(policies: any): Budget {
+  if (!legacyConstraintsBudgetWarned && policies?.constraints?.budget != null) {
+    legacyConstraintsBudgetWarned = true;
+    console.error(
+      '[cambium] policies.constraints.budget is deprecated and will be removed in Cambium 1.0. ' +
+      'Use the `budget` primitive instead: `budget per_run: { max_calls: N, max_tokens: N, max_duration: "5m" }`.',
+    );
+  }
+
   const legacy = policies?.budget ?? policies?.constraints?.budget ?? {};
   const top = policies?.budget ?? null;
   const isTopLevel = top && (top.per_tool || top.per_run);
 
   let maxDurationMs: number | undefined;
   const legacyDuration = legacy?.max_duration;
-  if (legacyDuration) {
-    const m = String(legacyDuration).match(/^(\d+)(s|m|h)$/);
-    if (m) {
-      const val = Number(m[1]);
-      const unit = m[2];
-      maxDurationMs = unit === 's' ? val * 1000 : unit === 'm' ? val * 60_000 : val * 3600_000;
-    }
+  if (legacyDuration != null) {
+    maxDurationMs = parseDurationMs(legacyDuration, 'max_duration');
   }
 
   const perRun = isTopLevel ? (top.per_run ?? {}) : {};
   const perTool = isTopLevel ? (top.per_tool ?? {}) : {};
 
+  if (perRun.max_duration != null) {
+    maxDurationMs = parseDurationMs(perRun.max_duration, 'per_run.max_duration');
+  }
+
   const runLimits: BudgetLimits = {
-    max_tokens:      perRun.max_tokens      ?? (legacy.max_tokens      != null ? Number(legacy.max_tokens)      : undefined),
-    max_tool_calls:  perRun.max_calls       ?? perRun.max_tool_calls   ?? (legacy.max_tool_calls  != null ? Number(legacy.max_tool_calls)  : undefined),
+    max_tokens: perRun.max_tokens != null
+      ? assertPositiveInt(perRun.max_tokens, 'per_run.max_tokens')
+      : (legacy.max_tokens != null ? assertPositiveInt(legacy.max_tokens, 'max_tokens') : undefined),
+    max_tool_calls: perRun.max_calls != null
+      ? assertPositiveInt(perRun.max_calls, 'per_run.max_calls')
+      : perRun.max_tool_calls != null
+        ? assertPositiveInt(perRun.max_tool_calls, 'per_run.max_tool_calls')
+        : (legacy.max_tool_calls != null ? assertPositiveInt(legacy.max_tool_calls, 'max_tool_calls') : undefined),
     max_duration_ms: maxDurationMs,
   };
 
   const perToolLimits: Record<string, PerToolLimits> = {};
   for (const [tool, limits] of Object.entries(perTool) as [string, any][]) {
     perToolLimits[tool] = {
-      max_calls: limits?.max_calls != null ? Number(limits.max_calls) : undefined,
+      max_calls: limits?.max_calls != null
+        ? assertPositiveInt(limits.max_calls, `per_tool.${tool}.max_calls`)
+        : undefined,
     };
   }
 

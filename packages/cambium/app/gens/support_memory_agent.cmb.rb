@@ -1,7 +1,7 @@
 # RED-215 phase 4: reference retro memory agent.
 #
 # Invoked by the primary runner (not directly by a user) after a gen
-# declaring `write_memory_via :SupportMemoryAgent` completes. Receives a
+# declaring `writes_memory_via :SupportMemoryAgent` completes. Receives a
 # JSON context with the primary's input, output, and full trace; returns
 # a MemoryWrites list that the primary runner commits to its own
 # still-open memory backends.

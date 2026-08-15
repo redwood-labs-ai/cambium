@@ -10,6 +10,14 @@ Define the auditable, replayable plan that the DSL compiles to.
 - IR MUST be serializable (JSON) and versioned.
 - IR SHOULD be compatible across runtimes and model providers.
 
+## Two-level contract: promised JSON shape vs. unpromised TypeScript type
+
+The IR has two distinct contractual surfaces:
+
+**Promised: the JSON shape.** The fields documented in the tables below are the golden-pinned data contract — byte-identical IR JSON is what `npm run test:golden` protects. Adding an IR field is additive (same philosophy as `schema.rb`). The JSON shape is what the roadmap means when it says "IR is the promised data contract."
+
+**Unpromised: the exported TypeScript type.** `export type IR` in `@redwood-labs/cambium-runner` is an **opaque, phantom-branded handle** (Road to 1.0, Gate 1). Consumers obtain `IR` values via `cambium compile`, by passing a `JSON.parse(irText)` result (typed `any`) to runner functions, or from runner result objects (`RunGenResult.ir`). They do not read fields off the exported type — field access on `IR` is a TypeScript compile error. This is intentional: it keeps the internal shape free to evolve without breaking consumer code. This distinction is formalized in [`COMPATIBILITY.md`](../../COMPATIBILITY.md) § IR JSON shape (and the opaque TypeScript type) — the repo-root 1.0 compatibility promise.
+
 ## Step types (v0 sketch)
 - Retrieve
 - Generate
@@ -44,11 +52,11 @@ The CLI and `cambium serve` dispatch by `ir.kind`: pipeline IRs route through `r
 | `policies.schedules` | `cron :daily, at: "9:00"` | `Array<{id, expression, method, tz, named?, at?}>` — scheduled-fire declarations (RED-273 / RED-305). Method defaults are resolved at compile time. IDs are stable `<snake_gen>.<method>.<slug>` shape and match `--fired-by schedule:<id>` at runtime. |
 | `policies.constraints` | `constrain :budget, …` | legacy/ergonomic container for budget, tone, etc. |
 | `policies.grounding` | `grounded_in :document` | citation enforcement config: `{ source, require_citations, from?, verify? }`. `verify` (optional string, RED-392) names the value-level verification strategy run after generation — `"field_values"` is the only supported value in v1; cross-checks each output field value against the grounding document. |
-| `policies.security` | `security network: {...}` or `security :pack` | per-slot mixing; `_packs` metadata for trace (RED-214) |
+| `policies.security` | `security network: {...}` or `security :pack` | per-slot mixing; `_packs` metadata for trace (RED-214). Per-slot field shapes are owned by their subsystem docs, not enumerated here — the `exec` slot shape (`allowed`/`runtime`/`unsafe_native`/`cpu`/`memory`/`timeout`/`network`/`filesystem`/`max_output_bytes`; Gate 3 strict-default) lives in [[S - Tool Exec Sandboxing (RED-213)]]. |
 | `policies.budget` | `budget per_run: {...}` | same per-slot mixing as security |
 | `policies.memory[]` | `memory :name, …` (one per decl) | pool-owned slots already merged in at compile (RED-215). Optional per-decl fields on `:semantic` strategy: `query` (literal string anchor) or `arg_field` (pluck a top-level field from JSON `ctx.input`) — RED-238, mutually exclusive. |
 | `policies.memory_pools{}` | pool files | only pools actually referenced by this gen are inlined |
-| `policies.memory_write_via` | `write_memory_via :Agent` | class name; runner resolves via snake_case lookup |
+| `policies.memory_write_via` | `writes_memory_via :Agent` | class name; runner resolves via snake_case lookup |
 | `enrichments`, `signals`, `triggers` | `enrich`, `extract`, `on` | sub-agent context + signal → deterministic action |
 | `context[<source>]` | runtime `--arg` | input for the gen, keyed by name. Values are **either** plain strings (text passed to the gen method, keyed by the grounding source when `grounded_in :<name>` is declared — RED-276; read via `getGroundingDocument(ir, groundingTextByKey)`, don't hardcode `ir.context.document`) **or** typed document envelopes `{ kind: 'base64_pdf' \| 'base64_image', data: string, media_type: string }` (RED-323; extracted via `extractDocuments(ir)` in `documents.ts` and emitted as Anthropic content blocks). For `base64_pdf` envelopes the runner also extracts plain text via `pdfjs-dist` and populates `groundingTextByKey[<source>]` so `grounded_in :<same_key>` verifies citations against the PDF content (0.3.1 fix). Non-Anthropic providers fail fast when envelopes are present. See `N - Model Identifiers` § Native document input for size caps + wire shape. |
 
@@ -67,7 +75,7 @@ A Pipeline IR has `kind: "Pipeline"` and a structurally distinct top-level shape
 | `policies.memory[]` | `memory :name, strategy: :sym, ...` | pipeline-level memory slots (pipeline-authoritative on strategy/embed/keyed_by/retain). Sub-gens opt in via `memory :name, scope: :pipeline_run`. Bucket keyed by the pipeline's run id; all sub-gens of one run share the bucket. |
 | `policies.schedules[]` | `cron :daily, at: "9:00"` | same shape as gen `policies.schedules[]`; `cambium schedule list/compile` recognizes `.pipeline.rb` alongside `.cmb.rb` (RED-381 Phase F.1). |
 | `policies.log[]` | `log :datadog, ...` | same shape as gen `policies.log[]`. Run-level events use `<snake_pipeline_name>.<method>.<event>` (`complete` / `failed`). |
-| `operators[]` | `step`, `fan_out`, `branch_on` | typed entries: `{ kind: "Step", id, gen, method, with[] }`, `{ kind: "FanOut", id, branches[], concurrency?, on_branch_failure, require, pass_context?, collect_into, _homogeneous? }`, `{ kind: "BranchOn", signal, branches[], default? }`. `with[]` and `signal` carry `bind()` refs cross-validated against input + step outputs at compile time. |
+| `operators[]` | `step`, `fan_out`, `branch_on` | typed entries: `{ kind: "Step", id, gen, method, with[] }`, `{ kind: "FanOut", id, branches[], concurrency?, on_branch_failure, require, context?, collect_into, _homogeneous?, prewarm? }`, `{ kind: "BranchOn", signal, branches[], default? }`. `with[]` and `signal` carry `bind()` refs cross-validated against input + step outputs at compile time. `prewarm` is emitted whenever explicitly set — `true` or `false`; when unset (the common case) the key is **absent** and the runner defaults to on, so pre-existing pipeline IR stays byte-identical. `false` opts out of the runner's automatic fan-out cache warm-up. |
 | `output` | `output do ... end` | optional. `{ kind: "last_step" }` (default) means pipeline output = last step's output. `{ kind: "compose", fields: [{ name, from }] }` means assembled from named bind refs. |
 | `context` | runtime `--arg` | `{ "_pipeline_arg": <string> }` — the raw CLI arg. `parsePipelineInputs()` in the runtime maps this to input slots (single slot gets the raw string; multi-slot expects JSON-object). |
 

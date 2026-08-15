@@ -208,18 +208,11 @@ module Cambium
       slots
     end
 
-    # RED-248: Normalize the `security exec:` slot. Accepts two shapes:
+    # RED-248 / Gate-3: Normalize the `security exec:` slot. Three shapes accepted:
     #
-    #   Legacy (back-compat):
-    #     security exec: { allowed: true }
-    #   Resolves to { 'allowed' => true, 'runtime' => 'native' }.
-    #   The :native substrate is the deprecated fig-leaf path; gens
-    #   using this shape run unsandboxed with a stderr warning emitted
-    #   at runtime.
-    #
-    #   New (RED-213):
+    #   Sandboxed (preferred — new shape, RED-213):
     #     security exec: {
-    #       runtime: :wasm | :firecracker | :native,
+    #       runtime: :wasm | :firecracker,
     #       cpu: 0.5,            # cores, 0.1–4.0
     #       memory: 256,         # MB, 16–4096
     #       timeout: 30,         # seconds, 1–600
@@ -228,11 +221,18 @@ module Cambium
     #       max_output_bytes: 50_000,
     #     }
     #
-    # Required in the new shape: `runtime`. Everything else has defaults
-    # applied by the TS-side policy parser; compile-time validation
-    # covers the ranges and enumerations authors commonly get wrong.
-    KNOWN_EXEC_KEYS     = %w[allowed runtime cpu memory timeout network filesystem max_output_bytes].freeze
-    KNOWN_EXEC_RUNTIMES = %w[wasm firecracker native].freeze
+    #   Unsandboxed sharp-knife opt-in (explicit, loud, discouraged):
+    #     security exec: { unsafe_native: true }
+    #   Emits { allowed: true, runtime: 'native', unsafe_native: true }.
+    #   Generates a `tool.exec.unsandboxed` trace step + stderr warning on every call.
+    #   CAMBIUM_STRICT_EXEC=1 makes this a hard compile error.
+    #
+    #   These shapes are now COMPILE ERRORS (removed in Gate 3):
+    #     security exec: { allowed: true }        # use runtime: :wasm/:firecracker or unsafe_native: true
+    #     security exec: { runtime: :native, ... } # use unsafe_native: true
+    KNOWN_EXEC_KEYS             = %w[allowed runtime cpu memory timeout network filesystem max_output_bytes unsafe_native].freeze
+    KNOWN_EXEC_RUNTIMES         = %w[wasm firecracker native].freeze
+    KNOWN_EXEC_RUNTIMES_SANDBOXED = %w[wasm firecracker].freeze
 
     def normalize_exec(ex)
       raise ArgumentError, "security exec: must be a Hash" unless ex.is_a?(Hash)
@@ -245,27 +245,40 @@ module Cambium
 
       out = { 'allowed' => ex_str.fetch('allowed', false) == true }
 
+      unsafe_native = ex_str.fetch('unsafe_native', false) == true
+
       if ex_str.key?('runtime')
         rt = ex_str['runtime'].to_s
-        unless KNOWN_EXEC_RUNTIMES.include?(rt)
+        # DEC-002: runtime: :native is now a compile error; use unsafe_native: true.
+        if rt == 'native'
+          raise CompileError,
+                "security exec runtime: :native is no longer accepted. " \
+                "To run code unsandboxed, use `security exec: { unsafe_native: true }` explicitly. " \
+                "To sandbox execution, use `runtime: :wasm` or `runtime: :firecracker`."
+        end
+        unless KNOWN_EXEC_RUNTIMES_SANDBOXED.include?(rt)
           raise ArgumentError,
-                "security exec runtime: must be one of :#{KNOWN_EXEC_RUNTIMES.join(', :')}; got :#{rt}"
+                "security exec runtime: must be one of :#{KNOWN_EXEC_RUNTIMES_SANDBOXED.join(', :')}; got :#{rt}"
         end
         out['runtime'] = rt
-      elsif out['allowed']
-        # Back-compat: `{ allowed: true }` with no runtime → :native.
-        # Emits a deprecation warning at runtime (RED-249).
+      elsif unsafe_native
+        # DEC-001 / DEC-003: explicit sharp-knife opt-in.
         out['runtime'] = 'native'
+        out['unsafe_native'] = true
+        out['allowed'] = true
+      elsif out['allowed']
+        # DEC-003: bare { allowed: true } with no runtime and no unsafe_native is now a compile error.
+        raise CompileError,
+              "security exec: { allowed: true } no longer defaults to unsandboxed native. " \
+              "Declare `runtime: :wasm` or `runtime: :firecracker` for sandboxed exec, " \
+              "or `unsafe_native: true` to explicitly opt into unsandboxed native (sharp knife)."
       end
 
-      # RED-249 strict-mode flag. When CAMBIUM_STRICT_EXEC=1, resolving
-      # to :native is a hard compile error (rather than a runtime
-      # warning). Off by default; opt-in for shops that want to block
-      # the fig-leaf path across the board.
+      # DEC-004: CAMBIUM_STRICT_EXEC=1 now prohibits even the explicit unsafe_native opt-in.
       if out['runtime'] == 'native' && ENV['CAMBIUM_STRICT_EXEC'] == '1'
         raise CompileError,
-              "security exec runtime: :native is blocked by CAMBIUM_STRICT_EXEC=1. " \
-              "Set runtime: :wasm or :firecracker explicitly."
+              "security exec: CAMBIUM_STRICT_EXEC=1 is set; unsandboxed native exec is prohibited " \
+              "in this environment. Use `runtime: :wasm` or `runtime: :firecracker`."
       end
 
       if ex_str.key?('cpu')
@@ -338,14 +351,15 @@ module Cambium
     # (per_tool / per_run). Slot semantics chosen so the same per-slot
     # mixing rule used by `security` works for `budget`.
     def budget_slots(opts)
-      allowed_metrics = %w[max_calls]
+      allowed_tool_metrics = %w[max_calls]
+      allowed_run_metrics  = %w[max_calls max_tokens max_duration]
       slots = {}
       if (per_tool = opts[:per_tool] || opts['per_tool'])
         raise ArgumentError, "budget per_tool: must be a Hash" unless per_tool.is_a?(Hash)
         slots['per_tool'] = per_tool.each_with_object({}) do |(tool, limits), h|
           raise ArgumentError, "budget per_tool[#{tool}] must be a Hash" unless limits.is_a?(Hash)
           limits_str = limits.transform_keys(&:to_s)
-          unknown = limits_str.keys - allowed_metrics
+          unknown = limits_str.keys - allowed_tool_metrics
           raise ArgumentError, "unsupported budget metric(s) for #{tool}: #{unknown.join(', ')}" unless unknown.empty?
           h[tool.to_s] = limits_str
         end
@@ -353,8 +367,21 @@ module Cambium
       if (per_run = opts[:per_run] || opts['per_run'])
         raise ArgumentError, "budget per_run: must be a Hash" unless per_run.is_a?(Hash)
         per_run_str = per_run.transform_keys(&:to_s)
-        unknown = per_run_str.keys - allowed_metrics
+        unknown = per_run_str.keys - allowed_run_metrics
         raise ArgumentError, "unsupported budget metric(s) for per_run: #{unknown.join(', ')}" unless unknown.empty?
+        %w[max_calls max_tokens].each do |int_metric|
+          next unless per_run_str.key?(int_metric)
+          val = per_run_str[int_metric]
+          unless val.is_a?(Integer) && val > 0
+            raise ArgumentError, "budget per_run #{int_metric}: must be a positive Integer, got #{val.inspect}"
+          end
+        end
+        if per_run_str.key?('max_duration')
+          val = per_run_str['max_duration']
+          unless val.is_a?(String) && val.match?(/\A\d+(s|m|h)\z/)
+            raise ArgumentError, "budget per_run max_duration: must match /\\d+(s|m|h)/ (e.g. \"5m\"), got #{val.inspect}"
+          end
+        end
         slots['per_run'] = per_run_str
       end
       unknown = opts.keys.map(&:to_s) - %w[per_tool per_run]
@@ -1463,7 +1490,8 @@ module Cambium
       #   budget :research_defaults
       #
       # Slots: per_tool, per_run. Same per-slot mixing rule as `security`.
-      # Metric supported in v1: max_calls only.
+      # per_run metrics: max_calls (positive integer), max_tokens (positive integer),
+      # max_duration ("Ns"/"Nm"/"Nh"). per_tool metrics: max_calls only.
       def budget(*args, **opts)
         if args.length > 1
           raise ArgumentError, "budget takes at most one positional arg (a pack symbol)"
@@ -1753,7 +1781,7 @@ module Cambium
 
       # RED-215: declare a memory slot the gen wants read-injected
       # before generation (and, when a memory agent is wired up via
-      # `write_memory_via`, written to after generation).
+      # `writes_memory_via`, written to after generation).
       #
       #   memory :conversation, strategy: :sliding_window, size: 20
       #   memory :activity_log, strategy: :log,            scope: :global
@@ -1852,8 +1880,8 @@ module Cambium
       # primary gen and decides what to commit to memory. Value is the
       # class name (or snake_case form) of another GenModel; phase 4
       # wires the runtime scheduling.
-      def write_memory_via(agent_name)
-        _cambium_defaults[:write_memory_via] = agent_name.to_s
+      def writes_memory_via(agent_name)
+        _cambium_defaults[:writes_memory_via] = agent_name.to_s
       end
 
       # RED-215: for a retro-mode memory agent, declare which primary

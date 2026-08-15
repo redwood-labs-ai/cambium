@@ -13,7 +13,7 @@ class GaiaSolver < GenModel
   uses :web_search, :web_extract, :calculator, :execute_code
   security \
     network: { allowlist: ["*"] },
-    exec: { allowed: true }
+    exec: { unsafe_native: true }
 
   constrain :budget, max_tool_calls: 4, max_duration: "8m"
 

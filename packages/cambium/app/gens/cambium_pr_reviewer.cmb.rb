@@ -7,7 +7,7 @@ class CambiumPrReviewer < GenModel
   model :default
   system :cambium_pr_reviewer
   temperature 0.2
-  max_tokens 2000
+  max_tokens 32000
 
   returns CambiumCiReview
 

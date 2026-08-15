@@ -122,6 +122,12 @@ On the second agentic turn (or second run in the same process), stable system + 
 
 Caching is on by default because the cost/latency improvement is monotonic when prompts + tools are stable within a run. It can be turned off via `buildAnthropicMessagesRequest({ ..., cache: false })` at the library level, but there's no DSL surface for this — framework-owned behavior, same stance as oMLX's `/no_think` injection.
 
+### Sampling parameters (`temperature`, `top_p`)
+
+Claude models from generation 4.7 onward (Opus 4.7, Opus 4.8, Fable 5, Mythos 5) removed sampling parameter support — sending `temperature` or `top_p` to these models produces HTTP 400. Cambium's Anthropic provider omits `temperature` automatically for models not on the accept list; the accept-list prefixes are `claude-3`, `claude-opus-4-6`, `claude-sonnet-4-6`, and `claude-haiku-4-5`. Any unrecognized or future model id defaults to **omitting** temperature — the safe direction (model uses its own internal default rather than 400-ing).
+
+Consequence for authors: a DSL-level `temperature` declaration is **silently ignored** for non-accepting models. There is no error or trace warning — the parameter simply does not appear in the request body. If you need a specific sampling behavior and are targeting a newer Anthropic model that does not accept these fields, there is currently no override mechanism; raise an issue or pin to an accept-listed model.
+
 ### Non-goal: forced-schema
 
 Anthropic has no native schema-enforced decoding like oMLX's xgrammar. Cambium relies on Claude's first-pass JSON quality plus the existing repair loop. If future evidence shows the repair loop is firing often, an opt-in `CAMBIUM_ANTHROPIC_SCHEMA_MODE=tool_use` forced-tool-call path is a safe follow-up — it's deliberately NOT wired today to keep the `generateText` surface free of synthetic tools that would collide with real agentic tools.

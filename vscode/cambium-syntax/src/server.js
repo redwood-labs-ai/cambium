@@ -440,7 +440,7 @@ const PRIMITIVE_DOCS = {
   },
   security: {
     detail: 'Configures tool-execution security policy (RED-137 / RED-214 / RED-248+).',
-    doc: 'Two forms.\n\nInline:\n```ruby\nsecurity \\\n  network: {\n    allowlist: ["api.tavily.com"],\n    block_private: true,   # default\n    block_metadata: true,  # default\n  },\n  filesystem: {\n    allowlist_paths: ["/data/in"]   # RED-258 — replaces roots:\n  },\n  exec: {\n    runtime: :wasm,       # :wasm | :firecracker | :native (deprecated)\n    language: :javascript,\n    timeout: 30,\n    memory: 256,\n    cpu: 1\n  }\n```\n\nFrom a policy pack (RED-214) — resolves to `app/policies/<name>.policy.rb`:\n```ruby\nsecurity :research_defaults\n```\n\nMixing rule: each slot (network/filesystem/exec) can be set by exactly one source. Pack OR inline OK; both touching the same slot is a compile error.\n\nExec substrates: `:wasm` (RED-254, QuickJS-WASM), `:firecracker` (RED-251+, microVM with optional filesystem/network allowlists), `:native` (deprecated; unsandboxed).',
+    doc: 'Two forms.\n\nInline:\n```ruby\nsecurity \\\n  network: {\n    allowlist: ["api.tavily.com"],\n    block_private: true,   # default\n    block_metadata: true,  # default\n  },\n  filesystem: {\n    allowlist_paths: ["/data/in"]   # RED-258 — replaces roots:\n  },\n  exec: {\n    runtime: :wasm,       # :wasm | :firecracker (sandboxed)\n    language: :javascript,\n    timeout: 30,\n    memory: 256,\n    cpu: 1\n  }\n```\n\nFor unsandboxed native exec (sharp-knife opt-in):\n```ruby\nsecurity \\\n  exec: { unsafe_native: true }\n```\n\nFrom a policy pack (RED-214) — resolves to `app/policies/<name>.policy.rb`:\n```ruby\nsecurity :research_defaults\n```\n\nMixing rule: each slot (network/filesystem/exec) can be set by exactly one source. Pack OR inline OK; both touching the same slot is a compile error.\n\nExec substrates: `:wasm` (RED-254, QuickJS-WASM), `:firecracker` (RED-251+, microVM with optional filesystem/network allowlists). `runtime: :native` is no longer accepted — use `unsafe_native: true` for the explicit unsandboxed opt-in.',
   },
   budget: {
     detail: 'Per-tool and per-run call budgets (RED-137 / RED-214).',
@@ -474,9 +474,9 @@ const PRIMITIVE_DOCS = {
     detail: 'Named memory pool (RED-215).',
     doc: 'Pool files live at `app/memory_pools/<name>.pool.rb` and declare the authoritative shape for any gen that opts in via `memory :slot, scope: :pool_name`.\n\n```ruby\n# app/memory_pools/support_team.pool.rb\nstrategy :semantic\nembed    "omlx:bge-small-en"\nkeyed_by :team_id\nretain   ttl: "30d"\n```\n\nPools own `strategy` / `embed` / `keyed_by` / `retain`; gen-site decls can only tighten reader knobs. Enforced by `MemoryPool::POOL_OWNED_SLOTS`.',
   },
-  write_memory_via: {
+  writes_memory_via: {
     detail: 'Routes memory writes through a retro agent (RED-215 phase 4).',
-    doc: 'After a successful primary run, the runner invokes the named retro agent\'s `remember(ctx)` method (ActiveJob#perform analogue). The retro agent returns `MemoryWrites` with explicit `writes: [{ memory:, content: }]` entries, giving you full control over what lands in the bucket.\n\n```ruby\nwrite_memory_via :SupportMemoryAgent\n```\n\nRetro agent shape:\n```ruby\nclass SupportMemoryAgent < GenModel\n  mode :retro\n  reads_trace_of :SupportAnalyst\n  returns MemoryWrites\nend\n```\n\nFailures never propagate to the primary — best-effort writes emit `memory.write ok:false` trace steps.',
+    doc: 'After a successful primary run, the runner invokes the named retro agent\'s `remember(ctx)` method (ActiveJob#perform analogue). The retro agent returns `MemoryWrites` with explicit `writes: [{ memory:, content: }]` entries, giving you full control over what lands in the bucket.\n\n```ruby\nwrites_memory_via :SupportMemoryAgent\n```\n\nRetro agent shape:\n```ruby\nclass SupportMemoryAgent < GenModel\n  mode :retro\n  reads_trace_of :SupportAnalyst\n  returns MemoryWrites\nend\n```\n\nFailures never propagate to the primary — best-effort writes emit `memory.write ok:false` trace steps.',
   },
   reads_trace_of: {
     detail: 'Retro agent trace access (RED-215 phase 4).',
@@ -499,11 +499,11 @@ const PRIMITIVE_DOCS = {
   },
   fan_out: {
     detail: 'Parallel pipeline operator — N sub-gens against same upstream context (RED-381).',
-    doc: 'Dispatches N branches concurrently, collects their outputs as a typed array, applies threshold + failure-mode rules. Each branch is a full sub-gen sub-transaction with its own contract / trace.\n\n```ruby\nfan_out :reviewers, collect_into: :reviews do\n  branch :security,      agent: SecurityReviewer,      method: :review\n  branch :architectural, agent: ArchitecturalReviewer, method: :review\n  concurrency 2\n  on_branch_failure :continue   # :continue (default) | :fail_fast\n  require :all                  # :all (default) | :at_least, N\n  pass_context :surface_map     # fields from prior step routed to every branch\nend\n```\n\nDownstream `bind(:reviewers)` returns the typed array. Homogeneous-fan-out sugar (`agent X, method: :m; over [...], as: :slot`) expands to one branch per `over` value.',
+    doc: 'Dispatches N branches concurrently, collects their outputs as a typed array, applies threshold + failure-mode rules. Each branch is a full sub-gen sub-transaction with its own contract / trace.\n\n```ruby\nfan_out :reviewers, collect_into: :reviews do\n  branch :security,      agent: SecurityReviewer,      method: :review\n  branch :architectural, agent: ArchitecturalReviewer, method: :review\n  concurrency 2\n  on_branch_failure :continue   # :continue (default) | :fail_fast\n  require :all                  # :all (default) | :at_least, N\n  context :surface_map          # fields from prior step routed to every branch\n  prewarm false                 # true (default) | false — opt out of automatic cache warm-up\nend\n```\n\nDownstream `bind(:reviewers)` returns the typed array. Homogeneous-fan-out sugar (`agent X, method: :m; over [...], as: :slot`) expands to one branch per `over` value.\n\nWhen a fan_out has `concurrency > 1` and its branches share a grounded prefix, the runner auto-warms the provider prompt cache once per model tier before dispatch (best-effort; `prewarm false` opts out).',
   },
   branch_on: {
     detail: 'Deterministic conditional pipeline operator (RED-381).',
-    doc: 'Routes execution based on an extracted signal value. Must be exhaustive — every reachable path is either an `on :literal do ... end` clause or covered by a `default do ... end` block. Missing default is a compile error in v1 (TypeBox enum-coverage introspection lands later).\n\n```ruby\nbranch_on bind(:triage).severity do\n  on :critical do\n    step :page_oncall, gen: PageOncall, method: :notify\n    step :remediate,   gen: RemediateGen, method: :plan\n  end\n  on :high do\n    step :remediate, gen: RemediateGen, method: :plan\n  end\n  default do\n    # explicit no-op for :low / :info\n  end\nend\n```\n\nNested step / fan_out / branch_on inside `on` and `default` bodies work — same dispatch as the top-level pipeline.',
+    doc: 'Routes execution based on an extracted signal value. Must be exhaustive — every reachable path is either a `match :literal do ... end` clause or covered by a `default do ... end` block. Missing default is a compile error in v1 (TypeBox enum-coverage introspection lands later).\n\n```ruby\nbranch_on bind(:triage).severity do\n  match :critical do\n    step :page_oncall, gen: PageOncall, method: :notify\n    step :remediate,   gen: RemediateGen, method: :plan\n  end\n  match :high do\n    step :remediate, gen: RemediateGen, method: :plan\n  end\n  default do\n    # explicit no-op for :low / :info\n  end\nend\n```\n\nNested step / fan_out / branch_on inside `match` and `default` bodies work — same dispatch as the top-level pipeline.',
   },
   input: {
     detail: 'Pipeline typed input slot (RED-381).',
@@ -879,9 +879,9 @@ connection.onCompletion((params) => {
     }));
   }
 
-  // After "write_memory_via :" → suggest gens that declare `mode :retro`
+  // After "writes_memory_via :" → suggest gens that declare `mode :retro`
   // (RED-215 phase 4).
-  if (/^\s*write_memory_via\s+:/.test(line)) {
+  if (/^\s*writes_memory_via\s+:/.test(line)) {
     const retroAgents = [];
     const gensDir = path.join(appPkgRoot, 'app/gens');
     if (fs.existsSync(gensDir)) {

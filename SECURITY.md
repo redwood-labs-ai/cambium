@@ -106,7 +106,7 @@ Cambium's built-in tools enforce a network / filesystem / exec permission model 
 
 For code execution (`execute_code` tool), three substrates are available:
 
-- **`:native`** — no isolation. Emits a `tool.exec.unsandboxed` trace step and a one-per-run stderr warning. `CAMBIUM_STRICT_EXEC=1` promotes this to a compile error.
+- **`:native`** — no isolation. Accessible only via explicit `security exec: { unsafe_native: true }` (Gate 3 default strict). Emits a `tool.exec.unsandboxed` trace step and a per-run stderr warning on every call. `CAMBIUM_STRICT_EXEC=1` blocks even this explicit opt-in (org-wide lockdown).
 - **`:wasm`** — QuickJS on WebAssembly. Memory and wall-clock limits enforced. No filesystem or network preopens.
 - **`:firecracker`** — micro-VM isolation with explicit filesystem allowlist, per-call netns, and network allowlist. See [`docs/GenDSL Docs/S - Tool Exec Sandboxing (RED-213).md`](docs/GenDSL%20Docs/S%20-%20Tool%20Exec%20Sandboxing%20%28RED-213%29.md) for the threat model.
 

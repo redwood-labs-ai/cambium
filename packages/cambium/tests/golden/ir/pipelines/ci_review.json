@@ -1,0 +1,112 @@
+{
+  "review": {
+    "version": "0.2",
+    "kind": "Pipeline",
+    "name": "CiReview",
+    "entry": {
+      "class": "CiReview",
+      "method": "review",
+      "source": "packages/cambium/app/pipelines/ci_review.pipeline.rb"
+    },
+    "input": {
+      "pr": {
+        "schema": "AnalysisReport"
+      }
+    },
+    "policies": {
+      "budget": {
+        "tokens": 200000,
+        "tool_calls": 200
+      },
+      "bind_defaults": "explicit",
+      "memory": [
+        {
+          "name": "findings",
+          "scope": "pipeline_run",
+          "strategy": "log"
+        }
+      ],
+      "schedules": [],
+      "log": [],
+      "log_profiles": []
+    },
+    "operators": [
+      {
+        "kind": "Step",
+        "id": "recon",
+        "gen": "SurfaceMapper",
+        "method": "map",
+        "with": [
+          {
+            "param": "ctx",
+            "from": {
+              "input": "pr"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "FanOut",
+        "id": "reviewers",
+        "collect_into": "reviews",
+        "branches": [
+          {
+            "id": "security",
+            "agent": "SecurityReviewer",
+            "method": "review"
+          },
+          {
+            "id": "architectural",
+            "agent": "ArchitecturalReviewer",
+            "method": "review"
+          },
+          {
+            "id": "performance",
+            "agent": "PerformanceReviewer",
+            "method": "review"
+          },
+          {
+            "id": "semantic",
+            "agent": "SemanticReviewer",
+            "method": "review"
+          }
+        ],
+        "on_branch_failure": "continue",
+        "require": {
+          "kind": "all"
+        },
+        "concurrency": 4,
+        "context": [
+          "surface_map"
+        ],
+        "prewarm": false
+      },
+      {
+        "kind": "Step",
+        "id": "fix",
+        "gen": "Fixer",
+        "method": "patch",
+        "with": [
+          {
+            "param": "pr",
+            "from": {
+              "input": "pr"
+            }
+          },
+          {
+            "param": "reviews",
+            "from": {
+              "step": "reviewers"
+            }
+          }
+        ]
+      }
+    ],
+    "output": {
+      "kind": "last_step"
+    },
+    "context": {
+      "_pipeline_arg": ""
+    }
+  }
+}

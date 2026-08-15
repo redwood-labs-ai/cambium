@@ -10,6 +10,6 @@
 # Names must match /\A[a-z][a-z0-9_]*\z/. Values must be literal provider-
 # prefixed model ids (contain `:`).
 
-default   "omlx:Qwen3.5-27B-4bit"
-fast      "omlx:gemma-4-31b-it-8bit"
+default   "omlx:orinth-1.0-35b@q8_0"
+fast      "omlx:nvidia/nemotron-3-nano-4b"
 embedding "omlx:bge-small-en"

@@ -9,7 +9,7 @@ import Database from 'better-sqlite3';
 /**
  * RED-215 phase 4: retro memory-agent runtime.
  *
- * Spawns a primary gen with `write_memory_via :SupportMemoryAgent` and
+ * Spawns a primary gen with `writes_memory_via :SupportMemoryAgent` and
  * verifies the agent is invoked end-to-end: its write lands in the
  * primary's bucket with `written_by: 'agent:SupportMemoryAgent'`, and
  * dropped writes (targeting an undeclared slot) are surfaced in trace
@@ -80,7 +80,7 @@ class RetroPrimaryGen < GenModel
   returns AnalysisReport
 
   memory :conversation, strategy: :sliding_window, size: 3
-  write_memory_via :SupportMemoryAgent
+  writes_memory_via :SupportMemoryAgent
 
   def analyze(x)
     generate "Analyze: #{x}" do
@@ -125,7 +125,7 @@ class MissingAgentGen < GenModel
   returns AnalysisReport
 
   memory :conversation, strategy: :sliding_window, size: 3
-  write_memory_via :NoSuchAgentClass
+  writes_memory_via :NoSuchAgentClass
 
   def analyze(x)
     generate "Analyze: #{x}" do
@@ -144,7 +144,7 @@ end
     );
     expect(notFound).toBeDefined();
     expect(notFound.ok).toBe(false);
-    expect(notFound.errors[0].message).toMatch(/write_memory_via :NoSuchAgentClass/);
+    expect(notFound.errors[0].message).toMatch(/writes_memory_via :NoSuchAgentClass/);
 
     // The bucket was opened for reads (at the start of the run) but has
     // zero agent writes committed — confirming the primary didn't fall
@@ -171,7 +171,7 @@ class DropsGen < GenModel
   returns AnalysisReport
 
   memory :other_slot, strategy: :log
-  write_memory_via :SupportMemoryAgent
+  writes_memory_via :SupportMemoryAgent
 
   def analyze(x)
     generate "Analyze: #{x}" do

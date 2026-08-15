@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest'
-import { Budget, parseBudget, trackBudgetFromTraceStep } from './budget.js'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { Budget, parseBudget, trackBudgetFromTraceStep, _resetLegacyBudgetWarningForTests } from './budget.js'
 
 describe('Budget', () => {
   it('passes when within limits', () => {
@@ -115,6 +115,41 @@ describe('parseBudget (new policies.budget shape)', () => {
     const b = parseBudget({ budget: { per_run: { max_tool_calls: 50 } } });
     expect(b.limits.max_tool_calls).toBe(50);
   })
+
+  it('parses per_run.max_tokens', () => {
+    const b = parseBudget({ budget: { per_run: { max_tokens: 5000 } } });
+    expect(b.limits.max_tokens).toBe(5000);
+  })
+
+  it('parses per_run.max_duration with minutes', () => {
+    const b = parseBudget({ budget: { per_run: { max_duration: '5m' } } });
+    expect(b.limits.max_duration_ms).toBe(300_000);
+  })
+
+  it('parses per_run.max_duration with seconds', () => {
+    const b = parseBudget({ budget: { per_run: { max_duration: '30s' } } });
+    expect(b.limits.max_duration_ms).toBe(30_000);
+  })
+
+  it('parses per_run.max_duration with hours', () => {
+    const b = parseBudget({ budget: { per_run: { max_duration: '1h' } } });
+    expect(b.limits.max_duration_ms).toBe(3_600_000);
+  })
+
+  it('per_run.max_duration wins over legacy max_duration when both present', () => {
+    const b = parseBudget({
+      budget: { per_run: { max_duration: '2m' } },
+      constraints: { budget: { max_duration: '1h' } },
+    });
+    expect(b.limits.max_duration_ms).toBe(120_000);
+  })
+
+  it('parses all three per_run metrics together', () => {
+    const b = parseBudget({ budget: { per_run: { max_tokens: 5000, max_duration: '5m', max_calls: 10 } } });
+    expect(b.limits.max_tokens).toBe(5000);
+    expect(b.limits.max_duration_ms).toBe(300_000);
+    expect(b.limits.max_tool_calls).toBe(10);
+  })
 })
 
 describe('Budget per-tool gating', () => {
@@ -182,4 +217,112 @@ describe('trackBudgetFromTraceStep', () => {
     expect(b.getToolUsage('tavily').calls).toBe(1);
     expect(b.getToolUsage('linear').calls).toBe(1);
   })
+})
+
+describe('parseBudget — fail-closed on malformed values', () => {
+  it('throws on malformed per_run.max_duration', () => {
+    expect(() => parseBudget({ budget: { per_run: { max_duration: '5 minutes' } } }))
+      .toThrow('[cambium] invalid budget per_run.max_duration "5 minutes"');
+  })
+
+  it('throws on malformed legacy max_duration', () => {
+    expect(() => parseBudget({ constraints: { budget: { max_duration: 'five minutes' } } }))
+      .toThrow('[cambium] invalid budget max_duration "five minutes"');
+  })
+
+  it('throws on NaN max_tokens in per_run', () => {
+    expect(() => parseBudget({ budget: { per_run: { max_tokens: 'lots' } } }))
+      .toThrow('[cambium] invalid budget per_run.max_tokens');
+  })
+
+  it('throws on zero max_tokens in per_run', () => {
+    expect(() => parseBudget({ budget: { per_run: { max_tokens: 0 } } }))
+      .toThrow('[cambium] invalid budget per_run.max_tokens');
+  })
+
+  it('throws on negative max_calls in per_run', () => {
+    expect(() => parseBudget({ budget: { per_run: { max_calls: -1 } } }))
+      .toThrow('[cambium] invalid budget per_run.max_calls');
+  })
+
+  it('throws on non-integer max_calls in per_run', () => {
+    expect(() => parseBudget({ budget: { per_run: { max_calls: 1.5 } } }))
+      .toThrow('[cambium] invalid budget per_run.max_calls');
+  })
+
+  it('throws on NaN max_tool_calls in legacy shape', () => {
+    expect(() => parseBudget({ constraints: { budget: { max_tool_calls: 'many' } } }))
+      .toThrow('[cambium] invalid budget max_tool_calls');
+  })
+
+  it('throws on zero max_tool_calls in legacy shape', () => {
+    expect(() => parseBudget({ constraints: { budget: { max_tool_calls: 0 } } }))
+      .toThrow('[cambium] invalid budget max_tool_calls');
+  })
+
+  it('throws on malformed legacy constraints.budget.max_tokens (string)', () => {
+    expect(() => parseBudget({ constraints: { budget: { max_tokens: 'lots' } } }))
+      .toThrow('[cambium] invalid budget max_tokens');
+  })
+
+  it('throws on NaN per_tool max_calls (zero is not a positive integer)', () => {
+    expect(() => parseBudget({ budget: { per_tool: { search: { max_calls: 0 } } } }))
+      .toThrow('[cambium] invalid budget per_tool.search.max_calls');
+  })
+
+  it('throws on negative per_tool max_calls', () => {
+    expect(() => parseBudget({ budget: { per_tool: { search: { max_calls: -5 } } } }))
+      .toThrow('[cambium] invalid budget per_tool.search.max_calls');
+  })
+
+  it('does not throw on absent metrics (empty budget is valid)', () => {
+    expect(() => parseBudget({})).not.toThrow();
+    expect(() => parseBudget({ budget: { per_run: {} } })).not.toThrow();
+    expect(() => parseBudget({ budget: {} })).not.toThrow();
+  })
+
+  it('valid well-formed values still parse correctly', () => {
+    const b = parseBudget({ budget: { per_run: { max_calls: 10, max_tokens: 5000, max_duration: '5m' } } });
+    expect(b.limits.max_tool_calls).toBe(10);
+    expect(b.limits.max_tokens).toBe(5000);
+    expect(b.limits.max_duration_ms).toBe(300_000);
+  })
+})
+
+describe('parseBudget — deprecation warning', () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    _resetLegacyBudgetWarningForTests();
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  it('emits a deprecation warning on first use of constraints.budget', () => {
+    parseBudget({ constraints: { budget: { max_tool_calls: 5 } } });
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0][0]).toContain('[cambium]');
+    expect(errorSpy.mock.calls[0][0]).toContain('constraints.budget');
+    expect(errorSpy.mock.calls[0][0]).toContain('Cambium 1.0');
+  });
+
+  it('emits the warning only once across multiple calls (dedup)', () => {
+    parseBudget({ constraints: { budget: { max_tool_calls: 5 } } });
+    parseBudget({ constraints: { budget: { max_tokens: 1000 } } });
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not emit a warning for the new policies.budget shape', () => {
+    parseBudget({ budget: { per_run: { max_calls: 100 } } });
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it('legacy parse result is byte-for-byte unchanged after adding the warning', () => {
+    const b = parseBudget({ constraints: { budget: { max_tool_calls: 4, max_tokens: 500 } } });
+    expect(b.limits.max_tool_calls).toBe(4);
+    expect(b.limits.max_tokens).toBe(500);
+  });
 })

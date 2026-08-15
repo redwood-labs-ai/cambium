@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { buildOllamaChatRequest, normalizeOllamaChatResponse } from './ollama.js';
+import { ollamaProvider } from './builtins.js';
 
 describe('buildOllamaChatRequest', () => {
   it('emits a /api/chat-shaped body', () => {
@@ -125,5 +126,52 @@ describe('normalizeOllamaChatResponse', () => {
     });
     const ids = out.message.tool_calls!.map(c => c.id);
     expect(new Set(ids).size).toBe(3);
+  });
+});
+
+// HTTP-error surfacing tests for the ollamaProvider (bespoke CambiumProvider).
+// These stub global `fetch` to simulate non-2xx responses from the Ollama server.
+
+function stubOllamaFetch(body: string, status: number): void {
+  vi.stubGlobal('fetch', async () => ({
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => body,
+    json: async () => { throw new Error('not a json response'); },
+  } as any));
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe('ollamaProvider HTTP errors', () => {
+  it('surfaces and redacts upstream error body on generateText HTTP error', async () => {
+    stubOllamaFetch('{"error":"Bearer sk-fakefaketoken12345 is invalid"}', 500);
+    const err: Error = await ollamaProvider
+      .generateText({ model: 'm', system: 's', prompt: 'u' })
+      .catch((e) => e);
+    expect(err.message).toMatch(/Ollama error: HTTP 500 —/);
+    expect(err.message).not.toContain('sk-fakefaketoken12345');
+    expect(err.message).toContain('[REDACTED]');
+  });
+
+  it('surfaces benign Ollama error body unredacted on generateText', async () => {
+    stubOllamaFetch('model "qwen3:8b" not found, try pulling it first', 404);
+    const err: Error = await ollamaProvider
+      .generateText({ model: 'qwen3:8b', system: 's', prompt: 'u' })
+      .catch((e) => e);
+    expect(err.message).toContain('Ollama error: HTTP 404 —');
+    expect(err.message).toContain('not found');
+  });
+
+  it('surfaces and redacts upstream error body on generateWithTools HTTP error', async () => {
+    stubOllamaFetch('{"error":"api_key=sk-fakefaketoken12345 rejected"}', 401);
+    const err: Error = await ollamaProvider
+      .generateWithTools({ model: 'm', messages: [{ role: 'user', content: 'hi' }], tools: [] })
+      .catch((e) => e);
+    expect(err.message).toMatch(/Ollama error: HTTP 401 —/);
+    expect(err.message).not.toContain('sk-fakefaketoken12345');
+    expect(err.message).toContain('[REDACTED]');
   });
 });

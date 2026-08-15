@@ -7,7 +7,7 @@ Control the execution strategy for `generate` blocks.
 
 - **Default (no mode):** `generate` is a single LLM call. Tools fire post-generation via signals/triggers.
 - **`mode :agentic`:** multi-turn tool-use loop — the model calls tools during generation, receives results, and iterates until it produces the final output.
-- **`mode :retro`:** this gen is a *memory agent* (RED-215) that runs AFTER a primary gen, reads its trace via `reads_trace_of`, and returns `MemoryWrites` for the primary's memory slots. Not invoked directly by a user — the runner spawns it as a subprocess when a primary declares `write_memory_via :ThisClass`.
+- **`mode :retro`:** this gen is a *memory agent* (RED-215) that runs AFTER a primary gen, reads its trace via `reads_trace_of`, and returns `MemoryWrites` for the primary's memory slots. Not invoked directly by a user — the runner spawns it as a subprocess when a primary declares `writes_memory_via :ThisClass`.
 
 ## Semantics (normative)
 - `mode :agentic` MUST enable multi-turn tool-use via the OpenAI function-calling protocol.
@@ -88,7 +88,7 @@ class SupportMemoryAgent < GenModel
 end
 ```
 
-On the primary side: `write_memory_via :SupportMemoryAgent`.
+On the primary side: `writes_memory_via :SupportMemoryAgent`.
 
 ## Trace output
 

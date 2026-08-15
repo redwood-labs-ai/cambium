@@ -5,6 +5,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 ## Start here
 - [[00 - Getting Started]]
 - [[01 - Core Concepts]]
+- [`COMPATIBILITY.md`](../../COMPATIBILITY.md) (repo root, not a graph node) — the 1.0 semver promise: the six promised surfaces, the additivity rule per surface, the deprecation register. The capstone the `C - IR` / `C - Serve Mode` / `C - Trace` surfaces ground out in.
 
 ## Primitives (language surface)
 - [[P - GenModel]]
@@ -18,7 +19,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[P - enrich]]
 - [[P - mode]]
 - [[P - Policy Packs (RED-214)]] — named bundles for `security` + `budget`
-- [[P - Memory]] — `memory` / `write_memory_via` / `reads_trace_of` / `mode :retro` (RED-215)
+- [[P - Memory]] — `memory` / `writes_memory_via` / `reads_trace_of` / `mode :retro` (RED-215)
 - [[P - log]] — trace-fan-out to external observability platforms (Datadog, stdout, http_json, app plugins); framework-owned dot-notation event names; profile pattern (RED-282 / RED-302)
 - [[P - cron (schedule)]] — scheduled-fire declaration + `--fired-by` runtime semantics; compile-to-artifact for k8s CronJob / crontab / systemd / GH Actions / Render (RED-273 / RED-305)
 - [[N - Orchestration Layer]] — `Pipeline` primitive: multi-gen composition (sequential `step`, parallel `fan_out`, deterministic `branch_on :signal`) with rollup IR / trace / budget (RED-374 design, RED-381 impl). Pipeline-shared `:pipeline_run` memory scope, cron/log/serve integration on pipelines, scaffolder + lint + LSP parity.

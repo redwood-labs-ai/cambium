@@ -17,11 +17,17 @@
  * sub-gen trace (the runGen result's `trace` object) nested unchanged.
  */
 import { execSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { runGen, type IR, type RunGenResult } from './runner.js';
+import { runGen, makeGenerateText, type IR, type IRInternal, type RunGenResult } from './runner.js';
+import { buildGenSystem, buildCacheablePrefix, type GenerateTextFn } from './step-handlers.js';
+import { extractDocuments } from './documents.js';
+import { buildBuiltinRegistry } from './providers/builtins.js';
+import { resolveAppRoot } from './app-root.js';
+import { resolveEngineDir } from './engine-root.js';
 import { findGenfileDir, resolveGenfileContracts, loadContractsFromGenfile } from './genfile.js';
 import { loadAppCorrectors } from './correctors/app-loader.js';
 import type { CorrectorFn } from './correctors/types.js';
@@ -264,9 +270,13 @@ export function rehydrateFromEntries(entries: any[], stepResults: Record<string,
 export async function runPipelineFromIr(
   opts: RunPipelineFromIrOptions,
 ): Promise<RunPipelineFromIrResult> {
-  if (opts.ir?.kind !== 'Pipeline') {
+  // Cast the public opaque IR to the package-private internal alias so
+  // field reads below compile. One cast at the public boundary; internal
+  // helpers (DispatchContext, RunStepContext) receive IRInternal directly.
+  const ir: IRInternal = opts.ir as IRInternal;
+  if (ir?.kind !== 'Pipeline') {
     throw new Error(
-      `runPipelineFromIr requires a Pipeline IR (got kind=${JSON.stringify(opts.ir?.kind)}). ` +
+      `runPipelineFromIr requires a Pipeline IR (got kind=${JSON.stringify(ir?.kind)}). ` +
         `Gen IRs route through runGenFromIr.`,
     );
   }
@@ -292,10 +302,10 @@ export async function runPipelineFromIr(
     }
     const scheduleId = m[1];
     const timestamp = m[2] ?? new Date().toISOString();
-    const declared: any[] = opts.ir.policies?.schedules ?? [];
+    const declared: any[] = ir.policies?.schedules ?? [];
     if (declared.length === 0) {
       throw new Error(
-        `--fired-by was set but ${opts.ir.entry?.class ?? 'this pipeline'} declares no cron schedules. ` +
+        `--fired-by was set but ${ir.entry?.class ?? 'this pipeline'} declares no cron schedules. ` +
         `Either remove --fired-by or declare a \`cron :...\` on the Pipeline class.`,
       );
     }
@@ -303,7 +313,7 @@ export async function runPipelineFromIr(
     if (!known) {
       const ids = declared.map((s) => s.id).join(', ');
       throw new Error(
-        `--fired-by schedule id "${scheduleId}" is not declared on ${opts.ir.entry?.class ?? 'this pipeline'}. ` +
+        `--fired-by schedule id "${scheduleId}" is not declared on ${ir.entry?.class ?? 'this pipeline'}. ` +
         `Declared schedules: [${ids}]`,
       );
     }
@@ -314,7 +324,7 @@ export async function runPipelineFromIr(
   // <workspace> is two levels up. runs/ + contracts both live relative
   // to it. Mirrors runGenFromIr's stance (engine-mode aware, but
   // pipelines are always app-mode in v1 — engine pipelines defer).
-  const pipelineFile = resolveSource(opts.ir.entry?.source, cwd);
+  const pipelineFile = resolveSource(ir.entry?.source, cwd);
   const workspaceDir = pipelineFile
     ? dirname(dirname(dirname(pipelineFile)))
     : cwd;
@@ -345,7 +355,7 @@ export async function runPipelineFromIr(
   // Pipelines are app-mode in v1 — discover contracts via Genfile.toml
   // from the pipeline's workspace, falling back to the in-tree
   // packages/cambium/src/contracts.ts for the framework's own monorepo.
-  const genfileDir = findGenfileDir(opts.ir.entry?.source) ?? cwd;
+  const genfileDir = findGenfileDir(ir.entry?.source) ?? cwd;
   const genfile = resolveGenfileContracts(genfileDir);
   let contractsMod: Record<string, any>;
   if (genfile) {
@@ -371,13 +381,30 @@ export async function runPipelineFromIr(
     appCorrectors = app.correctors;
   }
 
+  // ── Pipeline-level provider dispatch (for fan-out cache prewarm) ──────
+  // The pipeline delegates all real inference to per-branch runGen calls,
+  // each of which builds its own provider registry. The auto-prewarm path
+  // needs to fire a warm-up call from the orchestration layer itself, so
+  // build a registry here the same way runGen does — anchored on the same
+  // app-root the branches resolve from, so a warm-up hits the same provider
+  // (and cache) the branches will. Trace steps are dropped ([]) — warm-ups
+  // are a cache side effect, not part of the pipeline trace.
+  const { appPkgRoot } = resolveAppRoot(workspaceDir);
+  const engineDir = resolveEngineDir(ir.entry?.source);
+  const providerRegistry = buildBuiltinRegistry();
+  await providerRegistry.loadFromDir(join(appPkgRoot, 'app/providers'));
+  if (engineDir) {
+    await providerRegistry.loadFromEngineDir(engineDir);
+  }
+  const generateText = makeGenerateText(providerRegistry, []) as GenerateTextFn;
+
   // ── Parse pipeline inputs ────────────────────────────────────────────
   // Phase B.1: single declared input slot — the CLI `--arg` value (carried
   // through ir.context._pipeline_arg) maps to that one slot. Multi-input
   // pipelines with JSON-object args are a Phase B.3 follow-up.
   const inputSlots: Record<string, any> = parsePipelineInputs(
-    opts.ir.input ?? {},
-    opts.ir.context?._pipeline_arg ?? '',
+    ir.input ?? {},
+    ir.context?._pipeline_arg ?? '',
   );
 
   // ── Pipeline-level memory slots (RED-381 Phase E) ────────────────────
@@ -387,7 +414,7 @@ export async function runPipelineFromIr(
   // pool stance of RED-215). Sub-gen dispatch injects this slot config
   // into each sub-gen's matching memory entry before runGen sees it.
   const pipelineMemorySlots: Record<string, any> = {};
-  for (const m of (opts.ir.policies?.memory ?? []) as any[]) {
+  for (const m of (ir.policies?.memory ?? []) as any[]) {
     if (m && m.name) pipelineMemorySlots[m.name] = m;
   }
 
@@ -398,7 +425,7 @@ export async function runPipelineFromIr(
   // tool_calls (since per-tool projection is hard until we know which
   // tools the sub-gen will actually invoke). Per the design note:
   // simple ceiling, no implicit splitting, no per-child re-allocation.
-  const budgetCap = opts.ir.policies?.budget ?? {};
+  const budgetCap = ir.policies?.budget ?? {};
   const tokenCap = typeof budgetCap.tokens === 'number' ? budgetCap.tokens : undefined;
   const toolCallCap = typeof budgetCap.tool_calls === 'number' ? budgetCap.tool_calls : undefined;
 
@@ -407,9 +434,9 @@ export async function runPipelineFromIr(
   const trace: any = {
     type: 'PipelineRun',
     run_id: runId,
-    version: opts.ir.version,
-    name: opts.ir.name,
-    entry: opts.ir.entry,
+    version: ir.version,
+    name: ir.name,
+    entry: ir.entry,
     started_at: new Date(startedAtMs).toISOString(),
     operators: [],
     meta: {
@@ -427,7 +454,7 @@ export async function runPipelineFromIr(
   const stepResults: Record<string, any> = {};
 
   // ── Operator dispatch ────────────────────────────────────────────────
-  const operators: any[] = opts.ir.operators ?? [];
+  const operators: any[] = ir.operators ?? [];
 
   // ── RED-385 Phase B: pipeline replay resume ──────────────────────────
   // Rehydrate stepResults from the prior run's recorded operator outputs,
@@ -436,7 +463,7 @@ export async function runPipelineFromIr(
   // bind() lookups resolve against the rehydrated stepResults; the full
   // `operators` list is still used below to compute the top-level dispatch
   // seed prior (the output of the operator immediately before the resume
-  // point), so a first-dispatched fan_out's pass_context reads the prior
+  // point), so a first-dispatched fan_out's context reads the prior
   // that was rehydrated rather than seeing `null`.
   let dispatchOps = operators;
   if (opts.replay) {
@@ -463,7 +490,7 @@ export async function runPipelineFromIr(
   }
 
   const dispatchCtx: DispatchContext = {
-    ir: opts.ir,
+    ir,
     pipelineFile,
     workspaceDir,
     inputSlots,
@@ -475,6 +502,7 @@ export async function runPipelineFromIr(
     pipelineMemorySlots,
     compileRb,
     appCorrectors,
+    generateText,
   };
   // Seed the top-level dispatch's running prior. Nothing precedes the
   // first top-level operator on a fresh run, so the seed is null. On a
@@ -508,7 +536,7 @@ export async function runPipelineFromIr(
   // ── Output assembly ──────────────────────────────────────────────────
   let output: any = null;
   if (pipelineOk) {
-    output = assembleOutput(opts.ir.output, stepResults, inputSlots, operators);
+    output = assembleOutput(ir.output, stepResults, inputSlots, operators);
   }
 
   trace.ok = pipelineOk;
@@ -524,7 +552,7 @@ export async function runPipelineFromIr(
   //
   // Sink errors never fail the pipeline (LogFailed trace steps absorb).
   // Per-operator step-level events defer; v1 ships run-level only.
-  const logDestinations: any[] = opts.ir.policies?.log ?? [];
+  const logDestinations: any[] = ir.policies?.log ?? [];
   if (logDestinations.length > 0) {
     const { event, reason } = classifyPipelineRunOutcome(
       pipelineOk,
@@ -532,8 +560,8 @@ export async function runPipelineFromIr(
       pipelineError,
     );
     const runEvent = buildRunLogEvent({
-      genClass: opts.ir.entry?.class ?? opts.ir.name ?? 'Pipeline',
-      method: opts.ir.entry?.method ?? 'run',
+      genClass: ir.entry?.class ?? ir.name ?? 'Pipeline',
+      method: ir.entry?.method ?? 'run',
       event,
       runId,
       ok: pipelineOk,
@@ -561,7 +589,7 @@ export async function runPipelineFromIr(
   const irPath = join(runDir, 'ir.json');
   const tracePath = opts.traceOut ?? join(runDir, 'trace.json');
   const outputPath = opts.outputOut ?? join(runDir, 'output.json');
-  writeFileSync(irPath, JSON.stringify(opts.ir, null, 2));
+  writeFileSync(irPath, JSON.stringify(ir, null, 2));
   writeFileSync(tracePath, JSON.stringify(trace, null, 2));
   writeFileSync(outputPath, JSON.stringify(output ?? null, null, 2));
 
@@ -649,7 +677,7 @@ function projectStepTokens(op: any, workspaceDir: string, compileRb: string): nu
 // ── Operator dispatch loop (shared by top-level + branch_on bodies) ──
 
 interface DispatchContext {
-  ir: IR;
+  ir: IRInternal;
   pipelineFile: string | null;
   workspaceDir: string;
   inputSlots: Record<string, any>;
@@ -675,6 +703,10 @@ interface DispatchContext {
    *  resolves identically inside a pipeline as it does in a standalone
    *  `cambium run` of the same gen. */
   appCorrectors: Record<string, CorrectorFn>;
+  /** Pipeline-layer dispatcher used only to fire fan-out cache warm-ups.
+   *  Built once from a registry anchored on the same app-root as the
+   *  branches; branch inference still runs through per-branch runGen. */
+  generateText: GenerateTextFn;
 }
 
 interface DispatchResult {
@@ -697,7 +729,7 @@ interface DispatchResult {
  * `seedPrior` is the output of the operator immediately preceding this
  * block (or null when nothing precedes it). The loop threads a running
  * `prevOutput`, updated as each result-producing operator (Step, FanOut)
- * completes, so a fan_out's `pass_context` reads the contextually-correct
+ * completes, so a fan_out's `context` reads the contextually-correct
  * prior even across a branch_on nesting boundary. A BranchOn records no
  * result, so it does NOT advance `prevOutput`.
  */
@@ -720,6 +752,7 @@ async function dispatchOperatorList(
     pipelineMemorySlots: ctx.pipelineMemorySlots,
     compileRb: ctx.compileRb,
     appCorrectors: ctx.appCorrectors,
+    generateText: ctx.generateText,
   };
 
   let prevOutput = seedPrior;
@@ -977,7 +1010,7 @@ async function runBranchOn(
 // ── Step dispatch ─────────────────────────────────────────────────────
 
 interface RunStepContext {
-  ir: IR;
+  ir: IRInternal;
   pipelineFile: string | null;
   workspaceDir: string;
   inputSlots: Record<string, any>;
@@ -994,6 +1027,9 @@ interface RunStepContext {
   /** RED-275 app correctors (forwarded from DispatchContext). Passed
    *  to every sub-gen's runGen call. */
   appCorrectors: Record<string, CorrectorFn>;
+  /** Pipeline-layer dispatcher for fan-out cache prewarm (forwarded from
+   *  DispatchContext). */
+  generateText: GenerateTextFn;
 }
 
 interface StepTrace {
@@ -1238,6 +1274,158 @@ async function runWithConcurrency<T>(
   return results;
 }
 
+/** Compile a sub-gen file to IR via the same Ruby path runStep/runBranch
+ *  use. Throws on compile failure; callers decide whether that's fatal. */
+function compileGenIr(genFile: string, method: string, compileRb: string): any {
+  const irJson = execSync(
+    `ruby "${compileRb}" "${genFile}" --method "${method}"`,
+    { encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 },
+  );
+  return JSON.parse(irJson);
+}
+
+// Completion is discarded — the warm-up exists to write the input prefix
+// into the provider cache, not to produce output. Keep it minimal.
+const PREWARM_MAX_TOKENS = 16;
+
+interface PrewarmSummary {
+  /** Distinct (model tier × prefix) groups warmed. */
+  groups: number;
+  /** Warm-ups that completed without throwing. */
+  fired: number;
+  /** Warm-ups that threw (swallowed — those branches run cold). */
+  failed: number;
+  /** Tokens the warm-up calls actually spent (folded into the fan-out's
+   *  rollup so a budget-capped pipeline's trace reflects true cost). */
+  tokens: number;
+}
+
+/** Whether a fan-out should prewarm its cache. Off when opted out, under
+ *  --mock (no real cache), or single-worker/single-branch (branch 1 warms
+ *  the rest naturally, so there's nothing to prime up front). */
+export function fanOutPrewarmEligible(
+  op: any,
+  concurrency: number,
+  branchCount: number,
+  mock: boolean,
+): boolean {
+  return op.prewarm !== false && concurrency > 1 && branchCount > 1 && !mock;
+}
+
+/**
+ * Prime the provider prompt cache before a fan-out dispatches. When
+ * branches share a grounded cacheable prefix, dispatching them in one tick
+ * makes them race cold — each writes its own copy of the shared prefix.
+ * This fires one tiny warm-up per distinct (model tier × prefix) so the
+ * branches read the prefix from cache instead.
+ *
+ * Byte-identity is the whole point: the warm-up builds `(system,
+ * cacheablePrefix)` through the SAME helpers handleGenerate uses, on the
+ * same merged context each branch will see. (One caveat: sliding-window
+ * memory recall augments `ir.system` at runtime, after this runs — so a
+ * gen with recall won't match and runs cold. The reviewer case uses
+ * write-only `:log` memory, so its system is stable.)
+ *
+ * Best-effort: a warm-up failure never propagates — the group's branches
+ * just fall back to the cold path (today's behavior).
+ */
+export async function prewarmFanOut(
+  branches: ExpandedBranch[],
+  precompiled: Map<string, any>,
+  passContext: Record<string, any>,
+  ctx: RunStepContext,
+): Promise<PrewarmSummary> {
+  interface Group {
+    model: string;
+    system: string;
+    cacheablePrefix: string;
+    temperature: number | undefined;
+    fallbacks: string[] | undefined;
+    schema: any;
+    documents: any[];
+  }
+  const groups = new Map<string, Group>();
+
+  for (const branch of branches) {
+    // Any throw while building a branch's prefix (malformed memo IR, a
+    // schema shape buildCacheablePrefix chokes on, etc.) must only skip
+    // that branch — never propagate, or it would fail the whole fan-out
+    // and contradict the best-effort contract. The branch then runs cold.
+    try {
+      const method = branch.method ?? 'analyze';
+      const subIr = precompiled.get(`${branch.agent}::${method}`);
+      if (!subIr) continue; // compile failed → excluded (runBranch surfaces it)
+
+      const schema = subIr.returnSchema ?? ctx.contractsMod[subIr.returnSchemaId];
+      if (!schema) continue;
+
+      // Same context merge runBranch does, on a non-mutating copy so the
+      // shared precompiled IR is never touched.
+      const branchContext = { ...passContext, ...(branch._context ?? {}) };
+      const mergedIr = { ...subIr, context: { ...(subIr.context ?? {}), ...branchContext } };
+
+      const docInput = await extractDocuments(mergedIr);
+
+      const system = buildGenSystem(mergedIr, schema);
+      const { cacheablePrefix, useCachedPrefix } = buildCacheablePrefix(mergedIr, schema, docInput);
+      if (!useCachedPrefix) continue; // ungrounded or below the cache floor
+
+      // Anthropic's cache is per-model, and a differing system/prefix within
+      // a tier is a different cache entry — so the key is model + a hash of
+      // the exact cached bytes. Reviewers sharing system+returns+grounding
+      // collapse to one warm-up per tier.
+      const digest = createHash('sha1').update(`${system}\0${cacheablePrefix}`).digest('hex');
+      const key = `${subIr.model.id}\0${digest}`;
+      if (!groups.has(key)) {
+        groups.set(key, {
+          model: subIr.model.id,
+          system,
+          cacheablePrefix,
+          temperature: subIr.model.temperature,
+          fallbacks: subIr.model.fallbacks,
+          schema,
+          documents: docInput.documents,
+        });
+      }
+    } catch {
+      continue; // best-effort: this branch just runs cold
+    }
+  }
+
+  if (groups.size === 0) return { groups: 0, fired: 0, failed: 0, tokens: 0 };
+
+  const results = await Promise.allSettled(
+    [...groups.values()].map((g) =>
+      ctx.generateText({
+        model: g.model,
+        system: g.system,
+        prompt: 'cache warm-up',
+        cachedPrefix: g.cacheablePrefix,
+        max_tokens: PREWARM_MAX_TOKENS,
+        temperature: g.temperature,
+        jsonSchema: g.schema,
+        documents: g.documents,
+        fallbacks: g.fallbacks,
+      }),
+    ),
+  );
+  let fired = 0;
+  let failed = 0;
+  let tokens = 0;
+  for (const r of results) {
+    if (r.status === 'fulfilled') {
+      fired++;
+      tokens += r.value?.usage?.total_tokens ?? 0;
+    } else {
+      failed++;
+      process.stderr.write(
+        `[cambium] prewarm warm-up rejected: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}\n`,
+      );
+    }
+  }
+  return { groups: groups.size, fired, failed, tokens };
+}
+
 async function runFanOut(
   op: any,
   ctx: RunStepContext,
@@ -1263,11 +1451,11 @@ async function runFanOut(
     };
   }
 
-  // Build the shared pass_context map from the prior operator's output.
+  // Build the shared context map from the prior operator's output.
   // `priorResult` is threaded in by dispatchOperatorList — the output of
   // the operator immediately preceding this fan_out, resolved correctly
   // across branch_on nesting (null when no prior operator exists).
-  const passContextFields: string[] = op.pass_context ?? [];
+  const passContextFields: string[] = op.context ?? [];
   const passContext: Record<string, any> = {};
   for (const field of passContextFields) {
     passContext[field] = priorResult?.[field];
@@ -1275,8 +1463,44 @@ async function runFanOut(
 
   // Dispatch each branch concurrently up to `concurrency` workers.
   const concurrency = typeof op.concurrency === 'number' ? op.concurrency : branches.length;
+
+  // Prewarm the shared prompt-cache prefix before dispatching (unless opted
+  // out or single-worker, where branch 1 warms 2..N naturally). Only active
+  // when it can help — concurrency > 1 AND >1 branch — and skipped under
+  // --mock (no real cache; keeps golden runs byte-stable). When active we
+  // compile each distinct (agent, method) sub-IR once up front and memoize
+  // it so runBranch reuses it instead of recompiling; a per-branch compile
+  // failure is left out of the memo, and runBranch surfaces it on its own
+  // path unchanged.
+  let precompiled: Map<string, any> | undefined;
+  let prewarmSummary: PrewarmSummary | undefined;
+  if (fanOutPrewarmEligible(op, concurrency, branches.length, ctx.mock)) {
+    precompiled = new Map<string, any>();
+    for (const branch of branches) {
+      const method = branch.method ?? 'analyze';
+      const key = `${branch.agent}::${method}`;
+      if (precompiled.has(key)) continue;
+      const genFile = findGenFile(branch.agent, ctx.workspaceDir);
+      if (!genFile) continue;
+      try {
+        assertSafeMethodName(method, branch.id ?? '<unknown>');
+        precompiled.set(key, compileGenIr(genFile, method, ctx.compileRb));
+      } catch {
+        // Excluded from prewarm; runBranch recompiles and reports the error.
+      }
+    }
+    try {
+      prewarmSummary = await prewarmFanOut(branches, precompiled, passContext, ctx);
+    } catch {
+      // Belt-and-suspenders: prewarm is best-effort and must never fail the
+      // fan-out. prewarmFanOut already guards per-branch + swallows warm-up
+      // rejections, so this only trips on a truly unexpected throw.
+      prewarmSummary = undefined;
+    }
+  }
+
   const branchResults = await runWithConcurrency(
-    branches.map((branch) => () => runBranch(branch, op, passContext, ctx)),
+    branches.map((branch) => () => runBranch(branch, op, passContext, ctx, precompiled)),
     concurrency,
   );
 
@@ -1311,8 +1535,10 @@ async function runFanOut(
     r.status === 'fulfilled' && r.value.ok ? r.value.output : undefined,
   );
 
-  // Aggregate per-branch token + tool-call usage.
-  let totalTokens = 0;
+  // Aggregate per-branch token + tool-call usage, plus any prewarm spend
+  // (real tokens the warm-ups cost — count them so a budget-capped
+  // pipeline's rollup reflects true cost).
+  let totalTokens = prewarmSummary?.tokens ?? 0;
   let totalToolCalls = 0;
   for (const r of branchResults) {
     if (r.status === 'fulfilled') {
@@ -1355,6 +1581,7 @@ async function runFanOut(
         failed,
         threshold: requireSpec.kind === 'all' ? 'all' : `at_least:${requireSpec.n}`,
         on_branch_failure: onFailure,
+        ...(prewarmSummary ? { prewarm: prewarmSummary } : {}),
       },
       // RED-385 Phase A: the merged branch-output array (same value that
       // flows into stepResults), so pipeline replay can rehydrate this
@@ -1387,6 +1614,10 @@ async function runBranch(
   fanOutOp: any,
   passContext: Record<string, any>,
   ctx: RunStepContext,
+  /** Prewarm's (agent::method → IR) memo. On a hit runBranch reuses the
+   *  compiled IR (a fresh clone, since it mutates context/memory below and
+   *  the map is shared across branches) instead of shelling out again. */
+  precompiled?: Map<string, any>,
 ): Promise<BranchOutcome> {
   const genFile = findGenFile(branch.agent, ctx.workspaceDir);
   if (!genFile) {
@@ -1398,26 +1629,27 @@ async function runBranch(
     };
   }
 
-  // Compile sub-gen IR (same pattern as runStep).
+  // Compile sub-gen IR (same pattern as runStep), or reuse the prewarm memo.
   const branchMethod = branch.method ?? 'analyze';
   assertSafeMethodName(branchMethod, branch.id ?? '<unknown>');
   let subIr: any;
-  try {
-    const irJson = execSync(
-      `ruby "${ctx.compileRb}" "${genFile}" --method "${branchMethod}"`,
-      { encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 },
-    );
-    subIr = JSON.parse(irJson);
-  } catch (err: any) {
-    return {
-      ok: false,
-      tokens: 0,
-      toolCalls: 0,
-      errorMessage: `Sub-gen compile failed for branch ${branch.id}: ${err?.message ?? err}`,
-    };
+  const cached = precompiled?.get(`${branch.agent}::${branchMethod}`);
+  if (cached) {
+    subIr = structuredClone(cached);
+  } else {
+    try {
+      subIr = compileGenIr(genFile, branchMethod, ctx.compileRb);
+    } catch (err: any) {
+      return {
+        ok: false,
+        tokens: 0,
+        toolCalls: 0,
+        errorMessage: `Sub-gen compile failed for branch ${branch.id}: ${err?.message ?? err}`,
+      };
+    }
   }
 
-  // Merge pass_context (from the prior step) + per-branch context
+  // Merge context (from the prior step) + per-branch context
   // (from homogeneous sugar's `as: :slot`) into the sub-gen's IR
   // context. Both layers contribute, with branch-specific context
   // winning on conflict.

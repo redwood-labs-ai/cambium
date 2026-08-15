@@ -1,5 +1,5 @@
 /**
- * AUD-PC1: `pass_context` must reach a `fan_out` nested inside a
+ * AUD-PC1: `context` must reach a `fan_out` nested inside a
  * `branch_on` body — permanent regression lock-in for the prior-operator
  * locator fix (PLAN-pass-context-fix-2026-06-15).
  *
@@ -10,12 +10,12 @@
  * upstream-derived sentinel into a branch's observable output, which is
  * exactly the blind spot that let AUD-PC1 ship. The stub echo makes
  * "branch received the upstream context" directly observable: a branch's
- * `raw_preview` contains `MARK-UPSTREAM` iff `pass_context` delivered
+ * `raw_preview` contains `MARK-UPSTREAM` iff `context` delivered
  * `recon.summary` across the nesting boundary.
  *
  * The branch sub-gen (`Echo`) has NO `grounded_in`, so its compiled
  * `context.document` is "" — `MARK-UPSTREAM` can ONLY reach a branch via
- * `pass_context`, never from the branch's own primary document.
+ * `context`, never from the branch's own primary document.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createServer, type Server } from 'node:http';
@@ -119,7 +119,7 @@ beforeAll(async () => {
   // Echo gen: omlx:stub, returns AnalysisReport, NO grounded_in. With no
   // grounding the primary context key is `document`; an `analyze` arg
   // becomes context.document (here always "" for branches), and any
-  // pass_context field (e.g. `summary`) renders as a labeled section in
+  // context field (e.g. `summary`) renders as a labeled section in
   // the prompt — which the stub then echoes back.
   writeFileSync(
     join(scratch, 'app', 'gens', 'echo.cmb.rb'),
@@ -167,7 +167,7 @@ const fanOut = () => ({
   ],
   on_branch_failure: 'continue',
   require: { kind: 'all' },
-  pass_context: ['summary'],
+  context: ['summary'],
 });
 
 function buildIr(operators: any[]): any {
@@ -211,10 +211,10 @@ function stepPreview(stepEntry: any): string {
   return gen?.meta?.raw_preview ?? '';
 }
 
-describe('AUD-PC1: pass_context across operator nesting boundaries', () => {
+describe('AUD-PC1: context across operator nesting boundaries', () => {
   // ── Test 1 — the missing case: fan_out nested in branch_on ──────────
-  it('delivers pass_context into a fan_out nested inside a branch_on default block', async () => {
-    // recon → branch_on(default → fan_out(pass_context :summary)). The
+  it('delivers context into a fan_out nested inside a branch_on default block', async () => {
+    // recon → branch_on(default → fan_out(context :summary)). The
     // `on` value never matches the recon summary, so the default fires.
     const NESTED_OPS = [
       reconStep(),
@@ -237,7 +237,7 @@ describe('AUD-PC1: pass_context across operator nesting boundaries', () => {
     expect(fanEntry).toBeTruthy();
     expect(fanEntry.ok).toBe(true);
 
-    // Every nested branch must have RECEIVED recon.summary via pass_context.
+    // Every nested branch must have RECEIVED recon.summary via context.
     const previews = fanOutBranchPreviews(fanEntry);
     expect(previews).toHaveLength(2);
     for (const p of previews) {
@@ -248,7 +248,7 @@ describe('AUD-PC1: pass_context across operator nesting boundaries', () => {
   // ── Test 3a — lock-in: bind(:recon).field inside a branch_on body ───
   it('resolves bind(:prior).field for a step inside a branch_on body (shared stepResults)', async () => {
     // A step inside the default block reads recon.summary via `with`
-    // bind — the shared stepResults path, NOT pass_context. This already
+    // bind — the shared stepResults path, NOT context. This already
     // worked; the test fences it so the prevOutput change can't regress it.
     const BIND_OPS = [
       reconStep(),
@@ -279,7 +279,7 @@ describe('AUD-PC1: pass_context across operator nesting boundaries', () => {
 
   // ── Test 3b — within-block update: fan_out's prior is an in-block sibling ──
   it('uses the in-block sibling output as a fan_out prior (not the operator before the branch_on)', async () => {
-    // Inside the default block: step :pre → fan_out(pass_context :summary).
+    // Inside the default block: step :pre → fan_out(context :summary).
     // The fan_out's prior is :pre (the in-block sibling), exercising the
     // DEC-001(b) within-block prevOutput update — distinct from Test 1
     // where the fan_out is first-in-block (prior = the block seed).
@@ -327,15 +327,15 @@ describe('AUD-PC1: pass_context across operator nesting boundaries', () => {
   }, 30_000);
 });
 
-// ── Test 2 — strengthened top-level pass_context (positive control) ───
+// ── Test 2 — strengthened top-level context (positive control) ───
 // Co-located here on the proven stub harness (per DEC-006 / Test 2 option
 // (a)): the top-level fan_out branches must RECEIVE recon.summary, not
 // merely report ok. This control proves the harness detects delivery when
 // delivery happens — making Test 1's negative-before/positive-after
 // trustworthy. (The old pipeline_runtime.test.ts:669 case is reduced to a
 // thin structural check; this is the delivery assertion.)
-describe('top-level pass_context delivery (positive control)', () => {
-  it('delivers pass_context into a top-level fan_out', async () => {
+describe('top-level context delivery (positive control)', () => {
+  it('delivers context into a top-level fan_out', async () => {
     const TOPLEVEL_OPS = [reconStep(), fanOut()];
 
     const result = await run(TOPLEVEL_OPS);

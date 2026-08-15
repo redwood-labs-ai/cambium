@@ -68,15 +68,15 @@ describe('runGen library entry (RED-220 POC follow-up)', () => {
     expect(typeof runGen).toBe('function');
   });
 
-  it('exports IR as a type (RED-354)', () => {
-    // Use the imported type to confirm it resolves and accepts the
-    // shape the Ruby compiler emits. This is a compile-time check —
-    // the runtime body of the `it` only proves the bound name exists
-    // and the assignment typechecks. If `IR` weren't exported from
-    // the runner, the import at the top of this file would fail to
-    // type-check, and TypeScript would surface that during test build.
-    const typed: IR = minimalIr('MockReport');
-    expect(typed.entry?.class).toBe('LibrarySmokeTest');
+  it('exports IR as an opaque type (Road to 1.0 Gate 1)', () => {
+    // `IR` is now a phantom-branded opaque handle — consumers obtain it
+    // via `JSON.parse(irText)` (any → IR) and pass it to runner functions;
+    // they do not read fields off it. `JSON.parse` returns `any`, which
+    // flows into `IR` at the call site, so the realistic consumer path
+    // is unchanged. This test confirms the type is exported and that
+    // the `any`-typed helper flows into it without a cast.
+    const typed: IR = JSON.parse(JSON.stringify(minimalIr('MockReport')));
+    expect(typed).toBeDefined();
   });
 
   it('rejects a path-traversal runId (RED-330 security guard)', async () => {
