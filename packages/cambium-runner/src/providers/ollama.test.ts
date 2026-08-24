@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { buildOllamaChatRequest, normalizeOllamaChatResponse } from './ollama.js';
+import { buildOllamaChatRequest, normalizeOllamaChatResponse, toOllamaToolCalls } from './ollama.js';
 import { ollamaProvider } from './builtins.js';
 
 describe('buildOllamaChatRequest', () => {
@@ -37,6 +37,57 @@ describe('buildOllamaChatRequest', () => {
     });
     expect(body.options.temperature).toBe(0.2);
     expect(body.options.num_predict).toBe(1200);
+  });
+
+  it('converts stringified assistant tool-call arguments to objects on continuation turns (#153)', () => {
+    const body = buildOllamaChatRequest({
+      model: 'qwen3:8b',
+      messages: [
+        { role: 'user', content: 'list jobs' },
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ id: 'c1', type: 'function', function: { name: 'list_jobs', arguments: '{}' } }],
+        },
+        { role: 'tool', content: '{"jobs":[]}', tool_call_id: 'c1' },
+      ],
+      tools: [],
+    });
+    const replayed = body.messages[1].tool_calls[0];
+    expect(replayed.function.arguments).toEqual({});
+    expect(typeof replayed.function.arguments).not.toBe('string');
+  });
+
+  it('parses non-trivial stringified arguments into their object form', () => {
+    const out = toOllamaToolCalls([
+      { id: 'c1', type: 'function', function: { name: 'web_search', arguments: '{"query":"foo"}' } },
+    ]);
+    expect(out![0].function.arguments).toEqual({ query: 'foo' });
+  });
+
+  it('treats empty-string arguments as {} and passes object-shaped values through untouched', () => {
+    const out = toOllamaToolCalls([
+      { function: { name: 'a', arguments: '' } },
+      { function: { name: 'b', arguments: { k: 1 } } },
+    ]);
+    expect(out![0].function.arguments).toEqual({});
+    expect(out![1].function.arguments).toEqual({ k: 1 });
+  });
+
+  it('does not mutate the caller-side messages (internal string form is preserved)', () => {
+    const toolCall = { id: 'c1', type: 'function', function: { name: 't', arguments: '{"k":"v"}' } };
+    const messages = [
+      { role: 'user', content: 'q' },
+      { role: 'assistant', content: '', tool_calls: [toolCall] },
+    ];
+    buildOllamaChatRequest({ model: 'm', messages, tools: [] });
+    expect(toolCall.function.arguments).toBe('{"k":"v"}');
+  });
+
+  it('returns undefined for absent tool_calls without altering the message shape', () => {
+    const userMsg = { role: 'user', content: 'q' };
+    const body = buildOllamaChatRequest({ model: 'm', messages: [userMsg], tools: [] });
+    expect(body.messages[0]).toBe(userMsg);
   });
 });
 

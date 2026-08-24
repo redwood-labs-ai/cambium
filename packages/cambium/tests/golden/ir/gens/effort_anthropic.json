@@ -1,0 +1,61 @@
+{
+  "analyze": {
+    "version": "0.2",
+    "entry": {
+      "class": "EffortAnthropic",
+      "method": "analyze",
+      "source": "packages/cambium/app/gens/effort_anthropic.cmb.rb"
+    },
+    "model": {
+      "id": "anthropic:claude-opus-4-7"
+    },
+    "system": "inline system prompt",
+    "mode": null,
+    "effort": "high",
+    "policies": {
+      "tools_allowed": [],
+      "correctors": [],
+      "constraints": {},
+      "grounding": null,
+      "security": null,
+      "budget": null,
+      "memory": [],
+      "memory_pools": {},
+      "memory_write_via": null,
+      "log": [],
+      "log_profiles": [],
+      "schedules": []
+    },
+    "reads_trace_of": null,
+    "returnSchema": {
+      "type": "object",
+      "properties": {
+        "result": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "additionalProperties": false,
+      "$id": "EffortAnthropicOutput"
+    },
+    "context": {
+      "document": ""
+    },
+    "enrichments": [],
+    "signals": [],
+    "triggers": [],
+    "steps": [
+      {
+        "id": "generate_1",
+        "type": "Generate",
+        "prompt": "analyze the document",
+        "with": {
+          "context": ""
+        },
+        "returns": null
+      }
+    ]
+  }
+}

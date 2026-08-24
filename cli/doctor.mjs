@@ -44,7 +44,10 @@ function check(name, fn) {
   }
 }
 
-function cmdVersion(cmd, minMajor) {
+// `minMinor` matters because Node floors are not always major-aligned:
+// `engines.node` is `>=22.19.0`, so a bare major check would green-light
+// 22.0-22.18 — versions the published packages refuse to support.
+function cmdVersion(cmd, minMajor, minMinor = 0, notFoundDetail = null) {
   try {
     const out = execSync(`${cmd} --version 2>&1`, { encoding: 'utf8', timeout: 5000 }).trim();
     const m = out.match(/(\d+)\.(\d+)/);
@@ -52,16 +55,18 @@ function cmdVersion(cmd, minMajor) {
     const major = parseInt(m[1]);
     const minor = parseInt(m[2]);
     const ver = `${major}.${minor}`;
-    if (major < minMajor) return { ok: false, detail: `${cmd} ${ver} (need >= ${minMajor}.0)` };
+    if (major < minMajor || (major === minMajor && minor < minMinor)) {
+      return { ok: false, detail: `${cmd} ${ver} (need >= ${minMajor}.${minMinor})` };
+    }
     return { ok: true, detail: `${cmd} ${ver}` };
   } catch {
-    return { ok: false, detail: `${cmd} not found in PATH` };
+    return { ok: false, detail: notFoundDetail ?? `${cmd} not found in PATH` };
   }
 }
 
 // ── Checks ──────────────────────────────────────────────────────────────
 
-check('Node.js >= 18', () => cmdVersion('node', 18));
+check('Node.js >= 22.19', () => cmdVersion('node', 22, 19));
 
 check('npm available', () => {
   try {
@@ -72,17 +77,15 @@ check('npm available', () => {
   }
 });
 
-check('Ruby available', () => {
-  try {
-    const out = execSync('ruby --version 2>&1', { encoding: 'utf8', timeout: 5000 }).trim();
-    const m = out.match(/ruby (\d+\.\d+)/);
-    if (!m) return { ok: false, detail: `Could not parse Ruby version: ${out}` };
-    const ver = m[1];
-    return { ok: true, detail: `ruby ${ver}` };
-  } catch {
-    return { ok: false, detail: 'Ruby not found. Install Ruby >= 3.0: https://www.ruby-lang.org/en/documentation/installation/' };
-  }
-});
+// The floor is Ruby 3.0 (README.md § Requirements). Reporting `ok` on
+// anything that merely parses masked the RED-377 class of bug: a construct
+// removed in Ruby 3.x still runs on a dev machine's EOL 2.6 and only fails
+// on the Alpine/Ruby-3.4 deploy target. `cmdVersion` already existed and was
+// used for Node; it just was never applied here (issue #161).
+check('Ruby >= 3.0', () => cmdVersion(
+  'ruby', 3, 0,
+  'Ruby not found. Install Ruby >= 3.0: https://www.ruby-lang.org/en/documentation/installation/',
+));
 
 check('Ruby gem: json', () => {
   try {

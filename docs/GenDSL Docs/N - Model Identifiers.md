@@ -97,6 +97,31 @@ On a **transient** failure of the primary, the runner tries the next candidate i
 - The native-document gate runs against the **primary** provider before any fallback (and per-candidate for fallbacks): a document-bearing gen on a non-document provider fails fast rather than silently dropping the document to enable fallback.
 - **Custom providers** that want retry-on-transient for HTTP-status failures must throw `ProviderHttpError` (exported from `@redwood-labs/cambium-runner`), carrying the HTTP status. For pre-response connection failures (no HTTP response — ECONNREFUSED, DNS, TLS), throw `ProviderConnectionError` instead (also exported from `@redwood-labs/cambium-runner`; subclasses `ProviderHttpError` with `status: 0`). A plain `Error` or `TypeError` — any non-`ProviderHttpError` — is classified **deterministic**, so an unrecognized failure produces controlled fail-fast rather than a cost-blowing fan-out to every fallback. DEC-A is unchanged: the type-gate, not a `.status` property, determines classification.
 
+## Reporting why a completion stopped (RED-174)
+
+`GenerateResult` and `GenerateWithToolsResult` carry an optional
+`stopReason?: 'stop' | 'length' | 'tool_use' | 'other'`. `'length'` means the
+output ceiling truncated the completion — the runner then fails the step with
+`error.kind: "output_ceiling"` instead of trying to parse a fragment and
+blaming the model's JSON.
+
+Every provider reports this natively under a different name, and Cambium
+normalizes all of them through `normalizeStopReason` (exported from the runner):
+
+| Provider | Wire field | Truncation value |
+|---|---|---|
+| Anthropic | `stop_reason` | `"max_tokens"` |
+| OpenAI-compatible (`omlx`, most customs) | `choices[0].finish_reason` | `"length"` |
+| Ollama | `done_reason` | `"length"` |
+
+**Custom providers** should set `stopReason` on the results they return; the
+`openaiCompatible` / `anthropicCompatible` factories already do it for you.
+Omitting it is safe — the runner falls back to comparing completion tokens
+against the applied ceiling, and that fallback is consulted only after a parse
+has already failed, so it can sharpen a diagnosis but never fail a good run.
+Setting it is still better: the reported signal is authoritative and catches
+the case where a truncated fragment happens to parse.
+
 ## Anthropic prompt caching (RED-321)
 
 `buildAnthropicMessagesRequest` automatically applies `cache_control: {type: 'ephemeral'}` to up to four blocks — Anthropic's per-request breakpoint ceiling:
@@ -126,7 +151,9 @@ Caching is on by default because the cost/latency improvement is monotonic when 
 
 Claude models from generation 4.7 onward (Opus 4.7, Opus 4.8, Fable 5, Mythos 5) removed sampling parameter support — sending `temperature` or `top_p` to these models produces HTTP 400. Cambium's Anthropic provider omits `temperature` automatically for models not on the accept list; the accept-list prefixes are `claude-3`, `claude-opus-4-6`, `claude-sonnet-4-6`, and `claude-haiku-4-5`. Any unrecognized or future model id defaults to **omitting** temperature — the safe direction (model uses its own internal default rather than 400-ing).
 
-Consequence for authors: a DSL-level `temperature` declaration is **silently ignored** for non-accepting models. There is no error or trace warning — the parameter simply does not appear in the request body. If you need a specific sampling behavior and are targeting a newer Anthropic model that does not accept these fields, there is currently no override mechanism; raise an issue or pin to an accept-listed model.
+Consequence for authors: a DSL-level `temperature` declaration is **silently ignored** for non-accepting models. There is no error or trace warning — the parameter simply does not appear in the request body.
+
+For models that dropped sampling params (Opus 4.7+, Fable 5, Mythos 5), use the `effort` primitive as the steering control instead — see [[P - GenModel]] § `effort` and [[C - IR (Intermediate Representation)]] § Top-level IR fields. The DSL compiler validates the pairing at compile time (must be `low`/`medium`/`high`/`max` and paired with an `anthropic:` model id); the runner aliases `max_tokens` → `max_output_tokens` on the wire for these models and sends `effort` alongside `thinking: { type: "adaptive" }`.
 
 ### Non-goal: forced-schema
 

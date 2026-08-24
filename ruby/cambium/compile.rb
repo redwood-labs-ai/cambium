@@ -259,6 +259,23 @@ if defs[:model_fallbacks]
   end
 end
 
+# RED-325: validate `effort` (only valid for Anthropic models that dropped
+# sampling params — Opus 4.7+, Fable 5, Mythos 5). Rejects on bad values
+# or on a non-Anthropic model; the runner will throw anyway, but the
+# compile-time check gives a local pointer instead of a runtime surprise.
+if defs[:effort]
+  unless ['low', 'medium', 'high', 'max'].include?(defs[:effort].to_s)
+    raise Cambium::CompileError,
+          "effort: '#{defs[:effort]}' is not valid. Must be one of: low, medium, high, max."
+  end
+  primary_id = defs[:model]
+  unless primary_id&.start_with?('anthropic:')
+    raise Cambium::CompileError,
+          "effort: '#{defs[:effort]}' can only be used with an Anthropic model (model id prefix 'anthropic:'). " \
+          "Got '#{primary_id}' — effort is an Anthropic-only steering control."
+  end
+end
+
 # RED-215: resolve memory declarations against named pools.
 #
 # Each `memory :x, scope: :support_team, top_k: 5` on a gen becomes
@@ -536,6 +553,17 @@ build_ir = lambda do |method_name, steps|
     }.compact,
     'system' => system_prompt,
     'mode' => defs[:mode],
+    # RED-325: effort is a per-gen steering control for models that dropped
+    # sampling params. Passed through the IR as-is; the runner validates
+    # it against the provider's actual API surface at runtime.
+    #
+    # Absent (not null) when unset — same rule as `model.fallbacks` above,
+    # for the same reason: a gen that never declares `effort` must compile
+    # to the bytes it did before the primitive existed, so upgrading does
+    # not diff every downstream golden snapshot. Splatted rather than
+    # `.compact`ed because this is the top-level hash, which carries
+    # meaningful nulls elsewhere (`returnSchemaId`, `reads_trace_of`).
+    **(defs[:effort] ? { 'effort' => defs[:effort] } : {}),
     'policies' => {
       'tools_allowed' => (defs[:tools] || []),
       'correctors' => (defs[:correctors] || []),

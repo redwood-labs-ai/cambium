@@ -1,10 +1,12 @@
 # Cambium Compatibility Promise
 
-**Status:** Published during the 0.9 series — the final window in which breaking
-changes land — so the 1.0 surface is settled and reviewable *before* the promise
-becomes binding. The promise below **takes effect at Cambium 1.0.** Until 1.0,
-Cambium is pre-release: 0.9.x may still break the surfaces named here (each break
-lands loud, with a `CHANGELOG.md` migration entry).
+**Status:** Opened during the 0.9 series so the 1.0 surface is settled and
+reviewable *before* the promise becomes binding. The promise below **takes effect
+at Cambium 1.0.** Until then Cambium is pre-release: any 0.x release may still
+break the surfaces named here, and each break lands loud, with a `CHANGELOG.md`
+migration entry. One has landed so far — `output_ceiling`, a twelfth
+`error.kind`, in 0.10 (§ 3). The pre-1.0 window is the *only* window for a break
+like that; after 1.0 it is a `/v2` boundary.
 
 Cambium adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 This document defines *what a version number promises* — which surfaces the major
@@ -107,13 +109,23 @@ response envelopes are the wire contract between the runner and its clients (e.g
   wire format doc [`C - Serve Mode`](docs/GenDSL%20Docs/C%20-%20Serve%20Mode.md).
 
 **The `error.kind` closed enum.** Every error response carries a `kind` from a
-closed set of **11 values**:
+closed set of **12 values**:
 
 ```
 unknown_gen · unknown_method · input_invalid · validation_failed ·
 budget_exhausted · tool_dispatch_failed · runner_error · timeout ·
-overloaded · booting · not_found
+overloaded · booting · not_found · output_ceiling
 ```
+
+`output_ceiling` was added in the **0.10** window (RED-174), and the timing was
+the decision. The enum becomes binding at 1.0, so 0.10 was the last release in
+which a twelfth kind could be added at all — after that it is a `/v2` break, as
+stated below. It earns a kind of its own rather than a message on `runner_error`
+because it is *mechanically recoverable*: raise `max_tokens` on the gen (or
+narrow the `returns` schema) and retry. A caller can branch on that; it cannot
+branch on a message string. It is not `validation_failed`, either — nothing was
+validated, because the model was cut off before it finished producing anything
+to validate.
 
 `error.kind` is closed because typed clients map it **1:1 to an exception class**
 (the Python client raises one subclass per kind — `cambium_client/errors.py`). A
@@ -126,10 +138,10 @@ closed-enum promise is what lets a client trust its mapping is exhaustive. **New
 `error.kind` values are a `/v2` boundary, not an additive `/v1` change.**
 
 Because a new kind cannot be added mid-`1.x`, any error condition that a promised
-feature needs *must* claim its kind before 1.0. The 0.10 cooperative-cancellation
-work is modeled deliberately as a **non-error outcome** (a terminal status on the
-success envelope), **not** a 12th `error.kind` — a cancellation the caller
-requested is a cooperative result, not a failure. The enum stays at 11.
+feature needs *must* claim its kind before 1.0. The planned cooperative-
+cancellation work is modeled deliberately as a **non-error outcome** (a terminal
+status on the success envelope), **not** a further `error.kind` — a cancellation
+the caller requested is a cooperative result, not a failure. The enum stays at 12.
 
 ### 4. Trace step vocabulary
 
@@ -195,6 +207,34 @@ including a PATCH:
 - **`runs/` artifact layout beyond what `cambium replay` / `cambium inspect`
   consume** — the trace *vocabulary* (surface 4) is promised; incidental on-disk
   structure is not.
+
+---
+
+## Runtime requirements (Node floor)
+
+Both published packages declare `engines.node`. The floor is **not** one of the six
+promised surfaces — it tracks what Cambium's own dependencies require, and those are
+upstream decisions Cambium does not control. It may rise in a MINOR release.
+
+| Cambium | Node floor | Declared? | Binding constraint |
+|---------|-----------|-----------|--------------------|
+| 0.9.0 and earlier | `>=22.19.0` | ❌ implicit | `undici` 8.x (`engines.node: >=22.19.0` since 8.5.0). |
+| next 0.9.x | `>=22.19.0` | ✅ `engines.node` | `undici` 8.x, unchanged. |
+
+**The floor did not move — it was undeclared.** Because neither package shipped an
+`engines` field, npm had nothing to check the root against, and a consumer below the
+real floor learned about it as a runtime failure inside a gen rather than at install.
+Declaring it converts that into an install-time `EBADENGINE` (or a warning, depending
+on the consumer's `engine-strict`).
+
+Note the binding constraint is `undici`, not `pdfjs-dist`. The 6.x bump raised pdfjs's
+own floor to `>=22.13.0`, which is *below* undici's `>=22.19.0` and therefore never the
+deciding factor. Anything that declares a floor must take the **maximum** across every
+non-optional package in the resolved tree — `@npmcli/arborist` checks each tree member,
+not just the root — so a floor derived from the package you happened to be bumping will
+be too low.
+
+A floor change is always called out in `CHANGELOG.md`.
 
 ---
 

@@ -103,6 +103,37 @@ export function detectScaffoldContext(cwd) {
   return { mode: 'none' };
 }
 
+// RED-159: the scaffolded files import runner symbols. In the cambium
+// monorepo the app package cannot import the runner *as a package* (it
+// would be importing a sibling of itself, unbuilt), so those files use a
+// deep relative into `packages/cambium-runner/src/`. Everywhere else the
+// published `@redwood-labs/cambium-runner` is correct.
+//
+// This used to be keyed on `ctx.shape === 'workspace'`, treating "has a
+// [workspace] Genfile" as a synonym for "is the cambium monorepo". It is
+// not: `cambium init demoapp` also produces a [workspace] Genfile, and
+// that workspace has no packages/cambium-runner/ — so every scaffolded
+// tool / action / corrector / provider / golden test landed with an import
+// that resolves to nothing (ERR_MODULE_NOT_FOUND on first run).
+//
+// Key it on the thing that actually matters instead: is the runner source
+// reachable at the path the deep relative would resolve to? The relative
+// is written from `<appPkgRoot>/app/<type>/`, i.e. three levels up, so the
+// target is `<appPkgRoot>/../cambium-runner/src`.
+function hasInTreeRunnerSource(ctx) {
+  if (!ctx?.appPkgRoot) return false;
+  return existsSync(join(ctx.appPkgRoot, '..', 'cambium-runner', 'src'));
+}
+
+/**
+ * Import specifier for a runner module, correct for this workspace.
+ * @param {object} ctx Scaffold context (needs appPkgRoot).
+ * @param {string} deepRelative e.g. '../../../cambium-runner/src/golden.js'
+ */
+function runnerImport(ctx, deepRelative) {
+  return hasInTreeRunnerSource(ctx) ? deepRelative : '@redwood-labs/cambium-runner';
+}
+
 function noContextError() {
   console.error(`\nNo Cambium context detected in this directory or its ancestors.`);
   console.error(`\nOptions:`);
@@ -359,9 +390,22 @@ You are a ${pascal.replace(/([A-Z])/g, ' $1').trim().toLowerCase()}. You extract
 
   // Import path for goldenTest: in-tree workspace uses the deep relative;
   // external [package] apps import from the published runner package.
-  const goldenImport = ctx.shape === 'workspace'
-    ? '../../../cambium-runner/src/golden.js'
-    : '@redwood-labs/cambium-runner';
+  // Two levels, not three: this file lands in `<appPkgRoot>/tests/`, whereas
+  // the tool / action / corrector / provider scaffolds land one level deeper
+  // in `<appPkgRoot>/app/<type>/`. The literal here was a copy of theirs and
+  // resolved to `<workspaceRoot>/cambium-runner/`, which does not exist — so
+  // an in-tree `cambium new agent` produced a test that could not even load.
+  const goldenImport = runnerImport(ctx, '../../cambium-runner/src/golden.js');
+
+  // RED-159: `cli/cambium.mjs` exists only in the Cambium repo. Anywhere
+  // else the CLI is a dependency, reached through npx / node_modules/.bin.
+  const inTree = hasInTreeRunnerSource(ctx);
+  const cliInvocation = inTree
+    ? `['node', join(REPO_ROOT, 'cli/cambium.mjs')]`
+    : `['npx', 'cambium']`;
+  const cliInvocationNote = inTree
+    ? 'In-tree Cambium repo: run the CLI entrypoint directly.'
+    : 'Cambium is a dependency here, so go through npx.';
 
   writeFile(join(PKG, 'tests', `${snake}.test.ts`), `\
 /**
@@ -387,19 +431,22 @@ import { describe, it, expect } from 'vitest'
 import { spawnSync } from 'node:child_process'
 import { readFileSync, existsSync, rmSync } from 'node:fs'
 import { join, dirname } from 'node:path'
+import { tmpdir } from 'node:os'
 import { goldenTest, normalizeStrings } from '${goldenImport}'
 
 const REPO_ROOT = process.cwd()
-const CLI = join(REPO_ROOT, 'cli/cambium.mjs')
+// How to invoke the CLI from this workspace. ${cliInvocationNote}
+const CAMBIUM: string[] = ${cliInvocation}
 const GEN = '${PKG}/app/gens/${snake}.cmb.rb'
 // TODO: replace with your real fixture path
 const FIXTURE = '${PKG}/examples/fixtures/<fixture>.txt'
 const SNAPSHOT = join(REPO_ROOT, '${PKG}/examples/fixtures/${snake}-snapshot.json')
 
 function runMock() {
+  const [bin, ...pre] = CAMBIUM
   return spawnSync(
-    'node',
-    [CLI, 'run', GEN, '--method', 'analyze', '--arg', FIXTURE, '--mock'],
+    bin,
+    [...pre, 'run', GEN, '--method', 'analyze', '--arg', FIXTURE, '--mock'],
     { cwd: REPO_ROOT, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 },
   )
 }
@@ -416,13 +463,20 @@ function runDirFromStderr(stderr: string): string | null {
 
 describe('${pascal}', () => {
   it('compiles to valid IR', () => {
+    // Compile via the CLI rather than spawning ruby against a
+    // \`ruby/cambium/compile.rb\` path: only the Cambium repo itself has
+    // that directory. The CLI resolves the compiler relative to its own
+    // install (RED-274), so this works in any workspace.
+    const irOut = join(tmpdir(), \`${snake}-\${process.pid}.ir.json\`)
+    const [bin, ...pre] = CAMBIUM
     const result = spawnSync(
-      'ruby',
-      [join(REPO_ROOT, 'ruby/cambium/compile.rb'), GEN, '--method', 'analyze'],
+      bin,
+      [...pre, 'compile', GEN, '--method', 'analyze', '-o', irOut],
       { encoding: 'utf8', cwd: REPO_ROOT },
     )
-    expect(result.status).toBe(0)
-    const ir = JSON.parse(result.stdout)
+    expect(result.status, \`Compile failed:\\n\${result.stderr}\`).toBe(0)
+    const ir = JSON.parse(readFileSync(irOut, 'utf8'))
+    try { rmSync(irOut, { force: true }) } catch {}
     expect(ir.entry.class).toBe('${pascal}')
     expect(ir.entry.method).toBe('analyze')
   })
@@ -540,9 +594,7 @@ export async function execute(
   // workspace (shape === 'workspace') uses a deep relative to the
   // framework source since it doesn't import itself as a package.
   const PKG = ctx.appPkgRoot;
-  const toolContextImport = ctx.shape === 'workspace'
-    ? '../../../cambium-runner/src/tools/tool-context.js'
-    : '@redwood-labs/cambium-runner';
+  const toolContextImport = runnerImport(ctx, '../../../cambium-runner/src/tools/tool-context.js');
   writeFile(join(PKG, 'app/tools', `${snake}.tool.json`), toolJson);
   writeFile(join(PKG, 'app/tools', `${snake}.tool.ts`), `\
 /**
@@ -723,9 +775,7 @@ export const ${snake}: CorrectorFn = (data, _context): CorrectorResult => {
   // et al. from @redwood-labs/cambium-runner; in-tree cambium workspace
   // (shape === 'workspace') uses the deep relative to framework source.
   const PKG = ctx.appPkgRoot;
-  const correctorTypeImport = ctx.shape === 'workspace'
-    ? '../../../cambium-runner/src/correctors/types.js'
-    : '@redwood-labs/cambium-runner';
+  const correctorTypeImport = runnerImport(ctx, '../../../cambium-runner/src/correctors/types.js');
   writeFile(
     join(PKG, 'app/correctors', `${snake}.corrector.ts`),
     makeBody(correctorTypeImport),
@@ -798,9 +848,7 @@ export async function execute(
   }
 
   const PKG = ctx.appPkgRoot;
-  const toolContextImport = ctx.shape === 'workspace'
-    ? '../../../cambium-runner/src/tools/tool-context.js'
-    : '@redwood-labs/cambium-runner';
+  const toolContextImport = runnerImport(ctx, '../../../cambium-runner/src/tools/tool-context.js');
   writeFile(join(PKG, 'app/actions', `${snake}.action.json`), actionJson);
   writeFile(
     join(PKG, 'app/actions', `${snake}.action.ts`),
@@ -1240,9 +1288,9 @@ function generateProvider(name, ctx) {
   // published runner; the in-tree [workspace] app uses a deep relative (it
   // can't import itself as a package). Mirrors the schema scaffolder, which
   // imports @sinclair/typebox by package in engine mode.
-  const factoryImport = (!isEngine && ctx.shape === 'workspace')
-    ? '../../../cambium-runner/src/providers/factories.js'
-    : '@redwood-labs/cambium-runner';
+  const factoryImport = isEngine
+    ? '@redwood-labs/cambium-runner'
+    : runnerImport(ctx, '../../../cambium-runner/src/providers/factories.js');
 
   // Where the file lands + how it's discovered, by mode.
   const convention = isEngine

@@ -32,6 +32,7 @@ from .errors import (
     CambiumTimeoutError,
     InputInvalidError,
     NotFoundError,
+    OutputCeilingError,
     OverloadedError,
     RunnerError,
     ToolDispatchFailedError,
@@ -79,6 +80,7 @@ __all__ = [
     "OverloadedError",
     "BootingError",
     "NotFoundError",
+    "OutputCeilingError",
     # Back-compat aliases
     "CambiumRunError",
 ]

@@ -29,6 +29,51 @@ export type RejectionCase = {
 }
 
 export const cases: RejectionCase[] = [
+  // ── effort (RED-325) ──────────────────────────────────────────────────────
+  // Neither branch had coverage when `effort` shipped, which is how an
+  // invisible U+2028 in the model-prefix guard survived: the crash only
+  // reproduced on a gen that actually declares `effort`, and none did.
+  {
+    name: 'effort: value outside the allowed enum',
+    dsl: `
+class TestGen < GenModel
+  model "anthropic:claude-opus-4-7"
+  system "inline"
+  effort :turbo
+  returns do
+    field :result, String
+  end
+  def analyze(doc)
+    generate "go" do
+      with context: doc
+    end
+  end
+end
+`.trim(),
+    expectClass: 'CompileError',
+    expectMessage: "is not valid. Must be one of: low, medium, high, max.",
+  },
+  {
+    name: 'effort: paired with a non-Anthropic model',
+    dsl: `
+class TestGen < GenModel
+  model "omlx:stub"
+  system "inline"
+  effort :high
+  returns do
+    field :result, String
+  end
+  def analyze(doc)
+    generate "go" do
+      with context: doc
+    end
+  end
+end
+`.trim(),
+    expectClass: 'CompileError',
+    expectMessage: "can only be used with an Anthropic model",
+  },
+
   // ── returns block ─────────────────────────────────────────────────────────
   {
     name: 'returns: duplicate field name',

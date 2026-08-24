@@ -1354,6 +1354,15 @@ module Cambium
         _cambium_defaults[:temperature] = v
       end
 
+      # RED-325: steering control for models that dropped sampling params (Opus
+      # 4.7+, Fable 5, Mythos 5). Validated at compile time: must be `low`,
+      # `medium`, `high`, or `max`, and only accepted alongside an Anthropic
+      # model id (Anthropic-only API). The runner threads it through to the
+      # provider unchanged.
+      def effort(v)
+        _cambium_defaults[:effort] = v.to_s
+      end
+
       def max_tokens(v)
         _cambium_defaults[:max_tokens] = v
       end

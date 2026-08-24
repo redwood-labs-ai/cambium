@@ -37,10 +37,14 @@ export async function runCompile(args) {
   if (args.includes('--help') || args.includes('-h')) {
     console.error(`
 Usage:
-  cambium compile <file.cmb.rb> --method <method> [--arg <path>|-] [-o <output>]
+  cambium compile <file.cmb.rb> [--method <method>] [--arg <path>|-] [-o <output>]
 
 Compiles a GenModel to IR JSON. No execution. Writes to <output> (or to
 <basename>.ir.json next to the input when -o is omitted).
+
+--method is optional. With it, the output is the IR for that one method.
+Without it, the output is a { "<method>": <ir> } map covering every method
+the class exports.
 `);
     process.exit(0);
   }
@@ -58,7 +62,10 @@ Compiles a GenModel to IR JSON. No execution. Writes to <output> (or to
     else if (a === '-o') outputPath = args[++i];
     else bail(`Unknown flag: ${a}`);
   }
-  if (!method) bail('Missing --method');
+  // --method is optional (issue #162). Omitted, the Ruby compiler emits a
+  // `{ method => ir }` map for every exported method — a capability it has
+  // had since RED-360, and which the usage text has always advertised, but
+  // which this wrapper used to reject with `Missing --method`.
 
   // Default output path: alongside the input as <basename>.ir.json.
   if (!outputPath) {
@@ -70,7 +77,8 @@ Compiles a GenModel to IR JSON. No execution. Writes to <output> (or to
   // Build the Ruby compile invocation. --arg is optional; we omit it
   // from the spawn args entirely when the user didn't pass one, so the
   // Ruby side falls into its empty-string default.
-  const rubyArgs = [RUBY_COMPILE_SCRIPT, file, '--method', method];
+  const rubyArgs = [RUBY_COMPILE_SCRIPT, file];
+  if (method !== null) rubyArgs.push('--method', method);
   if (arg !== null) rubyArgs.push('--arg', arg);
 
   // RED-397: an explicit `--arg -` makes compile.rb do STDIN.read; forward

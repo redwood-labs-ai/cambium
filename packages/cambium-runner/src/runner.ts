@@ -762,7 +762,7 @@ export interface RunGenResult {
   /** Typed failure category when `ok` is false (RED-360). Lets callers
    *  branch on the *kind* of failure without string-matching errorMessage.
    *  Other ok:false paths (document extraction, etc.) leave it undefined. */
-  failureKind?: 'validation' | 'budget';
+  failureKind?: 'validation' | 'budget' | 'output_ceiling';
 }
 
 class BudgetExceededError extends Error {
@@ -1435,6 +1435,10 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   // ── Execute IR steps ────────────────────────────────────────────────
   let finalParsed: any = undefined;
   let finalOk = false;
+  // RED-174: set when a step stopped because its output ceiling was reached.
+  // Distinct from a validation failure — nothing was validated, because
+  // nothing complete was produced.
+  let ceilingHit: { ceiling: number; declared: boolean; source: string } | undefined;
 
   for (const step of ir.steps) {
     if (step.type !== 'Generate') {
@@ -1498,6 +1502,18 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
       parsed = gen.parsed;
     }
 
+    // RED-174: an output ceiling is not a validation failure. The output
+    // never finished existing, so there is nothing to validate and nothing
+    // repair can fix — repair regenerates under the SAME `max_tokens` and
+    // truncates at the same place, burning `maxAttempts` full generations
+    // against a wall it cannot move. Stop here and say why.
+    const genCeiling = trace.steps[trace.steps.length - 1]?.meta?.output_ceiling;
+    if (genCeiling?.hit) {
+      finalOk = false;
+      ceilingHit = genCeiling;
+      break;
+    }
+
     // 2. Validate + Repair loop
     let ok = false;
     let errors: any[] = [];
@@ -1542,8 +1558,18 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
       // Repair
       const repair = await handleRepair(raw, errors, schema, ir, attempt + 1, generateText, extractJsonObject);
       pushRepairStep(repair);
+      // RED-174: same ceiling, same outcome next attempt — stop paying for it.
+      if (repair.result.meta?.output_ceiling?.hit) {
+        ceilingHit = repair.result.meta.output_ceiling;
+        break;
+      }
       raw = repair.raw;
       parsed = repair.parsed;
+    }
+
+    if (ceilingHit) {
+      finalOk = false;
+      break;
     }
 
     if (!ok) {
@@ -2158,7 +2184,9 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     schemaId: schema.$id,
     ir,
     errorMessage: finalOk ? undefined : 'Validation failed after repair attempts',
-    failureKind: finalOk ? undefined : 'validation',
+    // RED-174: a truncated output is not a validation failure — nothing was
+    // validated, because nothing complete was produced.
+    failureKind: finalOk ? undefined : (ceilingHit ? 'output_ceiling' : 'validation'),
   };
 
   } catch (e) {

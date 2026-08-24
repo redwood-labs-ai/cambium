@@ -66,12 +66,15 @@ Look at the trace (`runs/<run_id>/trace.json`) and help them tune the agent — 
 
 ```bash
 cambium run <file.cmb.rb> --method <method> [--arg <path>|-]   # compile + execute (--arg - reads piped stdin)
+                                                   # [--trace <path>] [--out <path>] [--mock]
+                                                   # [--memory-key <name>=<val> ...] [--session-id <id>]
+                                                   # [--profile <name>] [--fired-by <id>]
 cambium replay <run-id|path> [--edit] [--from-step <type>] [--from-op <id>] [--mock]   # re-run post-Generate tail (gen) / resume operator DAG (pipeline)
 cambium compile <file.cmb.rb> [--method <method>] [-o <ir.json>]   # emit IR JSON; without --method emits a {method → IR} map
 cambium compile [--out-dir <dir>] [--write]                    # no file → recompile every gen/pipeline in the workspace (RED-407)
 cambium serve --workspace <path> --bind <uri>                  # long-lived HTTP server hosting every exported gen/pipeline (RED-360)
 cambium inspect [run-id] [--port <n>] [--runs-dir <path>]      # local read-only trace viewer over runs/; localhost-only by default (RED-313)
-cambium new engine|agent|tool|action|schema|system|corrector|policy|memory_pool|pipeline|provider <Name>   # scaffold (deterministic)
+cambium new engine|agent|tool|action|schema|system|corrector|policy|memory_pool|config|log_profile|pipeline|provider <Name>   # scaffold (deterministic)
 cambium new config models|memory_policy                        # scaffold app/config/<form>.rb
 cambium new tool --describe "<description>"                    # agentic tool scaffolder (RED-216)
 cambium schedule preview <gen.cmb.rb> [--count N]              # next N fires per schedule
@@ -153,8 +156,8 @@ Things that will bite you if you don't know them. Each cluster keeps only its be
 Global — applies to every change. Cambium ships a CLI and runtime others install; one compromised dep in our lockfile compromises every downstream user. Full rationale and attack-class discussion: `SECURITY.md` §§ Supply-chain defenses / Ruby supply chain. The imperatives:
 
 - **Never add a new npm dependency on your own initiative.** It's a user-authorized action — if a task seems to need one, STOP and ask; surface any approved addition explicitly in your response. Prefer Node built-ins (`node:fs`, `node:path`, `node:crypto`, `node:http`; `undici` is already a dep).
-- **All deps are pinned exact** — no `^`/`~` anywhere in any `package.json`, including `optionalDependencies`. A range is a regression: restore the pin and check `package-lock.json` matches.
-- **Every locked version must be ≥7 days old** (`.npmrc` `minimum-release-age=7` + `scripts/check-dep-ages.mjs` via `npm run audit:ages`). Don't narrow the window; don't widen it without naming the attack class you're trading away.
+- **All deps are pinned exact** — no `^`/`~` anywhere in any `package.json`, including `optionalDependencies` and `overrides`. A range is a regression: restore the pin and check `package-lock.json` matches. When a *transitive* dep declares its own floating range (prebuilt native binaries are the recurring case — `pdfjs-dist` → `@napi-rs/canvas: "^1.0.0"`), pin it with an exact `overrides` entry; otherwise every fresh install pulls the newest publish and re-breaks the age gate at random.
+- **Every locked version must be ≥7 days old** (`.npmrc` `minimum-release-age=7` + `scripts/check-dep-ages.mjs` via `npm run audit:ages`, run in CI on every PR by `ci-review.yml`'s `npm run audit:all` step). Don't narrow the window; don't widen it without naming the attack class you're trading away.
 - **Emergency allowlist** (`CAMBIUM_DEP_AGE_ALLOWLIST`) is for confirmed security patches only — name the advisory in the commit.
 - **No bypass via env vars**: `CAMBIUM_DEP_MIN_AGE_DAYS` only tightens (the script refuses values below 1); CI and container builds MUST NOT set `npm_config_*` vars — they silently override the project `.npmrc`.
 - **Lockfile is authoritative; never hand-edit it.** Change `package.json`, run `npm install`.

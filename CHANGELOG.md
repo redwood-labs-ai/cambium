@@ -4,6 +4,166 @@ All notable changes to Cambium are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Cambium adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] — 2026-08-23 — The Ground Floor
+
+The release that makes the front door work. `cambium init` wrote a workspace that could not run, `cambium new` scaffolded into a directory `init` never created, `cambium doctor` green-lit an end-of-life Ruby, and `cambium compile` refused a flag combination its own help text advertised — the first five minutes of Cambium were the least reliable part of it. All of that is fixed, and the scaffolders now key on what is actually on disk rather than on assumptions about the Cambium monorepo.
+
+Underneath sit two failures that had been misreporting themselves. `effort` shipped in 0.9.0 unusable: an invisible U+2028 between `&.` and `start_with?` crashed the compiler for any gen that declared it, and no in-tree gen did, so nothing caught it. And hitting `max_tokens` was reported as malformed JSON from the model rather than as a ceiling the runner itself imposed — then handed to a repair loop that regenerated under the same ceiling and truncated in the same place, burning every attempt. It now fails immediately as `output_ceiling`, the twelfth and final `error.kind`: the enum closes at 1.0, so this was the last window in which a kind could be added at all.
+
+The ground floor is what you stand on before you build anything. This release is about it holding.
+
+### Breaking Changes
+
+- **`output_ceiling` — the twelfth `error.kind` (RED-174).** Serve `/v1` gains one error kind, and
+  the Python client the matching `OutputCeilingError`. Added in this window deliberately:
+  `error.kind` becomes a closed enum at 1.0, so 0.10 is the last release in which a kind can be
+  added without a `/v2`. It earns its own kind because it is mechanically recoverable — raise
+  `max_tokens` (or narrow the `returns` schema) and retry — and a caller can branch on a kind but
+  not on a message string. See `COMPATIBILITY.md` § The `error.kind` closed enum.
+
+- **A ceiling now fails the run instead of silently degrading it (RED-174).** This is a runtime
+  behavior change, not only a new error kind. A gen whose output was being truncated at
+  `max_tokens` previously produced one of two outcomes: a `validation` failure after the repair
+  loop burned every attempt, or — when the truncated fragment happened to parse — a schema-valid
+  object silently missing content. Both now fail immediately as `output_ceiling`. Runs that were
+  quietly returning partial output will start failing loudly on upgrade. That is the intent; see
+  *Upgrade from 0.9.0*.
+
+### Added
+
+- **`stopReason` on the provider contract (RED-174).** `GenerateResult` and
+  `GenerateWithToolsResult` carry an optional `stopReason` (`stop` / `length` / `tool_use` /
+  `other`), and `normalizeStopReason` maps each provider's native spelling onto it — Anthropic
+  `stop_reason: "max_tokens"`, OpenAI-compatible `finish_reason: "length"`, Ollama
+  `done_reason: "length"`. Both are exported from the package root as part of the
+  custom-provider contract. Additive and optional: a provider that sets nothing behaves exactly
+  as before.
+
+### Changed
+
+- **`@redwood-labs/cambium`** and **`@redwood-labs/cambium-runner`** bump to `0.10.0`, and the
+  CLI's runner dependency pin moves `0.9.0` → `0.10.0` in lockstep.
+
+- **`cambium-client` (Python) bumps to `0.2.0`** (independent versioning, as with the VS Code
+  extension). It gains `OutputCeilingError` and its `error.kind` mapping entry; both are inert
+  until published to PyPI. A client still on `0.1.0` talking to a `0.10.0` server does not break —
+  an unmapped kind surfaces as the umbrella `CambiumError` carrying the real `kind` string, which
+  is the designed fallback (`COMPATIBILITY.md` § The `error.kind` closed enum).
+
+- **`package-lock.json` regenerated.** It still carried `node: ">=22.13.0"` for both workspace
+  packages after the `engines` declaration landed, so the lockfile disagreed with the manifests.
+
+### Fixed
+
+- **Hitting `max_tokens` was reported as a JSON parse error (RED-174).** A truncated completion
+  fails to parse, and the runner blamed the model's JSON for a ceiling it had set itself — then
+  fed the fragment to the repair loop, which regenerated under the *same* `max_tokens`, truncated
+  in the same place, and burned every attempt before failing as `validation`. Nothing in the
+  trace named the ceiling, on any provider. The default is `max_tokens ?? 1200` at all three
+  dispatch sites, so this is the ordinary path for any gen with a moderately large `returns`
+  schema, not an edge case. A ceiling now fails immediately with `error.kind: "output_ceiling"`,
+  skips the repair loop, and reports which limit applied and whether it came from the gen or the
+  1200 default. A reported ceiling fails even when the fragment happens to parse —
+  `extractJsonObject` slices to the last `}`, so a truncated response can yield a *prefix* object
+  that validates while silently missing content. Providers that report nothing are covered by a
+  usage-vs-ceiling fallback, consulted only after a parse has already failed so it can never fail
+  an otherwise-good run. The agentic path, which previously swallowed this in a bare `catch` with
+  no reason recorded at all, is covered too.
+
+- **The `effort` primitive crashed the compiler (RED-325 follow-up).** Any gen declaring `effort`
+  died with ``undefined method ` start_with?'``. The character between `&.` and `start_with?` in
+  the Anthropic-model guard was not a space but U+2028 LINE SEPARATOR, which renders like one and
+  which Ruby folds into the method name. `effort` was therefore unusable from the DSL in the
+  release that introduced it. It survived review because no in-tree gen declared `effort` — all
+  12 golden fixtures carried `"effort": null`, so the validation branch never ran, and the
+  runner-side tests drive the provider directly without touching the compiler. Now covered by an
+  in-tree gen pinned to an `anthropic:` model plus two golden rejection cases.
+
+- **`effort` is emitted only when set.** It was written into every IR unconditionally as
+  `"effort": null`, so upgrading diffed every downstream golden snapshot for a primitive the gen
+  never used. It now follows the same absent-when-unset rule as `model.fallbacks` (RED-421); all
+  12 in-tree gen fixtures are byte-for-byte identical to their pre-`effort` versions again.
+  Additive-legal either way — this is about not churning consumers.
+
+- **`cambium init` and `cambium new` disagreed on where the app lives (#159).**
+  `detectWorkspaceShape` hardcoded `<root>/packages/cambium` for every `[workspace]` Genfile and
+  never read `members`, so `cambium init demoapp` wrote `packages/demoapp/` while
+  `cambium new agent Foo` scaffolded into an orphaned `packages/cambium/`. Only
+  `cambium init cambium` worked. `appPkgRoot` now resolves from `members`, preferring a member
+  declaring `kinds = ["app"]`; with several candidates the one containing the working directory
+  wins, and a genuinely ambiguous workspace reports it instead of guessing. `members` is
+  user-authored input joined onto a path, so it is guarded like `Genfile.toml [types].contracts`
+  (RED-274): no absolute patterns, no `..`, and an escape check after resolve.
+
+- **Scaffolded runner imports assumed the cambium monorepo (#159).** The tool, action, corrector,
+  provider and golden-test scaffolds picked their import specifier with
+  `ctx.shape === 'workspace'` — but `cambium init` also produces a `[workspace]` Genfile, and
+  that workspace has no `packages/cambium-runner/`. Every scaffolded file landed with an import
+  resolving to nothing (`ERR_MODULE_NOT_FOUND` on first run). The choice now keys on whether the
+  runner source is actually reachable. Two further bugs surfaced with it: the golden-test import
+  used the `app/<type>/` depth for a file that lands in `tests/` (so an in-tree
+  `cambium new agent` produced a test that could not load at all), and the generated test
+  anchored `cli/cambium.mjs` and `ruby/cambium/compile.rb` on `process.cwd()` — paths that exist
+  only in the Cambium repo. It now emits a shape-appropriate CLI invocation and compiles through
+  `cambium compile`.
+
+- **`cambium init` produced a workspace that could not run (#161).** No `package.json` was
+  written at all, so Node resolved module type from nothing and the scaffolded `src/contracts.ts`
+  loaded as CJS — `cambium run` died with `ERR_REQUIRE_CYCLE_MODULE`, and `cambium test` (which
+  shells out to `npx vitest run`) had no vitest to find. `init` now writes a workspace-root
+  `package.json` declaring `"type": "module"`, the `packages/*` npm workspace matching the
+  Genfile's `members` glob, a `test` script, and exact pins for `@sinclair/typebox` and `vitest`.
+  Cambium's own version is read at scaffold time so a fresh workspace depends on the CLI that
+  created it. The next-steps text now leads with `npm install`.
+
+- **`cambium doctor` green-lit EOL Ruby (#161).** The Ruby check parsed the version and then
+  returned `ok: true` unconditionally, so an interpreter below the declared Ruby 3.0 floor
+  (README § Requirements) reported a green check — masking exactly the RED-377 class of bug,
+  where a construct removed in Ruby 3.x runs fine on a dev machine's 2.6 and fails only on the
+  Alpine/Ruby-3.4 deploy target. It now uses the `cmdVersion` helper that was already there and
+  already applied to Node.
+
+- **`cambium compile <file>` without `--method` was documented but unreachable (#162).** The
+  usage text and `CLAUDE.md` both promised "without `--method` emits a `{method → IR}` map", and
+  the Ruby layer has supported it since RED-360, but the JS wrapper bailed with
+  `Missing --method`. The flag is now optional at the wrapper too: supplied, you get a bare
+  single-method IR (unchanged); omitted, the `{ method => ir }` map. `--help` no longer shows it
+  as required.
+
+- **`cambium doctor` checked the wrong Node floor.** It gated on `>= 18` and compared major versions only, so it reported a green check on every Node the packages no longer support. It now checks `>= 22.19` with minor-version precision — relevant because the floor is not major-aligned, and a bare major check would pass 22.0–22.18.
+
+- **Node floor is now declared.** Both published packages gain `engines.node: ">=22.19.0"`. The floor itself is unchanged — `undici` 8.x has required `>=22.19.0` since 8.5.0, which 0.9.0 already shipped — but nothing declared it, so npm had no root `engines` to check and a consumer below the floor hit it as a runtime failure inside a gen instead of an install-time `EBADENGINE`. Note `undici`, not the `pdfjs-dist` 6.x bump, is the binding constraint: pdfjs 6.x requires only `>=22.13.0`. See `COMPATIBILITY.md` § Runtime requirements.
+
+### Security
+
+- **Dependency CVE sweep.** Cleared every high/moderate advisory in the tree (`npm audit`: 6 → 1, the remainder a low-severity esbuild dev-server issue reachable only via `tsx` on Windows).
+  - `pdfjs-dist` 5.6.205 → 6.2.108 — GHSA-hq66-cqwq-w95j, arbitrary JavaScript execution on opening a malicious PDF. This reaches Cambium through `grounded_in` over `base64_pdf` context. The advisory covers `>=5.6.83 <6.2.108`; **6.2.108 is the only fixed version**, so the major bump is the sole remedy.
+  - `undici` 8.5.0 → 8.10.0 — response desynchronization via the retry interceptor, cross-user disclosure via cache directives, CRLF injection, cookie attribute injection.
+  - `postcss` 8.5.19 → 8.5.26 — arbitrary `.map` file read via attacker-controlled `sourceMappingURL`.
+- **Pinned two floating transitive ranges.** `@napi-rs/canvas` (a `pdfjs-dist` optional dependency declared as `^1.0.0`) and `get-tsconfig` are now pinned exactly via `overrides`. A floating range on a prebuilt native-binary package means every fresh install pulls whatever was published most recently, which defeats the 7-day minimum-release-age policy non-deterministically.
+
+### Upgrade from 0.9.0
+
+Nothing in the DSL, the IR, or the CLI requires a change. One runtime behavior differs.
+
+**`output_ceiling` (RED-174) — runs that silently truncated now fail.** If a gen was hitting its
+output ceiling, 0.9.0 either failed it as `validation` after exhausting the repair loop or, when
+the truncated fragment happened to parse, returned a schema-valid object with content missing.
+0.10.0 fails it immediately with `error.kind: "output_ceiling"` and names the limit that applied.
+
+Expect this on any gen with a large `returns` schema: the default is `max_tokens ?? 1200` at every
+dispatch site, so an undeclared ceiling is the common case rather than an exotic one. The fix is
+whichever the trace points at — raise `max_tokens` on the gen, or narrow the `returns` schema.
+
+**Serve clients.** `output_ceiling` is a twelfth `error.kind`. A typed client generated against
+0.9.0's eleven values keeps working — the unmapped kind falls through to the umbrella error with
+the real `kind` string — but it will not have a dedicated exception class until regenerated.
+Python callers wanting `OutputCeilingError` need `cambium-client` `0.2.0`.
+
+**Custom providers.** No change required. `stopReason` is optional on `GenerateResult`; a provider
+that sets nothing behaves exactly as it did. Setting it is what buys the precise diagnosis rather
+than the usage-based fallback — map your API's native field through `normalizeStopReason`.
+
 ## [0.9.0] — 2026-08-14 — The Contract
 
 The last-call release: every break Cambium wanted lands at once — strict exec by default, an opaque `IR` type, four DSL keyword renames — under a golden corpus that pins the DSL → IR mapping snapshot-by-snapshot, and a compatibility document that states, surface by surface, what 1.0 will promise.

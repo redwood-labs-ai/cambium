@@ -46,7 +46,56 @@ export class ProviderConnectionError extends ProviderHttpError {
   }
 }
 
-export type GenerateResult = { text: string; usage?: TokenUsage };
+/**
+ * Why a completion stopped, normalized across providers (RED-174).
+ *
+ * Every provider reports this on the wire — Anthropic `stop_reason`,
+ * OpenAI-compatible `choices[0].finish_reason`, Ollama `done_reason` — and
+ * before RED-174 the runner discarded all of it. The cost was that hitting
+ * `max_tokens` truncated the JSON mid-object and surfaced as a parse error,
+ * which then fed the repair loop and re-truncated under the same ceiling.
+ *
+ *   - `length`   — the output ceiling was reached. The completion is a
+ *                  fragment; nothing downstream should try to parse it.
+ *   - `tool_use` — stopped to call a tool (agentic loop continues).
+ *   - `stop`     — finished normally.
+ *   - `other`    — reported something the mapping does not recognize.
+ *
+ * Optional: a custom provider that does not set it degrades to the
+ * usage-vs-ceiling heuristic in the runner, not to the old parse error.
+ */
+export type StopReason = 'stop' | 'length' | 'tool_use' | 'other';
+
+/**
+ * Map a provider's native stop/finish/done reason onto `StopReason`.
+ * Unknown non-empty values become `'other'`; absent stays `undefined` so
+ * the runner can tell "provider said nothing" from "provider said stop".
+ */
+export function normalizeStopReason(raw: unknown): StopReason | undefined {
+  if (typeof raw !== 'string' || raw === '') return undefined;
+  switch (raw) {
+    // Anthropic: max_tokens · OpenAI-compatible: length · Ollama: length
+    case 'max_tokens':
+    case 'length':
+      return 'length';
+    case 'tool_use':
+    case 'tool_calls':
+      return 'tool_use';
+    case 'end_turn':
+    case 'stop':
+    case 'stop_sequence':
+      return 'stop';
+    default:
+      return 'other';
+  }
+}
+
+export type GenerateResult = {
+  text: string;
+  usage?: TokenUsage;
+  /** RED-174. Absent when the provider reported nothing. */
+  stopReason?: StopReason;
+};
 
 export type ProviderMessage = {
   role: string;
@@ -65,6 +114,11 @@ export type GenerateTextOpts = {
   prompt: string;
   max_tokens?: number;
   temperature?: number;
+  /** RED-325: effort level for Anthropic models that dropped sampling params
+   *  (Opus 4.7+, Fable 5, Mythos 5). Ignored by models that still accept
+   *  `temperature` — the connector guards this. Optional; if absent, the
+   *  model uses its own default. */
+  effort?: "low" | "medium" | "high" | "max";
   jsonSchema?: any;
   documents?: any[];
   modelOptions?: { disable_thinking?: boolean };
@@ -81,6 +135,8 @@ export type GenerateTextOpts = {
 export type GenerateWithToolsResult = {
   message: { content: string | null; tool_calls?: ToolCallMessage[] };
   usage?: TokenUsage;
+  /** RED-174. Absent when the provider reported nothing. */
+  stopReason?: StopReason;
 };
 
 /** Options handed to a provider's `generateWithTools`. `model` is the
@@ -91,6 +147,9 @@ export type GenerateWithToolsOpts = {
   tools: any[];
   max_tokens?: number;
   temperature?: number;
+  /** RED-325: effort level for Anthropic models that dropped sampling params.
+   *  See GenerateTextOpts.effort for full semantics. */
+  effort?: "low" | "medium" | "high" | "max";
   documents?: any[];
   modelOptions?: { disable_thinking?: boolean };
 };
@@ -115,5 +174,7 @@ export interface CambiumProvider {
    *  provider fails (the "check CAMBIUM_OMLX_BASEURL…" hint). */
   fetchFailureHint?: string;
   generateText(opts: GenerateTextOpts): Promise<GenerateResult>;
-  generateWithTools(opts: GenerateWithToolsOpts): Promise<GenerateWithToolsResult>;
+  generateWithTools(
+    opts: GenerateWithToolsOpts,
+  ): Promise<GenerateWithToolsResult>;
 }

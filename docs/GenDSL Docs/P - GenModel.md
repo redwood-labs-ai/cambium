@@ -12,9 +12,9 @@ Declare a reusable, named generation unit with defaults: model, policies, tools,
 ## Example
 ```ruby
 class Analyst < GenModel
-  model "omlx:Qwen3.5-27B-4bit"
+  model "anthropic:claude-opus-4-7"
+  effort "high"                                  # steering control on effort-models (RED-325)
   system :analyst
-  temperature 0.2
   returns AnalysisReport
 
   uses :web_search, :calculator
@@ -37,10 +37,39 @@ end
 
 A `GenModel` is a small declarations-only surface. It aggregates the primitives the framework knows about — model choice, contracts, tools, policies, memory, grounding, correctors, triggers — and the runtime applies them to every `generate` call within the class.
 
+## `effort` (RED-325)
+
+`effort` is the output-steering control for Anthropic models that dropped sampling
+parameters — Opus 4.7+, Fable 5, Mythos 5. Those models reject `temperature`/`top_p`
+(HTTP 400 if sent; Cambium omits them automatically), so `effort` replaces the sampling
+knob on the newer generation.
+
+```ruby
+model "anthropic:claude-opus-4-7"
+effort "high"
+```
+
+- **Values (closed):** `"low"`, `"medium"`, `"high"`, `"max"`. Any other value is a
+  compile error.
+- **Anthropic-only:** `effort` is a compile error unless the primary `model` id carries
+  the `anthropic:` prefix. It is an Anthropic Messages-API control with no analogue on the
+  OpenAI-compatible (`omlx:`) or Ollama paths — the check gives a local pointer at compile
+  time instead of a provider 400 at run time.
+- **Wire behavior:** on an effort-model the runner sends `effort` alongside
+  `thinking: { type: "adaptive" }`, and aliases `max_tokens` → `max_output_tokens`
+  (Opus 4.7+ renamed the field). See [[N - Model Identifiers]] and
+  [[C - IR (Intermediate Representation)]] § Top-level IR fields for the exact request
+  shape and IR field.
+- **Mutually exclusive with `temperature`.** The two are never sent together. On an
+  effort-model a co-declared `temperature` is silently dropped (it is inert on that model
+  regardless of `effort`); on a sampling-model `effort` is never emitted. Declaring both
+  is legal but only one takes effect per model generation.
+
 ## Failure modes
 - Unknown model provider or model not available.
 - Return schema not found (caught at compile time by RED-210).
 - Memory-using gen without `better-sqlite3`/`sqlite-vec` installed → clear plan-time error.
+- `effort` with a value outside `low`/`medium`/`high`/`max`, or on a non-`anthropic:` model → compile error (RED-325).
 
 ## See also
 - [[P - generate]]

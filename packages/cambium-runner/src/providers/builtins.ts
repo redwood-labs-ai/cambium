@@ -11,7 +11,7 @@
 
 import { ProviderRegistry, defineProvider } from './registry.js';
 import { openaiCompatible, anthropicCompatible } from './factories.js';
-import { ProviderHttpError, ProviderConnectionError } from './types.js';
+import { ProviderHttpError, ProviderConnectionError, normalizeStopReason } from './types.js';
 import { redactErrorBody } from './redact.js';
 import { normalizeOmlxBaseUrl, validateProviderBaseUrl } from './base-url-validator.js';
 import { buildOllamaChatRequest, normalizeOllamaChatResponse } from './ollama.js';
@@ -91,6 +91,8 @@ export const ollamaProvider = defineProvider({
     const json: any = await res.json();
     return {
       text: json.response as string,
+      // RED-174: Ollama sets done_reason: "length" when num_predict caps it.
+      stopReason: normalizeStopReason(json?.done_reason),
       usage:
         json.prompt_eval_count != null
           ? {
@@ -137,6 +139,9 @@ export const ollamaProvider = defineProvider({
     return {
       message: { content: normalized.message.content, tool_calls: normalized.message.tool_calls },
       usage: normalized.usage,
+      // RED-174: ollama.ts stays dependency-free and passes done_reason
+      // through raw; the mapping lives here, single-sourced in types.ts.
+      stopReason: normalizeStopReason(normalized.doneReason),
     };
   },
 });

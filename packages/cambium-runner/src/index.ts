@@ -64,12 +64,18 @@ export { validateProviderBaseUrl } from './providers/base-url-validator.js';
 // ECONNREFUSED / DNS / TLS failures are transient. Custom providers may use it
 // too; plain `Error` / `TypeError` remain deterministic (DEC-A unchanged).
 export { ProviderHttpError, ProviderConnectionError } from './providers/types.js';
+// RED-174: also part of the provider-author contract. A custom provider sets
+// `stopReason` on its results so the runner can tell "the output ceiling
+// truncated this" from "the model emitted bad JSON". `normalizeStopReason`
+// maps a native `stop_reason` / `finish_reason` / `done_reason` onto it.
+export { normalizeStopReason } from './providers/types.js';
 export type {
   CambiumProvider,
   GenerateTextOpts,
   GenerateResult,
   GenerateWithToolsOpts,
   GenerateWithToolsResult,
+  StopReason,
 } from './providers/types.js';
 
 // RED-360 serve mode: long-lived runner over HTTP. Exposed so the CLI

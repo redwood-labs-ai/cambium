@@ -82,6 +82,16 @@ jobs:
         if: steps.node-cache.outputs.cache-hit != 'true'
         run: npm ci --prefer-offline --no-audit --no-fund
 
+      # Supply-chain gate. `npm ci` above runs with --no-audit for speed and
+      # determinism, so nothing else in this workflow enforces the dependency
+      # policy (CLAUDE.md § Dependency policy). Without this step a dependency
+      # PR can reach review with the 7-day minimum-release-age window red —
+      # which is exactly how a caret range and 13 under-age native binaries
+      # got through in the #164 sweep. `check-dep-ages.mjs` is gate [0/6] of
+      # pre-publish-check; running it here fails the PR instead of the release.
+      - name: Audit dependency ages + Ruby surface
+        run: npm run audit:all
+
       # Cache the compiled runner keyed on its source + deps, so tsc only
       # re-runs when the runner actually changed.
       - name: Cache runner build

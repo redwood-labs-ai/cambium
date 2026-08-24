@@ -334,9 +334,15 @@ describe('cambium new <type> — app mode (regression)', () => {
     expect(existsSync(join(scratch, 'packages', 'cambium-runner', 'src', 'correctors'))).toBe(false);
 
     const body = readFileSync(correctorPath, 'utf8');
-    // App-mode template imports types via the deep relative path to the runner
-    // package — same stance generateTool takes for ToolContext.
-    expect(body).toContain("from '../../../cambium-runner/src/correctors/types.js'");
+    // RED-159: this used to require the deep relative
+    // `../../../cambium-runner/src/correctors/types.js`, which contradicted
+    // the assertion three lines above that this scratch workspace has no
+    // `packages/cambium-runner/` — the generated file imported a directory
+    // the same test proved absent. The scaffolder now picks the specifier by
+    // whether the runner source is actually reachable, so a workspace
+    // without one gets the published package.
+    expect(body).toContain("from '@redwood-labs/cambium-runner'");
+    expect(body).not.toContain('../../../cambium-runner/');
     expect(body).toContain('export const regex_verifies: CorrectorFn');
   });
 });

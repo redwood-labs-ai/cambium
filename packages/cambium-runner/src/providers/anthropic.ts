@@ -41,6 +41,8 @@ type AnthropicDocumentBlock = {
   media_type: string;
 };
 
+export type EffortLevel = "low" | "medium" | "high" | "max";
+
 export type AnthropicMessagesResult = {
   message: {
     content: string | null;
@@ -60,6 +62,11 @@ export type AnthropicMessagesRequestOpts = {
   tools?: any[];           // OpenAI-format tool definitions; translated to Anthropic shape
   max_tokens?: number;
   temperature?: number;
+  /** RED-325: `effort` is the replacement control for models that dropped
+   *  sampling params (Opus 4.7+, Fable 5, Mythos 5). Sent alongside
+   *  `thinking: { type: 'adaptive' }`. Must NOT be sent to models that
+   *  still accept `temperature` — the two are mutually exclusive. */
+  effort?: EffortLevel;
   cache?: boolean;         // default true — apply cache_control to system block + last tool + last document
   documents?: AnthropicDocumentBlock[];  // RED-323: emitted as content blocks on the FIRST user message
   /** Shared payload emitted as a cache_control:ephemeral text block ahead
@@ -101,6 +108,22 @@ export function acceptsSamplingParams(model: string): boolean {
 }
 
 /**
+ * Returns true for Anthropic model ids that use the `effort` parameter
+ * instead of sampling params (temperature, top_p, top_k). These are the
+ * inverse set of `acceptsSamplingParams` — Opus 4.7+, Fable 5, Mythos 5.
+ *
+ * On effort-models, Anthropic expects `effort: 'low'|'medium'|'high'|'max'`
+ * alongside `thinking: { type: 'adaptive' }` for output-steering control.
+ * The two param families are mutually exclusive — never send both.
+ *
+ * Unknown/future models return `true` so the connector defaults to the
+ * effort path (safe omission if `effort` isn't provided by the caller).
+ */
+export function acceptsEffortParams(model: string): boolean {
+  return !acceptsSamplingParams(model);
+}
+
+/**
  * Build the request body for Anthropic's POST /v1/messages endpoint.
  *
  * Extracts the `system` message (if any) to the top-level `system` field,
@@ -109,7 +132,9 @@ export function acceptsSamplingParams(model: string): boolean {
  * `cache` is not explicitly false) marks the system block + last tool as
  * `cache_control: ephemeral` so prompt caching kicks in automatically.
  */
-export function buildAnthropicMessagesRequest(opts: AnthropicMessagesRequestOpts): Record<string, any> {
+export function buildAnthropicMessagesRequest(
+  opts: AnthropicMessagesRequestOpts,
+): Record<string, any> {
   const useCache = opts.cache !== false;
 
   // Extract system text from any message with role === 'system'.
@@ -285,11 +310,22 @@ export function buildAnthropicMessagesRequest(opts: AnthropicMessagesRequestOpts
 
   const body: Record<string, any> = {
     model: opts.model,
-    max_tokens: opts.max_tokens ?? 1200,
+    // RED-325: Opus 4.7+ renamed `max_tokens` → `max_output_tokens`.
+    // On effort-models we must send `max_output_tokens`; on sampling-models
+    // we keep `max_tokens` (backward compat).
+    ...(acceptsSamplingParams(opts.model)
+      ? { max_tokens: opts.max_tokens ?? 1200 }
+      : { max_output_tokens: opts.max_tokens ?? 1200 }),
     messages: translatedMessages,
   };
   if (acceptsSamplingParams(opts.model)) {
     body.temperature = opts.temperature ?? 0.2;
+  } else if (opts.effort) {
+    // RED-325: effort is the steering control for models that dropped
+    // sampling params. Sent with thinking: { type: 'adaptive' }.
+    // Never sent to sampling-models (mutually exclusive).
+    body.effort = opts.effort;
+    body.thinking = { type: "adaptive" };
   }
 
   if (systemText) {
@@ -313,7 +349,9 @@ export function buildAnthropicMessagesRequest(opts: AnthropicMessagesRequestOpts
  * model's intended output). Translates tool_use blocks → ToolCallMessage,
  * stringifying the `input` object since the runner's dispatch JSON.parses it.
  */
-export function normalizeAnthropicMessagesResponse(json: any): AnthropicMessagesResult {
+export function normalizeAnthropicMessagesResponse(
+  json: any,
+): AnthropicMessagesResult {
   const contentBlocks = json?.content;
   if (!Array.isArray(contentBlocks)) {
     throw new Error('Anthropic: missing content array in response');

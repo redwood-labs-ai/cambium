@@ -111,8 +111,16 @@ The `/v1/` prefix is locked from the first release. Breaking wire-format changes
 | `overloaded` | 503 | `--max-inflight` cap hit |
 | `booting` | 503 | server still pre-compiling at boot |
 | `not_found` | 404 | unknown route |
+| `output_ceiling` | 500 | the model hit its output ceiling; the response was truncated mid-output (RED-174) |
 
-Adding a new kind is a v2 break. The Python client (`cambium-client`) maps each 1:1 to an exception subclass.
+`output_ceiling` is distinct from `validation_failed` on purpose: nothing was
+validated, because the model was cut off before it finished producing anything
+to validate. It is distinct from `runner_error` because it is mechanically
+recoverable — raise `max_tokens` on the gen (or narrow the `returns` schema)
+and retry — and a caller can branch on a kind but not on a message string.
+
+Adding a new kind is a v2 break. `output_ceiling` was added in the 0.10 window
+precisely because that was the last release before the promise binds. The Python client (`cambium-client`) maps each 1:1 to an exception subclass.
 
 ## Bind URI taxonomy
 
