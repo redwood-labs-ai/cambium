@@ -12,6 +12,19 @@ const ENGINE_SENTINEL = 'cambium.engine.json';
 // Shared across every engine-mode lint check that validates a name.
 const NAME_REGEX = /^[a-z][a-z0-9_]*$/;
 
+// Framework-builtin tool names — legitimate `uses :<name>` references in
+// app-mode gens even when there's no `app/tools/<name>.tool.json`. The
+// runtime registry resolves these from `packages/cambium-runner/src/
+// builtin-tools/` at startup (RED-208); lint must too, otherwise every gen
+// using the builtins emits a spurious warning (issue #168 / RED-218).
+const BUILTIN_TOOL_NAMES = new Set([
+'web_search',
+'calculator',
+'read_file',
+'execute_code',
+'web_extract',
+]);
+
 const PASS = '\x1b[32m✓\x1b[0m';
 const FAIL = '\x1b[31m✗\x1b[0m';
 const WARN = '\x1b[33m!\x1b[0m';
@@ -326,7 +339,13 @@ function lintPackage(pkgDir) {
       // time is the whole point. The Ruby compiler also enforces this
       // at compile time; lint is the second line of defense for gens
       // that haven't been compiled yet.
-      const returnsMatch = content.match(/returns\s+(\w+)/);
+      // Symbol form only: an uppercase-initial name, optionally with a
+      // leading `:` (both `returns Foo` and `returns :Foo` are legal).
+      // Block-form `returns do … end` (RED-419) compiles the schema
+      // inline into the IR and never consults contracts.ts, and
+      // lowercase prose in comments ("…returns a structured…") must not
+      // trip the check (issues #167 / #160).
+      const returnsMatch = content.match(/returns\s+:?([A-Z]\w*)/);
       if (returnsMatch && genfile.types?.contracts) {
         const schemaName = returnsMatch[1];
         const contracts = Array.isArray(genfile.types.contracts) ? genfile.types.contracts : [genfile.types.contracts];
@@ -349,16 +368,22 @@ function lintPackage(pkgDir) {
         }
       }
 
-      // Check uses references have tool definitions
+      // Check uses references have tool definitions. App-tool defs live
+// under `app/tools/<name>.tool.json`; framework builtins (web_search,
+// calculator, read_file, execute_code, web_extract) are resolved by the
+// runtime registry from `packages/cambium-runner/src/builtin-tools/` and
+// don't need a local definition. Don't warn on those — they're legitimate
+// refs in any app gen (issue #168 / RED-218).
       const usesMatches = [...content.matchAll(/uses\s+([^\n]+)/g)];
       for (const m of usesMatches) {
         const tools = m[1].match(/:(\w+)/g);
         if (tools) {
           for (const t of tools) {
             const toolName = t.slice(1);
+            if (BUILTIN_TOOL_NAMES.has(toolName)) continue;
             const toolPath = join(pkgDir, 'app/tools', `${toolName}.tool.json`);
             if (!existsSync(toolPath)) {
-              warn(`${f}: uses :${toolName} — no tool definition at app/tools/${toolName}.tool.json`);
+              warn(`${f}: uses :${toolName} — no tool definition at app/tools/${toolName}.tool.json (ok if framework builtin)`);
             }
           }
         }

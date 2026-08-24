@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildAnthropicMessagesRequest, normalizeAnthropicMessagesResponse, MIN_USER_CACHE_CHARS, acceptsSamplingParams } from './anthropic.js';
+import { buildAnthropicMessagesRequest, normalizeAnthropicMessagesResponse, MIN_USER_CACHE_CHARS, acceptsSamplingParams, acceptsEffortParams } from './anthropic.js';
 
 describe('buildAnthropicMessagesRequest', () => {
   it('extracts system role to top-level system with cache_control', () => {
@@ -83,11 +83,147 @@ describe('buildAnthropicMessagesRequest', () => {
       messages: [{ role: 'user', content: 'q' }],
     });
     expect(body.temperature).toBeUndefined();
+    // Unknown/future models get max_output_tokens as the safe default.
+    expect(body.max_tokens).toBeUndefined();
+    expect(body.max_output_tokens).toBe(1200);
   });
 
+  it('sends max_output_tokens (not max_tokens) for claude-opus-4-8', () => {
+    // RED-325: Opus 4.7+ renamed max_tokens → max_output_tokens.
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-opus-4-8',
+      messages: [{ role: 'user', content: 'q' }],
+    });
+    expect(body.max_tokens).toBeUndefined();
+    expect(body.max_output_tokens).toBe(1200);
+  });
+
+  it('respects explicit max_tokens as max_output_tokens on effort-models', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-opus-4-8',
+      messages: [{ role: 'user', content: 'q' }],
+      max_tokens: 500,
+    });
+    expect(body.max_tokens).toBeUndefined();
+    expect(body.max_output_tokens).toBe(500);
+  });
+
+  it('sends effort + thinking on effort-models when effort is provided', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-opus-4-8',
+      messages: [{ role: 'user', content: 'q' }],
+      effort: 'high',
+    });
+    expect(body.effort).toBe('high');
+    expect(body.thinking).toEqual({ type: 'adaptive' });
+  });
+
+  it('does not send effort when not provided on effort-models', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-opus-4-8',
+      messages: [{ role: 'user', content: 'q' }],
+    });
+    expect(body.effort).toBeUndefined();
+    expect(body.thinking).toBeUndefined();
+  });
+
+  it('never sends effort to sampling-models (mutually exclusive)', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [{ role: 'user', content: 'q' }],
+      effort: 'high',
+    });
+    expect(body.effort).toBeUndefined();
+    expect(body.thinking).toBeUndefined();
+    expect(body.temperature).toBe(0.2);
+  });
+
+  it('accepts all four effort levels on effort-models', () => {
+    for (const level of ['low', 'medium', 'high', 'max'] as const) {
+      const body = buildAnthropicMessagesRequest({
+        model: 'claude-opus-4-8',
+        messages: [{ role: 'user', content: 'q' }],
+        effort: level,
+      });
+      expect(body.effort).toBe(level);
+    }
+  });
+
+  it('sends max_output_tokens (not max_tokens) for claude-opus-4-8', () => {
+    // RED-325: Opus 4.7+ renamed max_tokens → max_output_tokens.
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-opus-4-8',
+      messages: [{ role: 'user', content: 'q' }],
+    });
+    expect(body.max_tokens).toBeUndefined();
+    expect(body.max_output_tokens).toBe(1200);
+  });
+
+  it('respects explicit max_tokens as max_output_tokens on effort-models', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-opus-4-8',
+      messages: [{ role: 'user', content: 'q' }],
+      max_tokens: 500,
+    });
+    expect(body.max_tokens).toBeUndefined();
+    expect(body.max_output_tokens).toBe(500);
+  });
+
+  it('omits temperature for an unknown future model', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-5-0',
+      messages: [{ role: 'user', content: 'q' }],
+    });
+    expect(body.temperature).toBeUndefined();
+    // Unknown/future models get max_output_tokens as the safe default.
+    expect(body.max_tokens).toBeUndefined();
+    expect(body.max_output_tokens).toBe(1200);
+  });
+
+  it('sends effort + thinking on effort-models when effort is provided', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-opus-4-8',
+      messages: [{ role: 'user', content: 'q' }],
+      effort: 'high',
+    });
+    expect(body.effort).toBe('high');
+    expect(body.thinking).toEqual({ type: 'adaptive' });
+  });
+
+  it('does not send effort when not provided on effort-models', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-opus-4-8',
+      messages: [{ role: 'user', content: 'q' }],
+    });
+    expect(body.effort).toBeUndefined();
+    expect(body.thinking).toBeUndefined();
+  });
+
+  it('never sends effort to sampling-models (mutually exclusive)', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [{ role: 'user', content: 'q' }],
+      effort: 'high',
+    });
+    expect(body.effort).toBeUndefined();
+    expect(body.thinking).toBeUndefined();
+    expect(body.temperature).toBe(0.2);
+  });
+
+  it('accepts all four effort levels on effort-models', () => {
+    for (const level of ['low', 'medium', 'high', 'max'] as const) {
+      const body = buildAnthropicMessagesRequest({
+        model: 'claude-opus-4-8',
+        messages: [{ role: 'user', content: 'q' }],
+        effort: level,
+      });
+      expect(body.effort).toBe(level);
+    }
+  });
+
+  // Belt-and-suspenders: existing test at line 52 already covers this,
+  // but explicit coverage of the guard path for an accepted model.
   it('sends temperature for a model on the accept list (claude-sonnet-4-6)', () => {
-    // Belt-and-suspenders: existing test at line 52 already covers this,
-    // but explicit coverage of the guard path for an accepted model.
     const body = buildAnthropicMessagesRequest({
       model: 'claude-sonnet-4-6',
       messages: [{ role: 'user', content: 'q' }],
@@ -754,5 +890,36 @@ describe('buildAnthropicMessagesRequest → normalizeAnthropicMessagesResponse r
       tool_use_id: 'toolu_1',
       content: '{"result":7}',
     });
+  });
+});
+
+describe('acceptsEffortParams', () => {
+  // Accepting effort models = the inverse of acceptsSamplingParams.
+  // These are models that dropped sampling params.
+  it('returns true for claude-opus-4-7', () => {
+    expect(acceptsEffortParams('claude-opus-4-7')).toBe(true);
+  });
+  it('returns true for claude-opus-4-8', () => {
+    expect(acceptsEffortParams('claude-opus-4-8')).toBe(true);
+  });
+  it('returns true for an unknown/future model id', () => {
+    expect(acceptsEffortParams('claude-sonnet-5-0')).toBe(true);
+  });
+  it('returns true for a completely unknown id', () => {
+    expect(acceptsEffortParams('claude-unknown-model')).toBe(true);
+  });
+
+  // Rejecting effort models — these accept sampling params instead.
+  it('returns false for claude-sonnet-4-6', () => {
+    expect(acceptsEffortParams('claude-sonnet-4-6')).toBe(false);
+  });
+  it('returns false for claude-opus-4-6', () => {
+    expect(acceptsEffortParams('claude-opus-4-6')).toBe(false);
+  });
+  it('returns false for claude-haiku-4-5', () => {
+    expect(acceptsEffortParams('claude-haiku-4-5')).toBe(false);
+  });
+  it('returns false for claude-3-5-sonnet-20241022 (claude-3 family)', () => {
+    expect(acceptsEffortParams('claude-3-5-sonnet-20241022')).toBe(false);
   });
 });

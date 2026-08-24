@@ -7,7 +7,7 @@
  *   - explicit `-o <path>` override
  *   - --arg optional (omitted → empty string fed to gen method)
  *   - --arg honored when supplied
- *   - missing --method errors out with non-zero exit
+ *   - --method optional (omitted → { method => ir } map; supplied → bare IR)
  *   - compile errors propagate (non-zero exit; the Ruby diagnostic prints)
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -112,11 +112,32 @@ describe('cambium compile (RED-244)', () => {
     expect(ir.context?.document).toBe('hello from fixture');
   });
 
-  it('errors out without --method', () => {
+  // Issue #162: this previously asserted `Missing --method` — the wrapper
+  // rejected a form the Ruby layer has supported since RED-360 and that both
+  // the usage text and CLAUDE.md advertise. The old test pinned the bug.
+  it('without --method, emits a { method => ir } map covering every method', () => {
     const gen = writeMinimalGen();
     const result = runCli(['compile', gen]);
-    expect(result.status).not.toBe(0);
-    expect((result.stderr ?? '') + (result.stdout ?? '')).toMatch(/Missing --method/);
+    expect(result.status).toBe(0);
+
+    const out = JSON.parse(readFileSync(join(scratch, 'foo.ir.json'), 'utf8'));
+    // Map keyed by method name, not a bare IR: no top-level `version`/`entry`.
+    expect(Object.keys(out)).toEqual(['analyze']);
+    expect(out.version).toBeUndefined();
+    expect(out.entry).toBeUndefined();
+    expect(out.analyze.version).toBe('0.2');
+    expect(out.analyze.entry.method).toBe('analyze');
+  });
+
+  it('with --method, still emits a bare single-method IR (no regression)', () => {
+    const gen = writeMinimalGen();
+    const result = runCli(['compile', gen, '--method', 'analyze']);
+    expect(result.status).toBe(0);
+
+    const ir = JSON.parse(readFileSync(join(scratch, 'foo.ir.json'), 'utf8'));
+    expect(ir.version).toBe('0.2');
+    expect(ir.entry.method).toBe('analyze');
+    expect(ir.analyze).toBeUndefined();
   });
 
   it('propagates compile errors with non-zero exit and the Ruby diagnostic', () => {

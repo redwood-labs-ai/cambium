@@ -25,7 +25,7 @@ import type {
   GenerateWithToolsOpts,
   GenerateWithToolsResult,
 } from './types.js';
-import { ProviderHttpError, ProviderConnectionError } from './types.js';
+import { ProviderHttpError, ProviderConnectionError, normalizeStopReason } from './types.js';
 import { redactErrorBody } from './redact.js';
 import { normalizeModelName, type ModelNameTransform } from './registry.js';
 import {
@@ -159,7 +159,12 @@ export function openaiCompatible(config: OpenAICompatibleConfig): CambiumProvide
         const bodyPreview = JSON.stringify(json).slice(0, 1500);
         throw new Error(`${errorLabel}: missing choices[0].message.content — ${bodyPreview}`);
       }
-      return { text: content as string, usage: mapOpenAIUsage(json?.usage) };
+      return {
+        text: content as string,
+        usage: mapOpenAIUsage(json?.usage),
+        // RED-174: `length` here means the ceiling truncated the output.
+        stopReason: normalizeStopReason(json?.choices?.[0]?.finish_reason),
+      };
     },
 
     async generateWithTools(opts: GenerateWithToolsOpts): Promise<GenerateWithToolsResult> {
@@ -234,6 +239,7 @@ export function openaiCompatible(config: OpenAICompatibleConfig): CambiumProvide
       return {
         message: { content, tool_calls: msg.tool_calls ?? undefined },
         usage: mapOpenAIUsage(json?.usage),
+        stopReason: normalizeStopReason(json?.choices?.[0]?.finish_reason),
       };
     },
   };
@@ -307,6 +313,7 @@ export function anthropicCompatible(config: AnthropicCompatibleConfig): CambiumP
         ],
         max_tokens: opts.max_tokens,
         temperature: opts.temperature,
+        effort: opts.effort,
         cache: config.cache,
         documents: opts.documents ?? [],
         cacheUserPrefix: opts.cachedPrefix,
@@ -327,7 +334,13 @@ export function anthropicCompatible(config: AnthropicCompatibleConfig): CambiumP
       }
       const json: any = await res.json();
       const normalized = normalizeAnthropicMessagesResponse(json);
-      return { text: normalized.message.content ?? '', usage: normalized.usage };
+      // RED-174: the normalizer has always produced `stop_reason`; both
+      // return sites here used to drop it on the floor.
+      return {
+        text: normalized.message.content ?? '',
+        usage: normalized.usage,
+        stopReason: normalizeStopReason(normalized.stop_reason),
+      };
     },
 
     async generateWithTools(opts: GenerateWithToolsOpts): Promise<GenerateWithToolsResult> {
@@ -337,6 +350,7 @@ export function anthropicCompatible(config: AnthropicCompatibleConfig): CambiumP
         tools: opts.tools,
         max_tokens: opts.max_tokens,
         temperature: opts.temperature,
+        effort: opts.effort,
         cache: config.cache,
         documents: opts.documents ?? [],
       });
@@ -358,8 +372,12 @@ export function anthropicCompatible(config: AnthropicCompatibleConfig): CambiumP
       const normalized = normalizeAnthropicMessagesResponse(json);
       // Inline tool-call markup parsing is applied by the dispatcher.
       return {
-        message: { content: normalized.message.content, tool_calls: normalized.message.tool_calls },
+        message: {
+          content: normalized.message.content,
+          tool_calls: normalized.message.tool_calls,
+        },
         usage: normalized.usage,
+        stopReason: normalizeStopReason(normalized.stop_reason),
       };
     },
   };

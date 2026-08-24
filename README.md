@@ -37,7 +37,7 @@ npm install @redwood-labs/cambium-runner
 
 ### Prerequisites
 
-- **Node.js 18+**
+- **Node.js >=22.19.0** — see [`COMPATIBILITY.md`](COMPATIBILITY.md) § Runtime requirements
 - **Ruby 3.0+** with the `json` gem (`gem install json` if missing) — Cambium ships the Ruby compiler; the Ruby runtime itself is a user-side prerequisite
 - An LLM provider — one of:
   - **oMLX** (OpenAI-compatible): set `CAMBIUM_OMLX_BASEURL` (default `http://localhost:8080`), optional `CAMBIUM_OMLX_API_KEY`
@@ -52,6 +52,7 @@ Run `cambium doctor` to verify your environment.
 ```bash
 # 1. Create a new workspace
 cambium init my-project && cd my-project
+npm install                # the scaffold ships a package.json; this installs it
 
 # 2. Scaffold an agent (includes a returns do … end block + system prompt)
 cambium new agent MyAnalyst

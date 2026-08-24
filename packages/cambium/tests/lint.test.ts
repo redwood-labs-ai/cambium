@@ -10,7 +10,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -229,6 +229,62 @@ describe('cambium lint — RED-284 coverage for new surfaces', () => {
     expect(status).toBe(0);
   });
 
+  // ── RED-210: app-mode `returns <Schema>` check ──────────────────────
+  //
+  // Symbol-form `returns` must resolve to an export of the Genfile's
+  // [types] contracts. Block-form `returns do … end` (RED-419) compiles
+  // the schema inline and never touches contracts.ts — lint must skip
+  // it, and lowercase prose in comments ("…returns a structured…") must
+  // not trip the check (issues #167 / #160).
+
+  it('app mode: skips block-form `returns do … end` (issue #167)', () => {
+    const pkg = setupMinimalWorkspace(scratch);
+    mkdirSync(join(pkg, 'app/gens'), { recursive: true });
+    writeFileSync(
+      join(pkg, 'app/gens/block_gen.cmb.rb'),
+      `class BlockGen < GenModel\n`
+        + `  model "omlx:stub"\n`
+        + `  # Analyzes a document and returns a structured stock analysis report.\n`
+        + `  returns do\n`
+        + `    field :summary, String\n`
+        + `  end\n`
+        + `end\n`,
+    );
+
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(0);
+    expect(output).not.toMatch(/not exported from src\/contracts\.ts/);
+  });
+
+  it('app mode: passes symbol-form returns when the export exists', () => {
+    const pkg = setupMinimalWorkspace(scratch);
+    writeFileSync(join(pkg, 'src/contracts.ts'), `export const BlockReport = Type.Object({});\n`);
+    mkdirSync(join(pkg, 'app/gens'), { recursive: true });
+    writeFileSync(
+      join(pkg, 'app/gens/sym_gen.cmb.rb'),
+      `class SymGen < GenModel\n  model "omlx:stub"\n  returns BlockReport\nend\n`,
+    );
+
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(0);
+    expect(output).toMatch(/sym_gen\.cmb\.rb: returns BlockReport \(found in src\/contracts\.ts\)/);
+  });
+
+  it('app mode: fails symbol-form returns :<typo> with a suggestion', () => {
+    const pkg = setupMinimalWorkspace(scratch);
+    writeFileSync(join(pkg, 'src/contracts.ts'), `export const BlockReport = Type.Object({});\n`);
+    mkdirSync(join(pkg, 'app/gens'), { recursive: true });
+    writeFileSync(
+      join(pkg, 'app/gens/typo_gen.cmb.rb'),
+      `class TypoGen < GenModel\n  model "omlx:stub"\n  returns :Blockreport\nend\n`,
+    );
+
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(1);
+    expect(output).toMatch(/returns Blockreport — not exported from src\/contracts\.ts/);
+    expect(output).toMatch(/Did you mean 'BlockReport'\?/);
+  });
+
   // ── RED-286: flat [package] layout (external apps) ──
   //
   // A curator-style project has a single top-level Genfile.toml with
@@ -417,5 +473,81 @@ smoke = "tests/smoke.test.ts"
     );
     const { output } = runLint(scratch);
     expect(output).toMatch(/has 2 gens/);
+  });
+});
+
+// ── RED-218 / issue #168: framework-builtin tool resolution in app mode ──
+//
+// `cambium lint` warns "no tool definition" for every `uses :<name>` whose
+// `.tool.json` isn't under app/tools/, but the runtime resolves framework
+// builtins (web_search, calculator, read_file, execute_code, web_extract)
+// from packages/cambium-runner/src/builtin-tools/ — not a local def. The
+// whitelist at cli/lint.mjs::BUILTIN_TOOL_NAMES is lint's source of truth;
+// this suite both proves the fix and guards against drift: a future builtin
+// added to the runner catalog but missing from that set must fail here.
+function setupAppWithUses(scratch: string, usesLine: string) {
+  const pkg = setupMinimalWorkspace(scratch);
+  mkdirSync(join(pkg, 'app/gens'), { recursive: true });
+  writeFileSync(
+    join(pkg, 'app/gens/demo.cmb.rb'),
+    `class Demo < GenModel\n  model :default\n  system :demo\n${usesLine}\n`
+      + `  def analyze(x)\n    generate "x" do\n    end\n  end\nend\n`,
+  );
+  return pkg;
+}
+
+// Names of the framework builtins as the runtime actually resolves them —
+// parsed from the live catalog, not copied here. This is the drift guard:
+// if someone adds a builtin to the runner dir and forgets lint's whitelist,
+// this list changes and every case below re-validates against it.
+function runtimeBuiltinNames(): string[] {
+  const dir = join(REPO_ROOT, 'packages', 'cambium-runner', 'src', 'builtin-tools');
+  return readdirSync(dir)
+    .filter(f => f.endsWith('.tool.json'))
+    .map(f => JSON.parse(readFileSync(join(dir, f), 'utf8')).name);
+}
+
+describe('cambium lint — RED-218 framework-builtin tool resolution (app mode)', () => {
+  let scratch: string;
+  beforeEach(() => {
+    scratch = mkdtempSync(join(tmpdir(), 'cambium-lint-builtins-'));
+  });
+  afterEach(() => {
+    if (scratch && existsSync(scratch)) rmSync(scratch, { recursive: true, force: true });
+  });
+
+  it('does NOT warn for every framework builtin in the live catalog', () => {
+    const builtins = runtimeBuiltinNames();
+    const usesLine = `  uses :${builtins.join(', ')}`;
+    setupAppWithUses(scratch, usesLine);
+
+    const { status, output } = runLint(scratch);
+    // Every builtin is a legitimate ref → no "no tool definition" warnings.
+    expect(output).not.toMatch(/no tool definition/);
+    expect(status).toBe(0);
+  });
+
+  it('still warns for a genuinely-missing tool (only builtins are whitelisted)', () => {
+    setupAppWithUses(scratch, '  uses :not_a_real_tool');
+
+    const { status, output } = runLint(scratch);
+    // The real bug class — unknown tools must still be caught.
+    expect(output).toMatch(/uses :not_a_real_tool — no tool definition/);
+    // Framing note: lint explicitly says builtins are OK here, proving the
+    // whitelist is selective, not blanket.
+    expect(output).toMatch(/\(ok if framework builtin\)/);
+  });
+
+  it('drift guard: every live runtime builtin name passes without a warning', () => {
+    const builtins = runtimeBuiltinNames();
+    // Sanity: the catalog is non-empty and stable-shaped.
+    expect(builtins.length).toBeGreaterThan(0);
+
+    setupAppWithUses(scratch, `  uses :${builtins.join(', ')}`);
+    const { output } = runLint(scratch);
+
+    // If any runtime builtin is missing from lint's whitelist this fires —
+    // exactly the Q4 concern (lint blind to other resolved tool sources).
+    expect(output).not.toMatch(/no tool definition/);
   });
 });

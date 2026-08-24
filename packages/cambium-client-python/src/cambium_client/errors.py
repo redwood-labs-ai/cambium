@@ -110,6 +110,20 @@ class NotFoundError(CambiumError):
     kind: ClassVar[str] = "not_found"
 
 
+class OutputCeilingError(CambiumError):
+    """The model hit its output ceiling; the response was truncated.
+
+    RED-174. Distinct from `ValidationFailedError` because nothing was
+    validated — the output never finished being produced, so there is no
+    candidate to check. Distinct from `RunnerError` because it is
+    mechanically recoverable: raise `max_tokens` on the gen (or narrow the
+    `returns` schema) and retry. That recoverability is the whole reason it
+    earns its own kind rather than a message string on the umbrella.
+    """
+
+    kind: ClassVar[str] = "output_ceiling"
+
+
 # ── connection layer (no wire kind — raised on transport failure) ────
 
 
@@ -158,6 +172,7 @@ _KIND_TO_EXC: dict[str, type[CambiumError]] = {
     "overloaded": OverloadedError,
     "booting": BootingError,
     "not_found": NotFoundError,
+    "output_ceiling": OutputCeilingError,
 }
 
 

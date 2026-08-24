@@ -394,6 +394,10 @@ const PRIMITIVE_DOCS = {
     detail: 'Sets the maximum output tokens.',
     doc: 'Caps the model\'s response length. Affects cost and output completeness.',
   },
+  effort: {
+    detail: 'Output-steering control for Anthropic models that dropped sampling params (RED-325).',
+    doc: 'Replaces `temperature` on Anthropic models that removed sampling params — Opus 4.7+, Fable 5, Mythos 5.\n\nValues (closed): `"low"`, `"medium"`, `"high"`, `"max"`.\n\nCompile-time validated: only valid alongside an `anthropic:` model id; any other value or a non-Anthropic model is a compile error. The runner sends `effort` with `thinking: { type: "adaptive" }` and aliases `max_tokens` → `max_output_tokens` on the wire. Mutually exclusive with `temperature`.\n\n```ruby\nmodel "anthropic:claude-opus-4-7"\neffort "high"\n```\n\nSee [[P - GenModel]] § `effort`.',
+  },
   returns: {
     detail: 'Declares the return schema for AJV validation.',
     doc: 'Two forms (RED-419):\n\n**Block form (default)** — define the schema inline; no hand-written TypeScript needed:\n\n```ruby\nreturns do\n  field :name, String\n  field :tags, [String]\n  field :status, String, enum: %w[active archived]\n  field :score, Float, optional: true\nend\n```\n\nThe schema compiles to Draft-07 JSON inline in the IR and is self-sufficient at runtime.\n\n**Symbol form (escape hatch)** — reference a hand-written TypeBox export in `src/contracts.ts`:\n\n```ruby\nreturns AnalysisReport\n```\n\nUse this when the block vocabulary (String/Integer/Float/Boolean, arrays, nested objects, enum on String) doesn\'t cover your schema.\n\nSee [[P - returns]].',

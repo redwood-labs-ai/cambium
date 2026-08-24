@@ -22,6 +22,93 @@ export type StepResult = {
   meta?: Record<string, any>;
 };
 
+// ── Output-ceiling detection (RED-174) ─────────────────────────────────
+//
+// Hitting `max_tokens` truncates the completion mid-JSON. Before RED-174 the
+// runner only saw text that would not parse, so it reported a parse error and
+// fed the fragment to the repair loop — which regenerated under the SAME
+// ceiling and truncated again, burning every attempt against a wall it could
+// not move, then failing as `validation`. Nothing in the trace named the
+// ceiling, on any provider.
+//
+// Two signals, in order of authority:
+//
+//   1. `stopReason === 'length'` — the provider said so. Every built-in path
+//      reports it (Anthropic `stop_reason`, OpenAI-compatible
+//      `finish_reason`, Ollama `done_reason`); all of it used to be dropped.
+//
+//   2. Completion tokens at or above the applied ceiling. This is the
+//      fallback for providers that report nothing — notably custom providers
+//      predating the `stopReason` contract. Consulted ONLY after a parse has
+//      already failed, so a false positive can change an error message but
+//      can never turn a success into a failure.
+
+export type CeilingCheck = {
+  hit: boolean;
+  /** How we know: the provider told us, or we inferred it from usage. */
+  source: 'reported' | 'inferred';
+  /** The ceiling actually applied to the call. */
+  ceiling: number;
+  /** False when the ceiling is the built-in 1200 default the gen never set. */
+  declared: boolean;
+  completionTokens?: number;
+};
+
+/** The ceiling applied to a call, and whether the gen actually asked for it. */
+export function appliedCeiling(ir: any): { ceiling: number; declared: boolean } {
+  const raw = ir?.model?.max_tokens;
+  const declared = raw != null;
+  return { ceiling: Number(declared ? raw : DEFAULT_MAX_TOKENS), declared };
+}
+
+/** Default output ceiling when a gen declares no `max_tokens`. */
+export const DEFAULT_MAX_TOKENS = 1200;
+
+/**
+ * Decide whether a completion was cut off by its output ceiling.
+ *
+ * @param result   Provider result (`stopReason` / `usage`).
+ * @param ir       The gen IR, for the applied ceiling.
+ * @param parseFailed Whether JSON extraction already failed. The usage
+ *                 heuristic is gated on this; the reported signal is not.
+ */
+export function detectOutputCeiling(
+  result: { stopReason?: string; usage?: { completion_tokens?: number } } | undefined,
+  ir: any,
+  parseFailed: boolean,
+): CeilingCheck | null {
+  const { ceiling, declared } = appliedCeiling(ir);
+  const completionTokens = result?.usage?.completion_tokens;
+
+  if (result?.stopReason === 'length') {
+    return { hit: true, source: 'reported', ceiling, declared, completionTokens };
+  }
+  // Only infer once something has already gone wrong, and only when the
+  // provider stayed silent — a provider that said 'stop' is believed.
+  if (parseFailed && result?.stopReason === undefined &&
+      typeof completionTokens === 'number' && completionTokens >= ceiling) {
+    return { hit: true, source: 'inferred', ceiling, declared, completionTokens };
+  }
+  return null;
+}
+
+/** Operator-facing message. Names the ceiling AND where it came from — the
+ *  fix is almost always "raise max_tokens", and a user who never declared one
+ *  has no reason to know 1200 exists. */
+export function ceilingMessage(c: CeilingCheck, modelUsed: string): string {
+  const origin = c.declared
+    ? `the gen's declared \`max_tokens\``
+    : `the default \`max_tokens\` (no value declared on the gen)`;
+  const how = c.source === 'reported'
+    ? `${modelUsed} reported it stopped at the limit`
+    : `the completion used ${c.completionTokens} tokens, at or above the limit`;
+  return (
+    `Output ceiling reached: ${how}. The response was cut off mid-output, ` +
+    `so it is a fragment, not malformed JSON. Limit is ${c.ceiling} tokens, from ${origin}. ` +
+    `Raise \`max_tokens\` on the gen (or narrow the \`returns\` schema) and re-run.`
+  );
+}
+
 // ── Prompt context iteration (RED-382) ─────────────────────────────────
 //
 // Render every key from `ir.context` other than the primary doc and
@@ -64,6 +151,12 @@ export type GenerateTextFn = (opts: {
   prompt: string;
   max_tokens?: number;
   temperature?: number;
+  /** RED-325: effort level for models that dropped sampling params (Opus
+   *  4.7+, Fable 5, Mythos 5). Sent alongside `max_output_tokens` instead
+   *  of `max_tokens` and `thinking: { type: 'adaptive' }`. Ignored by
+   *  models that still accept temperature — the provider runner guards.
+   *  Absent/invalid → provider default. */
+  effort?: 'low' | 'medium' | 'high' | 'max';
   jsonSchema?: any;
   /** RED-323: typed document blocks extracted from ir.context. Providers
    *  with native doc support (Anthropic) emit these as content blocks;
@@ -225,6 +318,7 @@ export async function handleGenerate(
     prompt: useCachedPrefix ? step.prompt : legacyPrompt,
     max_tokens: outMax,
     temperature: ir.model.temperature,
+    effort: ir.effort,
     jsonSchema: schema,
     documents,
     modelOptions: ir.model.options,
@@ -245,16 +339,29 @@ export async function handleGenerate(
     parseError = e.message;
   }
 
+  // RED-174. A reported ceiling fails even if the fragment happens to parse:
+  // `extractJsonObject` slices to the last `}`, so a truncated response can
+  // yield a *prefix* object that validates while silently missing content.
+  // The provider saying "I cut this off" is better evidence than parseability.
+  const ceiling = detectOutputCeiling(genResult, ir, parsed === undefined);
+
   return {
     raw,
-    parsed,
+    parsed: ceiling ? undefined : parsed,
     result: {
       type: 'Generate',
       id: step.id,
       ms: Date.now() - started,
-      ok: parsed !== undefined,
-      errors: parseError ? [{ message: parseError }] : undefined,
-      meta: { model_used: modelUsed, raw_preview: raw.slice(0, 400), usage: genResult.usage },
+      ok: !ceiling && parsed !== undefined,
+      errors: ceiling
+        ? [{ message: ceilingMessage(ceiling, modelUsed) }]
+        : parseError ? [{ message: parseError }] : undefined,
+      meta: {
+        model_used: modelUsed,
+        raw_preview: raw.slice(0, 400),
+        usage: genResult.usage,
+        ...(ceiling ? { output_ceiling: ceiling } : {}),
+      },
     },
   };
 }
@@ -402,6 +509,7 @@ export async function handleRepair(
     prompt: repairPrompt,
     max_tokens: outMax,
     temperature: ir.model.temperature,
+    effort: ir.effort,
     jsonSchema: schema,
     modelOptions: ir.model.options,
     // RED-421: repair is also a generation attempt — walk fallbacks fresh.
@@ -417,14 +525,26 @@ export async function handleRepair(
     // will be caught by validation
   }
 
+  // RED-174: repair reads the same `ir.model.max_tokens`, so a repair that
+  // hits the ceiling will hit it again on every remaining attempt. Mark it
+  // so the caller stops the loop instead of paying for the rest.
+  const ceiling = detectOutputCeiling(genResult, ir, parsed === undefined);
+
   return {
     raw: newRaw,
-    parsed,
+    parsed: ceiling ? undefined : parsed,
     result: {
       type: 'Repair',
       ms: Date.now() - started,
-      ok: parsed !== undefined,
-      meta: { attempt, model_used: repairModelUsed, raw_preview: newRaw.slice(0, 400), usage: genResult.usage },
+      ok: !ceiling && parsed !== undefined,
+      errors: ceiling ? [{ message: ceilingMessage(ceiling, repairModelUsed) }] : undefined,
+      meta: {
+        attempt,
+        model_used: repairModelUsed,
+        raw_preview: newRaw.slice(0, 400),
+        usage: genResult.usage,
+        ...(ceiling ? { output_ceiling: ceiling } : {}),
+      },
     },
   };
 }
@@ -625,6 +745,10 @@ export type GenerateWithToolsFn = (opts: {
   tools: any[];
   max_tokens?: number;
   temperature?: number;
+  /** RED-325: effort level for models that dropped sampling params (Opus
+   *  4.7+, Fable 5, Mythos 5). Same semantics as GenerateTextFn.effort;
+   *  threaded through the IR by the runner. */
+  effort?: 'low' | 'medium' | 'high' | 'max';
   /** RED-323: typed document blocks extracted from ir.context, same as
    *  the generateText path. Anthropic emits them as user-message content
    *  blocks on the first turn (subsequent turns reuse them via cache).
@@ -731,6 +855,7 @@ export async function handleAgenticGenerate(
       tools: toolsForTurn,
       max_tokens: Number(ir.model.max_tokens ?? 1200),
       temperature: ir.model.temperature,
+      effort: ir.effort,
       documents,
       modelOptions: ir.model.options,
       // RED-421: fallbacks for agentic turns (each turn walks fresh).
@@ -836,15 +961,28 @@ export async function handleAgenticGenerate(
       log(`  ✗ Failed to parse JSON from output`);
     }
 
+    // RED-174: this branch used to swallow the failure in a bare catch and
+    // record `ok: false` with no reason at all — even less diagnosable than
+    // the non-agentic path, which at least kept the parse error.
+    const finalCeiling = detectOutputCeiling(response, ir, finalParsed === undefined);
+    if (finalCeiling) {
+      finalParsed = undefined;
+      log(`  ✗ Output ceiling reached (${finalCeiling.ceiling} tokens, ${finalCeiling.source})`);
+    }
+
     traceSteps.push({
       type: 'AgenticFinal',
       ms: Date.now() - turnStarted,
-      ok: finalParsed !== undefined,
+      ok: !finalCeiling && finalParsed !== undefined,
+      errors: finalCeiling
+        ? [{ message: ceilingMessage(finalCeiling, ir.model.id) }]
+        : undefined,
       meta: {
         turn: turn + 1,
         total_tool_calls: totalToolCalls,
         raw_preview: finalRaw.slice(0, 400),
         usage: response.usage,
+        ...(finalCeiling ? { output_ceiling: finalCeiling } : {}),
       },
     });
 

@@ -30,13 +30,13 @@ A trace MUST include:
 | Type | When | Key meta |
 |---|---|---|
 | `SecurityCheck` | Startup; before any generation. Validates declared tools against the gen's `security` policy. | `tools_checked`, `policy`, `packs` (pack names that contributed slots, RED-214) |
-| `Generate` | Single-turn model call. | `prompt`, `raw`, `usage`, `model_used` (may differ from `ir.model.id` when a fallback ran) |
+| `Generate` | Single-turn model call. | `prompt`, `raw`, `usage`, `model_used` (may differ from `ir.model.id` when a fallback ran), `output_ceiling?` (RED-174; see below) |
 | `ModelFallback` | Emitted BEFORE each fallback attempt when the primary (or a preceding fallback) failed with a transient error. Transient set (RED-421, DEC-A/DEC-C/DEC-D): `ProviderHttpError` status 5xx / 429 / 408 / 425, or `ProviderConnectionError` status 0 (connection-level failure — ECONNREFUSED / DNS / TLS — DEC-D; built-in providers emit this automatically). One step per fallback taken; never emitted when the primary succeeds, when the error is a deterministic HTTP status (any other 4xx), or when the error is untyped from a CUSTOM provider (a plain `Error`/`TypeError`, not a `ProviderHttpError` subclass — deterministic by DEC-A). Always `ok: true` (the step records the decision to fall back, not the outcome). | `attempted` (the model id that failed), `fallback_to` (the id being tried next), `error_class` (always `"transient"` at the emit site — the loop only falls back on transient errors; the `"deterministic"` arm is a defensive label), `reason` (the first 300 chars of the original error message) |
 | `ReplayResume` | Replaces `Generate` on a replayed run (RED-312). Emitted in lieu of any model call: the post-Generate candidate was seeded from a prior run's output (or `--from-step` checkpoint) and execution falls through to the cheap deterministic tail. No tokens spent here. `ok: false` only if the seeded candidate was `undefined`. | `parent_run_id`, `from_step` (`output` or a step type), `mode` |
 | `AgenticTurn` | One iteration of the agentic loop. | `turn`, `tool_calls`, `results`, `usage` |
 | `ToolCall` | A single tool dispatch. | `tool`, `operation`, `input`, `output` |
 | `Validate` | AJV schema validation. First-attempt successes are elided from the trace; only failures and post-repair successes are pushed. | `errors` on failure |
-| `Repair` | Repair-loop iteration. Also emitted by the corrector-feedback and grounding paths (one extra attempt each). | `attempt`, `strategy`, `errors_before`, `errors_after` |
+| `Repair` | Repair-loop iteration. Also emitted by the corrector-feedback and grounding paths (one extra attempt each). | `attempt`, `strategy`, `errors_before`, `errors_after`, `output_ceiling?` (RED-174) |
 | `ValidateAfterRepair` | AJV re-validation after a schema-failure repair attempt. | `errors` on failure |
 | `ValidateAfterCorrect` | AJV re-validation after a corrector that returned `corrected: true` modified the output. | `errors` on failure |
 | `ValidateAfterCorrectorRepair` | AJV re-validation after a corrector-feedback repair attempt (RED-275). Only emitted when a corrector returned `severity: 'error'` issues that fed back into a repair call. | `errors` on failure |
@@ -89,6 +89,36 @@ Events emitted under `type: "tool.*"` alongside the `ToolCall` step whenever the
 - **`tool.budget.exceeded`** — a per-tool or per-run `budget` cap was hit before dispatch. Meta: `tool`, `metric` (`max_calls` | `max_tool_calls`), `current`, `increment`, `limit`. A budget violation mid-agentic-loop terminates the loop (force final output); the event appears in the trace before the loop exits.
 
 ## Pipeline runs (RED-381)
+
+### `output_ceiling` (RED-174)
+
+Present on `Generate`, `Repair`, and `AgenticFinal` when the step stopped
+because the model hit its output ceiling rather than because it produced bad
+JSON. Shape:
+
+```json
+{ "hit": true, "source": "reported", "ceiling": 1200, "declared": false, "completionTokens": 1200 }
+```
+
+- `source: "reported"` — the provider said so. Every built-in path reports it:
+  Anthropic `stop_reason: "max_tokens"`, OpenAI-compatible
+  `choices[0].finish_reason: "length"`, Ollama `done_reason: "length"`. These
+  are normalized to a single `stopReason` on the provider result.
+- `source: "inferred"` — the provider reported nothing and completion tokens
+  reached the applied ceiling. Consulted only after a parse has already failed,
+  so it can sharpen a diagnosis but never fail an otherwise-good run.
+- `declared: false` means the ceiling was the built-in 1200 default, not a
+  value the gen set. The distinction is in the error text, because a user who
+  never wrote `max_tokens` has no reason to know 1200 exists.
+
+A ceiling hit sets `failureKind: "output_ceiling"` (wire `error.kind:
+"output_ceiling"`) and **stops the repair loop**. Repair regenerates under the
+same `max_tokens` and truncates in the same place, so continuing would spend
+every remaining attempt on a wall it cannot move.
+
+A reported ceiling fails the step even when the fragment happens to parse:
+`extractJsonObject` slices to the last `}`, so a truncated response can yield a
+*prefix* object that validates while silently missing content.
 
 Pipelines produce a `type: "PipelineRun"` root trace instead of the gen-side `Generate`/`steps[]` shape. The top-level `operators[]` array carries one entry per declared operator (in declaration order). Each entry's `trace` field nests the sub-gen's full gen-side trace — `steps[]` of `Generate` / `Validate` / `ToolCall` etc. The runtime aggregates `meta.total_tokens` + `meta.total_tool_calls` across all nested sub-gens; `meta.budget_cap_*` mirrors `policies.budget` so visualization tooling can show the cap alongside spend without re-parsing the IR.
 

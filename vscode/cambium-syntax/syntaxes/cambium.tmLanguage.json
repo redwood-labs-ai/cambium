@@ -44,7 +44,7 @@
       "patterns": [
         {
           "comment": "Core model configuration primitives",
-          "match": "^\\s*(model|system|temperature|max_tokens|returns)\\b",
+          "match": "^\\s*(model|system|temperature|max_tokens|effort|returns)\\b",
           "captures": {
             "1": { "name": "keyword.other.primitive.cambium support.function.cambium" }
           }

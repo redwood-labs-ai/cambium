@@ -59,6 +59,17 @@ const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
 /**
  * Closed v1 enum (RFC § wire format). Adding a new kind is a v2 break;
  * additive response fields are not. Clients ignore unknown fields.
+ *
+ * `output_ceiling` (RED-174) was added in the 0.10 window, deliberately: the
+ * enum becomes closed at 1.0, so that was the last release in which a kind
+ * could be added without a /v2. It earns its own kind because a caller can
+ * act on it mechanically — raise `max_tokens` and retry — which folding it
+ * into `runner_error` would have made impossible.
+ *
+ * NOTE: keep the union below as a bare list of quoted literals. The Python
+ * client's `test_kind_to_exc_covers_every_error_kind_in_serve_ts` parses it
+ * with a regex to enforce cross-language parity; a comment between members
+ * breaks that extraction. Explain members here, not inline.
  */
 export type ErrorKind =
   | 'unknown_gen'
@@ -71,7 +82,8 @@ export type ErrorKind =
   | 'timeout'
   | 'overloaded'
   | 'booting'
-  | 'not_found';
+  | 'not_found'
+  | 'output_ceiling';
 
 /**
  * Classify an error thrown synchronously out of `runGenFromIr`.
@@ -472,8 +484,9 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
       // Other ok:false paths (document extraction, etc.) fall through
       // as runner_error.
       const kind: ErrorKind =
-        result.failureKind === 'validation' ? 'validation_failed' :
-        result.failureKind === 'budget'     ? 'budget_exhausted' :
+        result.failureKind === 'validation'     ? 'validation_failed' :
+        result.failureKind === 'budget'         ? 'budget_exhausted' :
+        result.failureKind === 'output_ceiling' ? 'output_ceiling' :
         'runner_error';
       responseBody.error = {
         kind,

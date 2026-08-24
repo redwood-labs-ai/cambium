@@ -48,18 +48,20 @@ Cambium — Rails for generation engineering
 Usage:
   cambium init [name]
   cambium new <type> <Name>
-  cambium run <file.cmb.rb> --method <method> [--arg <path>|-] [--trace <path>] [--out <path>] [--mock] [--memory-key <name>=<value> ...] [--session-id <id>] [--profile <name>]
+  cambium run <file.cmb.rb> --method <method> [--arg <path>|-] [--trace <path>] [--out <path>] [--mock] [--memory-key <name>=<value> ...] [--session-id <id>] [--profile <name>] [--fired-by <id>]
+  cambium replay <run-id|path> [--edit] [--from-step <type>] [--from-op <id>] [--mock]
   cambium compile <file.cmb.rb> [--method <method>] [--arg <path>|-] [-o <output>]
   cambium compile [--out-dir <dir>] [--write]   # (no file) recompile every gen/pipeline IR in the workspace
   cambium serve --workspace <path> --bind <uri> [--allow-remote]
   cambium inspect [run-id] [--port <n>] [--runs-dir <path>] [--host <h>] [--allow-remote] [--no-open]
+  cambium schedule preview|list|compile <args>
   cambium doctor
   cambium test
   cambium lint
 
 Commands:
   init      Initialize a new Cambium workspace
-  new       Scaffold a new engine, agent, tool, action, schema, system, corrector, policy, memory_pool, or config
+  new       Scaffold a new engine, agent, tool, action, schema, system, corrector, policy, memory_pool, config, log_profile, pipeline, or provider
   run       Compile and execute a GenModel
   replay    Re-run a prior run's post-Generate tail from its candidate output,
             skipping the expensive Generate. --edit / --from-step <type>.
@@ -73,6 +75,7 @@ Commands:
   doctor    Check environment setup and dependencies
   test      Run the test suite
   lint      Validate package structure and declarations
+  schedule  Manage cron-style scheduled fires (preview, list, compile manifests)
 
 Run flags:
   --trace <path>            Write trace JSON to <path> (default: runs/<id>/trace.json)
@@ -85,6 +88,8 @@ Run flags:
                             /^[a-zA-Z0-9_\-]+$/ and be 1-128 chars. Wins over CAMBIUM_SESSION_ID.
   --profile <name>          Pick the active profile from app/config/models.rb (RED-326).
                             Must match /^[a-z][a-z0-9_]*$/. Wins over CAMBIUM_PROFILE.
+  --fired-by <id>           Label recording why this run was triggered (e.g. a cron job
+                            id). Surfaces in trace.json and observability logs.
 
 Compile flags:
   -o <path>                 Write IR JSON to <path> (default: <basename>.ir.json next to the input)
