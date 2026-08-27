@@ -41,7 +41,7 @@ type AnthropicDocumentBlock = {
   media_type: string;
 };
 
-export type EffortLevel = "low" | "medium" | "high" | "max";
+export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 
 export type AnthropicMessagesResult = {
   message: {
@@ -112,8 +112,9 @@ export function acceptsSamplingParams(model: string): boolean {
  * instead of sampling params (temperature, top_p, top_k). These are the
  * inverse set of `acceptsSamplingParams` — Opus 4.7+, Fable 5, Mythos 5.
  *
- * On effort-models, Anthropic expects `effort: 'low'|'medium'|'high'|'max'`
- * alongside `thinking: { type: 'adaptive' }` for output-steering control.
+ * On effort-models, Anthropic expects `output_config.effort` of
+ * `'low'|'medium'|'high'|'xhigh'|'max'` alongside
+ * `thinking: { type: 'adaptive' }` for output-steering control.
  * The two param families are mutually exclusive — never send both.
  *
  * Unknown/future models return `true` so the connector defaults to the
@@ -310,21 +311,21 @@ export function buildAnthropicMessagesRequest(
 
   const body: Record<string, any> = {
     model: opts.model,
-    // RED-325: Opus 4.7+ renamed `max_tokens` → `max_output_tokens`.
-    // On effort-models we must send `max_output_tokens`; on sampling-models
-    // we keep `max_tokens` (backward compat).
-    ...(acceptsSamplingParams(opts.model)
-      ? { max_tokens: opts.max_tokens ?? 1200 }
-      : { max_output_tokens: opts.max_tokens ?? 1200 }),
+    // `max_tokens` is required on every Anthropic model — there is no
+    // per-model rename. (RED-325 shipped a `max_output_tokens` alias on
+    // effort-models; no such field exists, so those requests 400 on the
+    // missing required `max_tokens` before anything else is looked at.)
+    max_tokens: opts.max_tokens ?? 1200,
     messages: translatedMessages,
   };
   if (acceptsSamplingParams(opts.model)) {
     body.temperature = opts.temperature ?? 0.2;
   } else if (opts.effort) {
-    // RED-325: effort is the steering control for models that dropped
-    // sampling params. Sent with thinking: { type: 'adaptive' }.
-    // Never sent to sampling-models (mutually exclusive).
-    body.effort = opts.effort;
+    // effort is the steering control for models that dropped sampling
+    // params. It nests inside `output_config`, not at the top level, and
+    // is sent with thinking: { type: 'adaptive' }. Never sent to
+    // sampling-models (mutually exclusive with `temperature`).
+    body.output_config = { ...(body.output_config ?? {}), effort: opts.effort };
     body.thinking = { type: "adaptive" };
   }
 

@@ -4,6 +4,32 @@ All notable changes to Cambium are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Cambium adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] — 2026-08-27
+
+Every Anthropic call was going out malformed. RED-325 built the provider on a premise that
+never held: Anthropic never renamed `max_tokens` to `max_output_tokens`, and `effort` was
+never a top-level request parameter — it nests inside `output_config`. The token-field switch
+was keyed on an accept-list of four model prefixes; every other model — opus-5, sonnet-5,
+opus-4-7, opus-4-8, fable-5 — took the else branch and sent the invalid field on every request,
+effort or no effort. Requests 400'd on the missing required `max_tokens` field before the
+unknown `effort` field was even reached.
+
+### Fixed
+
+- **Anthropic wire params corrected: `max_tokens`, nested `output_config.effort`.** The provider
+  now sends `max_tokens` (not `max_output_tokens`) on every model, and nests `effort` inside
+  `output_config` instead of at the top level. Fixes every non-legacy Anthropic model, which
+  could not previously complete a single request.
+
+### Added
+
+- **`xhigh` effort value.** Widens the `effort` enum to include `xhigh`, which the API has
+  accepted since Opus 4.7. Additive on the DSL vocab, IR, and runner library API surfaces.
+
+### Changed
+
+- **`@redwood-labs/cambium`** and **`@redwood-labs/cambium-runner`** bump to `0.10.1`.
+
 ## [0.10.0] — 2026-08-23 — The Ground Floor
 
 The release that makes the front door work. `cambium init` wrote a workspace that could not run, `cambium new` scaffolded into a directory `init` never created, `cambium doctor` green-lit an end-of-life Ruby, and `cambium compile` refused a flag combination its own help text advertised — the first five minutes of Cambium were the least reliable part of it. All of that is fixed, and the scaffolders now key on what is actually on disk rather than on assumptions about the Cambium monorepo.

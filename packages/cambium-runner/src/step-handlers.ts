@@ -152,11 +152,11 @@ export type GenerateTextFn = (opts: {
   max_tokens?: number;
   temperature?: number;
   /** RED-325: effort level for models that dropped sampling params (Opus
-   *  4.7+, Fable 5, Mythos 5). Sent alongside `max_output_tokens` instead
-   *  of `max_tokens` and `thinking: { type: 'adaptive' }`. Ignored by
-   *  models that still accept temperature — the provider runner guards.
+   *  4.7+, Fable 5, Mythos 5). Sent as `output_config.effort` alongside
+   *  `thinking: { type: 'adaptive' }`; `max_tokens` is unaffected. Ignored
+   *  by models that still accept temperature — the provider runner guards.
    *  Absent/invalid → provider default. */
-  effort?: 'low' | 'medium' | 'high' | 'max';
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   jsonSchema?: any;
   /** RED-323: typed document blocks extracted from ir.context. Providers
    *  with native doc support (Anthropic) emit these as content blocks;
@@ -748,7 +748,7 @@ export type GenerateWithToolsFn = (opts: {
   /** RED-325: effort level for models that dropped sampling params (Opus
    *  4.7+, Fable 5, Mythos 5). Same semantics as GenerateTextFn.effort;
    *  threaded through the IR by the runner. */
-  effort?: 'low' | 'medium' | 'high' | 'max';
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   /** RED-323: typed document blocks extracted from ir.context, same as
    *  the generateText path. Anthropic emits them as user-message content
    *  blocks on the first turn (subsequent turns reuse them via cache).
