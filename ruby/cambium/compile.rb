@@ -264,9 +264,9 @@ end
 # or on a non-Anthropic model; the runner will throw anyway, but the
 # compile-time check gives a local pointer instead of a runtime surprise.
 if defs[:effort]
-  unless ['low', 'medium', 'high', 'max'].include?(defs[:effort].to_s)
+  unless ['low', 'medium', 'high', 'xhigh', 'max'].include?(defs[:effort].to_s)
     raise Cambium::CompileError,
-          "effort: '#{defs[:effort]}' is not valid. Must be one of: low, medium, high, max."
+          "effort: '#{defs[:effort]}' is not valid. Must be one of: low, medium, high, xhigh, max."
   end
   primary_id = defs[:model]
   unless primary_id&.start_with?('anthropic:')

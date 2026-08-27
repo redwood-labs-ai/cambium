@@ -49,15 +49,15 @@ model "anthropic:claude-opus-4-7"
 effort "high"
 ```
 
-- **Values (closed):** `"low"`, `"medium"`, `"high"`, `"max"`. Any other value is a
-  compile error.
+- **Values (closed):** `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`. Any other value
+  is a compile error.
 - **Anthropic-only:** `effort` is a compile error unless the primary `model` id carries
   the `anthropic:` prefix. It is an Anthropic Messages-API control with no analogue on the
   OpenAI-compatible (`omlx:`) or Ollama paths — the check gives a local pointer at compile
   time instead of a provider 400 at run time.
-- **Wire behavior:** on an effort-model the runner sends `effort` alongside
-  `thinking: { type: "adaptive" }`, and aliases `max_tokens` → `max_output_tokens`
-  (Opus 4.7+ renamed the field). See [[N - Model Identifiers]] and
+- **Wire behavior:** on an effort-model the runner sends `output_config: { effort: … }`
+  alongside `thinking: { type: "adaptive" }`. `max_tokens` is sent unchanged — it is a
+  required field on every Anthropic model, effort-model or not. See [[N - Model Identifiers]] and
   [[C - IR (Intermediate Representation)]] § Top-level IR fields for the exact request
   shape and IR field.
 - **Mutually exclusive with `temperature`.** The two are never sent together. On an

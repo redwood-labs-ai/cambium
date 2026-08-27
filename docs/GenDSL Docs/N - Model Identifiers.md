@@ -153,7 +153,7 @@ Claude models from generation 4.7 onward (Opus 4.7, Opus 4.8, Fable 5, Mythos 5)
 
 Consequence for authors: a DSL-level `temperature` declaration is **silently ignored** for non-accepting models. There is no error or trace warning — the parameter simply does not appear in the request body.
 
-For models that dropped sampling params (Opus 4.7+, Fable 5, Mythos 5), use the `effort` primitive as the steering control instead — see [[P - GenModel]] § `effort` and [[C - IR (Intermediate Representation)]] § Top-level IR fields. The DSL compiler validates the pairing at compile time (must be `low`/`medium`/`high`/`max` and paired with an `anthropic:` model id); the runner aliases `max_tokens` → `max_output_tokens` on the wire for these models and sends `effort` alongside `thinking: { type: "adaptive" }`.
+For models that dropped sampling params (Opus 4.7+, Fable 5, Mythos 5), use the `effort` primitive as the steering control instead — see [[P - GenModel]] § `effort` and [[C - IR (Intermediate Representation)]] § Top-level IR fields. The DSL compiler validates the pairing at compile time (must be `low`/`medium`/`high`/`xhigh`/`max` and paired with an `anthropic:` model id); the runner sends `output_config: { effort: … }` alongside `thinking: { type: "adaptive" }` for these models. `max_tokens` is unaffected — it is a required top-level field on every Anthropic model.
 
 ### Non-goal: forced-schema
 

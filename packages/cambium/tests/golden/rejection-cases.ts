@@ -51,7 +51,7 @@ class TestGen < GenModel
 end
 `.trim(),
     expectClass: 'CompileError',
-    expectMessage: "is not valid. Must be one of: low, medium, high, max.",
+    expectMessage: "is not valid. Must be one of: low, medium, high, xhigh, max.",
   },
   {
     name: 'effort: paired with a non-Anthropic model',

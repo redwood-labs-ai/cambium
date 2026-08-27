@@ -83,38 +83,43 @@ describe('buildAnthropicMessagesRequest', () => {
       messages: [{ role: 'user', content: 'q' }],
     });
     expect(body.temperature).toBeUndefined();
-    // Unknown/future models get max_output_tokens as the safe default.
-    expect(body.max_tokens).toBeUndefined();
-    expect(body.max_output_tokens).toBe(1200);
+    // Unknown/future models still get max_tokens — it is required on every
+    // Anthropic model, not just the sampling-params ones.
+    expect(body.max_tokens).toBe(1200);
   });
 
-  it('sends max_output_tokens (not max_tokens) for claude-opus-4-8', () => {
-    // RED-325: Opus 4.7+ renamed max_tokens → max_output_tokens.
+  it('sends max_tokens on effort-models (there is no max_output_tokens)', () => {
+    // Regression: RED-325 aliased max_tokens -> max_output_tokens on
+    // effort-models. No such field exists; max_tokens is required on every
+    // model, so those requests 400 before anything else is evaluated.
     const body = buildAnthropicMessagesRequest({
       model: 'claude-opus-4-8',
       messages: [{ role: 'user', content: 'q' }],
     });
-    expect(body.max_tokens).toBeUndefined();
-    expect(body.max_output_tokens).toBe(1200);
+    expect(body.max_tokens).toBe(1200);
+    expect(body.max_output_tokens).toBeUndefined();
   });
 
-  it('respects explicit max_tokens as max_output_tokens on effort-models', () => {
+  it('respects explicit max_tokens on effort-models', () => {
     const body = buildAnthropicMessagesRequest({
       model: 'claude-opus-4-8',
       messages: [{ role: 'user', content: 'q' }],
       max_tokens: 500,
     });
-    expect(body.max_tokens).toBeUndefined();
-    expect(body.max_output_tokens).toBe(500);
+    expect(body.max_tokens).toBe(500);
+    expect(body.max_output_tokens).toBeUndefined();
   });
 
-  it('sends effort + thinking on effort-models when effort is provided', () => {
+  it('nests effort under output_config, with thinking, on effort-models', () => {
+    // Regression: RED-325 sent `effort` at the top level. The Messages API
+    // takes it inside `output_config`.
     const body = buildAnthropicMessagesRequest({
       model: 'claude-opus-4-8',
       messages: [{ role: 'user', content: 'q' }],
       effort: 'high',
     });
-    expect(body.effort).toBe('high');
+    expect(body.output_config).toEqual({ effort: 'high' });
+    expect(body.effort).toBeUndefined();
     expect(body.thinking).toEqual({ type: 'adaptive' });
   });
 
@@ -123,7 +128,7 @@ describe('buildAnthropicMessagesRequest', () => {
       model: 'claude-opus-4-8',
       messages: [{ role: 'user', content: 'q' }],
     });
-    expect(body.effort).toBeUndefined();
+    expect(body.output_config).toBeUndefined();
     expect(body.thinking).toBeUndefined();
   });
 
@@ -133,91 +138,20 @@ describe('buildAnthropicMessagesRequest', () => {
       messages: [{ role: 'user', content: 'q' }],
       effort: 'high',
     });
+    expect(body.output_config).toBeUndefined();
     expect(body.effort).toBeUndefined();
     expect(body.thinking).toBeUndefined();
     expect(body.temperature).toBe(0.2);
   });
 
-  it('accepts all four effort levels on effort-models', () => {
-    for (const level of ['low', 'medium', 'high', 'max'] as const) {
+  it('accepts all five effort levels on effort-models', () => {
+    for (const level of ['low', 'medium', 'high', 'xhigh', 'max'] as const) {
       const body = buildAnthropicMessagesRequest({
         model: 'claude-opus-4-8',
         messages: [{ role: 'user', content: 'q' }],
         effort: level,
       });
-      expect(body.effort).toBe(level);
-    }
-  });
-
-  it('sends max_output_tokens (not max_tokens) for claude-opus-4-8', () => {
-    // RED-325: Opus 4.7+ renamed max_tokens → max_output_tokens.
-    const body = buildAnthropicMessagesRequest({
-      model: 'claude-opus-4-8',
-      messages: [{ role: 'user', content: 'q' }],
-    });
-    expect(body.max_tokens).toBeUndefined();
-    expect(body.max_output_tokens).toBe(1200);
-  });
-
-  it('respects explicit max_tokens as max_output_tokens on effort-models', () => {
-    const body = buildAnthropicMessagesRequest({
-      model: 'claude-opus-4-8',
-      messages: [{ role: 'user', content: 'q' }],
-      max_tokens: 500,
-    });
-    expect(body.max_tokens).toBeUndefined();
-    expect(body.max_output_tokens).toBe(500);
-  });
-
-  it('omits temperature for an unknown future model', () => {
-    const body = buildAnthropicMessagesRequest({
-      model: 'claude-sonnet-5-0',
-      messages: [{ role: 'user', content: 'q' }],
-    });
-    expect(body.temperature).toBeUndefined();
-    // Unknown/future models get max_output_tokens as the safe default.
-    expect(body.max_tokens).toBeUndefined();
-    expect(body.max_output_tokens).toBe(1200);
-  });
-
-  it('sends effort + thinking on effort-models when effort is provided', () => {
-    const body = buildAnthropicMessagesRequest({
-      model: 'claude-opus-4-8',
-      messages: [{ role: 'user', content: 'q' }],
-      effort: 'high',
-    });
-    expect(body.effort).toBe('high');
-    expect(body.thinking).toEqual({ type: 'adaptive' });
-  });
-
-  it('does not send effort when not provided on effort-models', () => {
-    const body = buildAnthropicMessagesRequest({
-      model: 'claude-opus-4-8',
-      messages: [{ role: 'user', content: 'q' }],
-    });
-    expect(body.effort).toBeUndefined();
-    expect(body.thinking).toBeUndefined();
-  });
-
-  it('never sends effort to sampling-models (mutually exclusive)', () => {
-    const body = buildAnthropicMessagesRequest({
-      model: 'claude-sonnet-4-6',
-      messages: [{ role: 'user', content: 'q' }],
-      effort: 'high',
-    });
-    expect(body.effort).toBeUndefined();
-    expect(body.thinking).toBeUndefined();
-    expect(body.temperature).toBe(0.2);
-  });
-
-  it('accepts all four effort levels on effort-models', () => {
-    for (const level of ['low', 'medium', 'high', 'max'] as const) {
-      const body = buildAnthropicMessagesRequest({
-        model: 'claude-opus-4-8',
-        messages: [{ role: 'user', content: 'q' }],
-        effort: level,
-      });
-      expect(body.effort).toBe(level);
+      expect(body.output_config).toEqual({ effort: level });
     }
   });
 

@@ -118,7 +118,7 @@ export type GenerateTextOpts = {
    *  (Opus 4.7+, Fable 5, Mythos 5). Ignored by models that still accept
    *  `temperature` — the connector guards this. Optional; if absent, the
    *  model uses its own default. */
-  effort?: "low" | "medium" | "high" | "max";
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
   jsonSchema?: any;
   documents?: any[];
   modelOptions?: { disable_thinking?: boolean };
@@ -149,7 +149,7 @@ export type GenerateWithToolsOpts = {
   temperature?: number;
   /** RED-325: effort level for Anthropic models that dropped sampling params.
    *  See GenerateTextOpts.effort for full semantics. */
-  effort?: "low" | "medium" | "high" | "max";
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
   documents?: any[];
   modelOptions?: { disable_thinking?: boolean };
 };

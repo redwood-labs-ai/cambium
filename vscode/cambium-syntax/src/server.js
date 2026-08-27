@@ -396,7 +396,7 @@ const PRIMITIVE_DOCS = {
   },
   effort: {
     detail: 'Output-steering control for Anthropic models that dropped sampling params (RED-325).',
-    doc: 'Replaces `temperature` on Anthropic models that removed sampling params — Opus 4.7+, Fable 5, Mythos 5.\n\nValues (closed): `"low"`, `"medium"`, `"high"`, `"max"`.\n\nCompile-time validated: only valid alongside an `anthropic:` model id; any other value or a non-Anthropic model is a compile error. The runner sends `effort` with `thinking: { type: "adaptive" }` and aliases `max_tokens` → `max_output_tokens` on the wire. Mutually exclusive with `temperature`.\n\n```ruby\nmodel "anthropic:claude-opus-4-7"\neffort "high"\n```\n\nSee [[P - GenModel]] § `effort`.',
+    doc: 'Replaces `temperature` on Anthropic models that removed sampling params — Opus 4.7+, Fable 5, Mythos 5.\n\nValues (closed): `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`.\n\nCompile-time validated: only valid alongside an `anthropic:` model id; any other value or a non-Anthropic model is a compile error. The runner sends `output_config: { effort: … }` with `thinking: { type: "adaptive" }`. Mutually exclusive with `temperature`.\n\n```ruby\nmodel "anthropic:claude-opus-4-7"\neffort "high"\n```\n\nSee [[P - GenModel]] § `effort`.',
   },
   returns: {
     detail: 'Declares the return schema for AJV validation.',
