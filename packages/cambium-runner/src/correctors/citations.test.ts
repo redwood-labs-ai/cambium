@@ -105,4 +105,59 @@ describe('citations corrector', () => {
     const result = citations(data, { document: doc })
     expect(result.corrected).toBe(false)
   })
+
+  // ── #169: any-of over document + derivedDocument ────────────────────
+  describe('derivedDocument (#169)', () => {
+    const markdownDoc = 'Hypothesis: **cache stampede** after deploy.'
+    const derived = 'Hypothesis: cache stampede after deploy.'
+    const withQuote = (quote: string) => ({
+      key_facts: [{ fact: 'test', citations: [{ doc_id: 'doc', chunk_id: 'c1', quote }] }],
+    })
+
+    it('passes via the derived view when the raw document misses', () => {
+      const quote = 'Hypothesis: cache stampede after deploy.'
+      expect(
+        citations(withQuote(quote), { document: markdownDoc }).meta?.citationResult.allValid,
+      ).toBe(false)
+
+      const result = citations(withQuote(quote), { document: markdownDoc, derivedDocument: derived })
+      const cit = result.meta?.citationResult
+      expect(cit.allValid).toBe(true)
+      expect(cit.passed[0].matched_via).toBe('derived')
+      expect(result.issues.filter(i => i.severity === 'error')).toHaveLength(0)
+    })
+
+    it('reports document when the raw text hits, even though derived would too', () => {
+      const result = citations(withQuote('cache stampede'), {
+        document: markdownDoc,
+        derivedDocument: derived,
+      })
+      expect(result.meta?.citationResult.passed[0].matched_via).toBe('document')
+    })
+
+    it('still fails a genuinely fabricated quote with both haystacks', () => {
+      const result = citations(withQuote('nothing like this appears anywhere'), {
+        document: markdownDoc,
+        derivedDocument: derived,
+      })
+      const cit = result.meta?.citationResult
+      expect(cit.allValid).toBe(false)
+      expect(cit.failed[0].reason).toBe('not found in source document')
+    })
+
+    it('reports document when derivedDocument is absent (unchanged behavior)', () => {
+      const result = citations(withQuote('cache stampede'), { document: markdownDoc })
+      expect(result.meta?.citationResult.passed[0].matched_via).toBe('document')
+    })
+
+    it('checks nested citations against the derived view too', () => {
+      const result = citations(
+        { sections: [{ items: [{ citations: [{ quote: 'Hypothesis: cache stampede after deploy.' }] }] }] },
+        { document: markdownDoc, derivedDocument: derived },
+      )
+      const cit = result.meta?.citationResult
+      expect(cit.totalChecked).toBe(1)
+      expect(cit.passed[0].matched_via).toBe('derived')
+    })
+  })
 })

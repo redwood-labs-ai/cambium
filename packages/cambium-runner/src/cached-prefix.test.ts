@@ -1,6 +1,6 @@
 /**
  * Prompt-cache prefix on the user message — handleGenerate split,
- * runner-level flatten, and agentic-path guard rail.
+ * runner-level flatten, and the agentic (tools) path.
  *
  *   - handleGenerate (step-handler): does the split fire at the right
  *     boundary, and is the cacheablePrefix byte-stable across a fan-out
@@ -8,9 +8,11 @@
  *   - Runner flatten: providers without `supportsPromptCacheControl` see
  *     `<prompt>\n\n<cachedPrefix>` (legacy ordering) and no `cachedPrefix`
  *     field — grounded gens on Ollama/oMLX are unchanged.
- *   - Agentic generateWithTools: stays clear of the cachedPrefix wiring
- *     (a future refactor copy-pasting the prompt-cache plumbing into the
- *     tool-call path would change agentic caching semantics).
+ *   - Agentic generateWithTools (#228): the SAME wiring, on purpose — the
+ *     tool-call path staying clear of it is what made every agentic turn
+ *     re-send its whole prompt uncached. What is guarded now is that the
+ *     provider invents no prefix of its own, and that the runner-level
+ *     flatten keeps oMLX/Ollama byte-identical (C-3).
  *
  * Builder-shape assertions for buildAnthropicMessagesRequest live in
  * providers/anthropic.test.ts.
@@ -18,7 +20,7 @@
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { handleGenerate, MIN_CACHE_PREFIX_CHARS } from './step-handlers.js';
-import { makeGenerateText } from './runner.js';
+import { makeGenerateText, makeGenerateWithTools } from './runner.js';
 import { ProviderRegistry, defineProvider } from './providers/registry.js';
 import { anthropicCompatible } from './providers/factories.js';
 
@@ -430,14 +432,14 @@ describe('--mock fidelity with cachedPrefix (AUD-001)', () => {
   });
 });
 
-describe('agentic generateWithTools is unaffected by the cachedPrefix wiring (guard rail)', () => {
-  // The cachedPrefix wiring lives in the GenerateTextOpts path only. The
-  // agentic path uses GenerateWithToolsOpts and deliberately doesn't
-  // accept `cachedPrefix` — multi-turn caching has different semantics
-  // (the tools array + last document carry the breakpoints; per-turn
-  // user variance defeats prefix reuse). This test catches a future
-  // refactor that copy-pastes the prompt-cache plumbing into
-  // generateWithTools.
+describe('agentic generateWithTools and the cachedPrefix wiring (#228)', () => {
+  // This block used to assert the OPPOSITE: that the tools path
+  // deliberately stayed clear of the cachedPrefix plumbing, on the theory
+  // that "multi-turn caching has different semantics". #228 is the bug
+  // that theory produced — the agentic loop re-sent its whole prompt
+  // uncached on every turn. The wiring is now shared on purpose, and what
+  // needs guarding is the opposite direction: the provider must not invent
+  // a prefix marker for a caller that did not ask for one.
 
   type Captured = { url: string; init: RequestInit };
   function stubFetch(response: any): () => Captured {
@@ -455,19 +457,25 @@ describe('agentic generateWithTools is unaffected by the cachedPrefix wiring (gu
   }
   afterEach(() => vi.unstubAllGlobals());
 
-  it('a long user message in generateWithTools does NOT receive cache_control on a user-text block', async () => {
-    const get = stubFetch({
-      content: [{ type: 'text', text: 'ok' }],
-      usage: { input_tokens: 1, output_tokens: 1 },
-    });
-    const provider = anthropicCompatible({
+  function anthropic() {
+    return anthropicCompatible({
       name: 'anthropic',
       baseUrl: 'https://api.anthropic.com',
       apiKey: () => 'k',
     });
-    // 10000-char user message — well above any reasonable cache floor.
+  }
+
+  it('a long user message with NO cachedPrefix is still a plain string — the provider invents nothing', async () => {
+    const get = stubFetch({
+      content: [{ type: 'text', text: 'ok' }],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    // 10000-char user message — well above any cache floor. The eligibility
+    // decision belongs to the dispatch site (buildCacheablePrefix), not to
+    // the provider; a provider that started splitting on its own would move
+    // the cache key for every caller.
     const hugeUserText = 'U'.repeat(10000);
-    await provider.generateWithTools({
+    await anthropic().generateWithTools({
       model: 'claude-sonnet-4-6',
       messages: [
         { role: 'system', content: 'you are a helpful assistant' },
@@ -476,14 +484,169 @@ describe('agentic generateWithTools is unaffected by the cachedPrefix wiring (gu
       tools: [],
     });
     const body = JSON.parse(get().init.body as string);
-    const userMsg = body.messages[0];
-    // Plain-string user content (no multi-block array, no cache_control).
-    // A refactor that wrapped this — even without a marker — would fire
-    // this assertion and force a deliberate look at the agentic contract.
-    expect(userMsg.role).toBe('user');
-    expect(userMsg.content).toBe(hugeUserText);
-    // Cross-check the system marker still applies — the test isn't
-    // passing because the surrounding caching plumbing broke entirely.
+    expect(body.messages[0].role).toBe('user');
+    expect(body.messages[0].content).toBe(hugeUserText);
     expect(body.system[0].cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('a cachedPrefix handed to the tools path DOES reach the request as a marked block', async () => {
+    const get = stubFetch({
+      content: [{ type: 'text', text: 'ok' }],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    const prefix = `DOCUMENT:\n${'P'.repeat(6000)}`;
+    await anthropic().generateWithTools({
+      model: 'claude-sonnet-4-6',
+      messages: [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: 'Investigate.' },
+      ],
+      tools: [],
+      cachedPrefix: prefix,
+    });
+    const body = JSON.parse(get().init.body as string);
+    expect(body.messages[0].content[0]).toEqual({
+      type: 'text',
+      text: prefix,
+      cache_control: { type: 'ephemeral' },
+    });
+    expect(body.messages[0].content[1]).toEqual({ type: 'text', text: 'Investigate.' });
+    // The automatic breakpoint — tools path only.
+    expect(body.cache_control).toEqual({ type: 'ephemeral' });
+  });
+});
+
+describe('C-3: the agentic cachedPrefix wiring is invisible to oMLX/Ollama', () => {
+  // `supportsPromptCacheControl` is false for `openaiCompatible`, so the
+  // runner folds the prefix back into the first user message before
+  // dispatch. The provider must see ONE string in the legacy
+  // `<prompt>\n\n<prefix>` order and no `cachedPrefix` field — byte-for-byte
+  // what it saw before the agentic split existed.
+
+  const LONG_PREFIX = `DOCUMENT:\n${'P'.repeat(6000)}`;
+
+  function flatProvider(seen: any[]) {
+    const reg = new ProviderRegistry();
+    reg.register(
+      defineProvider({
+        name: 'flat',
+        supportsDocuments: false,
+        // No supportsPromptCacheControl — oMLX and Ollama both land here.
+        async generateText() {
+          throw new Error('not used');
+        },
+        async generateWithTools(opts) {
+          seen.push(JSON.parse(JSON.stringify(opts)));
+          return { message: { content: 'ok', tool_calls: [] } };
+        },
+      }),
+    );
+    return reg;
+  }
+
+  it('folds the prefix into the FIRST user message and strips the field', async () => {
+    const seen: any[] = [];
+    const gen = makeGenerateWithTools(flatProvider(seen), []);
+    await gen({
+      model: 'flat:m',
+      messages: [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: 'Investigate.' },
+      ],
+      tools: [],
+      cachedPrefix: LONG_PREFIX,
+    });
+    expect(seen[0].cachedPrefix).toBeUndefined();
+    expect(seen[0].messages[0]).toEqual({ role: 'system', content: 'sys' });
+    // Legacy ordering: instruction first, shared payload second. Reversing
+    // it would silently change what every oMLX/Ollama agentic gen sees.
+    expect(seen[0].messages[1]).toEqual({
+      role: 'user',
+      content: `Investigate.\n\n${LONG_PREFIX}`,
+    });
+  });
+
+  it('folds into the first user message even mid-transcript, never into a tool result', async () => {
+    const seen: any[] = [];
+    const gen = makeGenerateWithTools(flatProvider(seen), []);
+    await gen({
+      model: 'flat:m',
+      messages: [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: 'Investigate.' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [{ id: 't1', type: 'function', function: { name: 'probe', arguments: '{}' } }],
+        },
+        { role: 'tool', content: '{"ok":true}', tool_call_id: 't1' },
+      ],
+      tools: [],
+      cachedPrefix: LONG_PREFIX,
+    });
+    expect(seen[0].messages[1].content).toBe(`Investigate.\n\n${LONG_PREFIX}`);
+    // Later turns untouched.
+    expect(seen[0].messages[3]).toEqual({
+      role: 'tool',
+      content: '{"ok":true}',
+      tool_call_id: 't1',
+    });
+  });
+
+  it('does not mutate the caller\'s messages array — the loop reuses it across turns', async () => {
+    const seen: any[] = [];
+    const gen = makeGenerateWithTools(flatProvider(seen), []);
+    const messages: any[] = [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'Investigate.' },
+    ];
+    await gen({ model: 'flat:m', messages, tools: [], cachedPrefix: LONG_PREFIX });
+    await gen({ model: 'flat:m', messages, tools: [], cachedPrefix: LONG_PREFIX });
+    // If the fold wrote through, turn 2 would carry the prefix TWICE.
+    expect(messages[1].content).toBe('Investigate.');
+    expect(seen[0].messages[1].content).toBe(seen[1].messages[1].content);
+  });
+
+  it('no cachedPrefix: messages pass through as the very same array', async () => {
+    const seen: any[] = [];
+    const gen = makeGenerateWithTools(flatProvider(seen), []);
+    const messages: any[] = [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'Investigate.' },
+    ];
+    await gen({ model: 'flat:m', messages, tools: [] });
+    expect(seen[0].cachedPrefix).toBeUndefined();
+    expect(seen[0].messages).toEqual(messages);
+  });
+
+  it('a cache-aware provider on the tools path receives the split unchanged', async () => {
+    const seen: any[] = [];
+    const reg = new ProviderRegistry();
+    reg.register(
+      defineProvider({
+        name: 'cached',
+        supportsDocuments: false,
+        supportsPromptCacheControl: true,
+        async generateText() {
+          throw new Error('not used');
+        },
+        async generateWithTools(opts) {
+          seen.push(JSON.parse(JSON.stringify(opts)));
+          return { message: { content: 'ok', tool_calls: [] } };
+        },
+      }),
+    );
+    const gen = makeGenerateWithTools(reg, []);
+    await gen({
+      model: 'cached:m',
+      messages: [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: 'Investigate.' },
+      ],
+      tools: [],
+      cachedPrefix: LONG_PREFIX,
+    });
+    expect(seen[0].cachedPrefix).toBe(LONG_PREFIX);
+    expect(seen[0].messages[1].content).toBe('Investigate.');
   });
 });

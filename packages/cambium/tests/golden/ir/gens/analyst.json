@@ -11,6 +11,11 @@
       "temperature": 0.2,
       "max_tokens": 1200
     },
+    "repairModel": {
+      "id": "omlx:nvidia/nemotron-3-nano-4b",
+      "max_tokens": 16000,
+      "temperature": 0
+    },
     "system": "You are a professional analyst specializing in infrastructure reliability and incident response. You extract structured data from documents with precision, preserving all measurements, timestamps, and factual claims.",
     "mode": null,
     "policies": {

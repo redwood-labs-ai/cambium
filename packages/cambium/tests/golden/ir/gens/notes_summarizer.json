@@ -1,0 +1,116 @@
+{
+  "summarize": {
+    "version": "0.2",
+    "entry": {
+      "class": "NotesSummarizer",
+      "method": "summarize",
+      "source": "packages/cambium/app/gens/notes_summarizer.cmb.rb"
+    },
+    "model": {
+      "id": "omlx:orinth-1.0-35b@q8_0",
+      "temperature": 0.2,
+      "max_tokens": 1200
+    },
+    "repairModel": {
+      "id": "omlx:nvidia/nemotron-3-nano-4b",
+      "max_tokens": 16000,
+      "temperature": 0
+    },
+    "system": "You summarize release notes for engineers deciding whether to upgrade.\n\n## What you receive\n\nOne Markdown document: the release notes for a single version. It is\nthe only source you may use. You have no other knowledge of this\nrelease, and nothing outside the document is admissible.\n\n## What to produce\n\n- `summary` — two or three sentences on what this release is about.\n  Lead with the change that most affects whether someone should\n  upgrade, not with the version number.\n- `highlights` — the changes worth a reader's attention, most\n  significant first. Skip anything an operator would not act on.\n- Every highlight carries at least one citation.\n\n## Citations\n\nA citation is **verbatim text from the document**. Quote the sentence or\nfragment that supports the highlight — enough words to be unambiguous,\nnot the whole section.\n\nQuote what the document *says*, in the words it says it. You may quote\nthe visible text of a formatted span rather than its markup: for\n`Revenue grew **12%**`, both `Revenue grew 12%` and\n`Revenue grew **12%**` are acceptable. Do not paraphrase, do not merge\ntwo sentences into one quote, and do not repair grammar.\n\nIf you cannot support a highlight with a quote, drop the highlight. An\nuncited claim is worse than a shorter summary.",
+    "mode": null,
+    "policies": {
+      "tools_allowed": [],
+      "correctors": [],
+      "constraints": {},
+      "grounding": {
+        "source": "notes",
+        "require_citations": true,
+        "from": "../../examples/fixtures/release_notes.md",
+        "format": "markdown"
+      },
+      "security": null,
+      "budget": {
+        "per_run": {
+          "max_tokens": 2000
+        }
+      },
+      "memory": [],
+      "memory_pools": {},
+      "memory_write_via": null,
+      "log": [],
+      "log_profiles": [],
+      "schedules": []
+    },
+    "reads_trace_of": null,
+    "returnSchema": {
+      "type": "object",
+      "properties": {
+        "summary": {
+          "type": "string",
+          "description": "Two or three sentences covering the release as a whole."
+        },
+        "highlights": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string",
+                "description": "A short label for this change."
+              },
+              "detail": {
+                "type": "string",
+                "description": "What changed, in the reader's terms."
+              },
+              "citations": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "quote": {
+                      "type": "string",
+                      "description": "Verbatim text from the notes supporting this highlight."
+                    }
+                  },
+                  "required": [
+                    "quote"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "title",
+              "detail",
+              "citations"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "summary",
+        "highlights"
+      ],
+      "additionalProperties": false,
+      "$id": "NotesSummarizerOutput"
+    },
+    "context": {
+      "notes": "# Cambium 0.9.4 — release notes\n\n_Released 2026-08-28. See the [upgrade guide](https://example.invalid/docs/upgrade) before deploying._\n\n## Highlights\n\n- **Repair is 3x cheaper.** Structural repair now runs on the workspace\n  `repair` model slot instead of the gen's model, cutting the median\n  repair pass from 1,900 to 620 tokens.\n- Grounded gens keep their provenance: a repair that *deletes* the\n  citations it was asked to fix now fails the run instead of reporting\n  success with nothing checked.\n- `cambium inspect` opens a local, read-only trace viewer over `runs/`.\n\n## Fixed\n\n| Area | Symptom | Resolution |\n|------|---------|------------|\n| serve | catalog boot took 40s on large workspaces | one Ruby invocation per gen |\n| memory | a changed embed model silently reused an old bucket | fails the run |\n| budget | `per_tool` caps were checked after dispatch | checked before |\n\n## Upgrading\n\nRun `cambium compile --write` once after upgrading so generated\ncontracts match the new inline schema shape. Nothing else is required —\nthe IR is byte-identical for every gen that does not adopt a new\nprimitive.\n\n> **Note:** workspaces pinning `cambium-runner` below 0.9.0 should\n> upgrade both packages together. The runner and the CLI ship as a pair.\n\n## Known issues\n\n1. `--mock` cannot produce output for a novel inline schema (#205).\n2. Firecracker network-enabled runs are cold-boot-only and not\n   concurrency-safe.\n\nFull changelog: [CHANGELOG.md](https://example.invalid/CHANGELOG.md)\n"
+    },
+    "enrichments": [],
+    "signals": [],
+    "triggers": [],
+    "steps": [
+      {
+        "id": "generate_1",
+        "type": "Generate",
+        "prompt": "summarize the release notes and cite each highlight",
+        "with": {
+          "context": ""
+        },
+        "returns": null
+      }
+    ]
+  }
+}

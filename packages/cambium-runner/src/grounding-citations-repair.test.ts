@@ -5,6 +5,10 @@ import { runGen } from './runner.js';
 // and emits GroundingCheckAfterRepair. This branch shipped with no committed
 // coverage; this file pins it. It is the citations analogue of the
 // after-repair tests in grounding-field-values.test.ts.
+//
+// RED-175 re-pointed the expectations: this shape — repair removes every
+// citation, re-verify finds nothing to check — is the silent-downgrade hole the
+// ticket was about. It is now pinned as a FAILURE, not as a pass.
 
 const PermissiveSchema: any = {
   $id: 'Extract',
@@ -61,16 +65,20 @@ describe('grounded_in require_citations — citation repair re-verify (RED-398)'
     const after = result.trace.steps.find((s: any) => s.type === 'GroundingCheckAfterRepair');
     expect(after).toBeDefined();
     // The deterministic mock repair emits an output with no `citations` field,
-    // so the re-verify has nothing to check and reports clean (totalChecked: 0).
-    // This pins that the branch fires; on this clean path the ok/meta values
-    // alone cannot distinguish the citationResult computation from its
-    // defensive fallback (no-error-issues), so we also pin that citationResult
-    // survived the corrector→handleCorrect meta plumbing — RED-323 broke
-    // exactly that once, silently. The ok:false-after-repair computation is
-    // covered by the structurally identical field-values test (the mock can't
-    // re-emit a fabricated citation).
-    expect(after.ok).toBe(true);
+    // so the re-verify has nothing left to check (totalChecked: 0). That is the
+    // deletion shape, so it must read as a failure — the gen asked for citations
+    // and the output lost them. Pre-RED-175 this same block pinned `ok: true`,
+    // i.e. it codified the hole.
+    expect(after.meta.citations_before).toBe(1);
+    expect(after.meta.citations_after).toBe(0);
+    expect(after.meta.deleted_by_repair).toBe(true);
     expect(after.meta.totalChecked).toBe(0);
+    // Not clean at the step, and not clean at the API boundary either.
+    expect(after.ok).toBe(false);
+    expect(result.ok).toBe(false);
+    expect((result.trace as any).final.ok).toBe(false);
+    // And the corrector→handleCorrect meta plumbing still holds (RED-323 broke
+    // it once, silently) — deletion is detected *because* citationResult travels.
     expect(after.meta.citationResult).toBeDefined();
   });
 });

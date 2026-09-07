@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, basename, dirname, resolve } from 'node:path';
-import { detectWorkspaceShape } from './workspace-shape.mjs';
+import { parse as parseToml } from 'smol-toml';
+import { detectWorkspaceShape, resolveMembers } from './workspace-shape.mjs';
 
 // Engine-mode sentinel — RED-246 / RED-220. A directory marked with
 // this file is a self-contained engine folder; lint scans siblings
@@ -42,40 +43,21 @@ function fileExists(path, label) {
   return false;
 }
 
-// ── Parse TOML (minimal — handles our Genfile format) ─────────────────
-
-function parseToml(text) {
-  const result = {};
-  let currentSection = result;
-  let currentKey = '';
-
-  for (const raw of text.split('\n')) {
-    const line = raw.trim();
-    if (!line || line.startsWith('#')) continue;
-
-    const sectionMatch = line.match(/^\[([^\]]+)\]$/);
-    if (sectionMatch) {
-      const parts = sectionMatch[1].split('.');
-      currentSection = result;
-      for (const p of parts) {
-        if (!currentSection[p]) currentSection[p] = {};
-        currentSection = currentSection[p];
-      }
-      continue;
-    }
-
-    const kvMatch = line.match(/^(\w+)\s*=\s*(.+)$/);
-    if (kvMatch) {
-      let val = kvMatch[2].trim();
-      if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
-      else if (val.startsWith('[')) {
-        // Simple array parse
-        val = val.slice(1, -1).split(',').map(s => s.trim().replace(/^"|"$/g, '')).filter(Boolean);
-      }
-      currentSection[kvMatch[1]] = val;
-    }
-  }
-  return result;
+// Whole-line comment strip for the DSL regex scans below (issue #158).
+// `.cmb.rb` files are Ruby, and the scaffolders' own worked examples —
+// `# uses :web_search, :calculator`, `# ... use \`returns :SchemaName\`
+// ...` — sit right next to the live declarations these regexes match
+// against; an unanchored `uses\s+([^\n]+)` or `returns\s+:?([A-Z]\w*)`
+// matches inside a comment exactly as well as in code. Drop any line
+// whose first non-whitespace character is `#` before scanning. A real
+// tokenizer is weight lint doesn't need, and stripping trailing `code #
+// comment` risks mangling a `#` inside a string literal for a case
+// nobody has reported — whole-line only.
+function stripCommentLines(content) {
+  return content
+    .split('\n')
+    .map((line) => (line.trim().startsWith('#') ? '' : line))
+    .join('\n');
 }
 
 // ── Lint a package ────────────────────────────────────────────────────
@@ -91,7 +73,21 @@ function lintPackage(pkgDir) {
     return;
   }
 
-  const genfile = parseToml(readFileSync(genfilePath, 'utf8'));
+  // smol-toml throws on any spec violation (the hand-rolled parser it
+  // replaced was total and never did) — a malformed member Genfile.toml
+  // must not crash the whole run and skip every later member (AUD-217-01,
+  // the shape-5 class this issue exists to eliminate).
+  let genfile;
+  try {
+    genfile = parseToml(readFileSync(genfilePath, 'utf8'));
+  } catch (e) {
+    // smol-toml's message spans multiple lines (a code-frame under the
+    // headline). Phase B's Recorder assumes one line per check
+    // (AUD-217-10) — report only the headline here.
+    const headline = String(e?.message ?? e).split('\n')[0];
+    fail(`Genfile.toml — not valid TOML: ${headline}`);
+    return;
+  }
 
   // 2. Package metadata
   if (genfile.package?.name) pass(`package.name = "${genfile.package.name}"`);
@@ -101,9 +97,18 @@ function lintPackage(pkgDir) {
   else fail('package.version missing');
 
   // 3. Contracts
-  if (genfile.types?.contracts) {
-    const contracts = Array.isArray(genfile.types.contracts) ? genfile.types.contracts : [genfile.types.contracts];
-    for (const c of contracts) {
+  const declaredContracts = Array.isArray(genfile.types?.contracts)
+    ? genfile.types.contracts
+    : genfile.types?.contracts ? [genfile.types.contracts] : [];
+  if (declaredContracts.length > 0) {
+    for (const c of declaredContracts) {
+      // smol-toml returns native TOML types; the hand-rolled parser it
+      // replaced stringified every value, so `join(pkgDir, c)` never saw
+      // a non-string before (AUD-217-04).
+      if (typeof c !== 'string') {
+        fail(`types.contracts: expected a string path, got ${typeof c}`);
+        continue;
+      }
       fileExists(join(pkgDir, c), `contracts: ${c}`);
     }
   } else {
@@ -111,8 +116,14 @@ function lintPackage(pkgDir) {
   }
 
   // 4. Exported gens
-  if (genfile.exports?.gens) {
+  if (genfile.exports?.gens && Object.keys(genfile.exports.gens).length > 0) {
     for (const [name, path] of Object.entries(genfile.exports.gens)) {
+      // See the types.contracts guard above (AUD-217-04) — smol-toml
+      // returns native types, so a non-string entry must not reach join().
+      if (typeof path !== 'string') {
+        fail(`exports.gens.${name}: expected a string path, got ${typeof path}`);
+        continue;
+      }
       if (fileExists(join(pkgDir, path), `exports.gens.${name}: ${path}`)) {
         // Check that the .cmb.rb file has a matching system prompt
         const content = readFileSync(join(pkgDir, path), 'utf8');
@@ -129,8 +140,13 @@ function lintPackage(pkgDir) {
   }
 
   // 5. Tests
-  if (genfile.tests) {
+  if (genfile.tests && Object.keys(genfile.tests).length > 0) {
     for (const [name, path] of Object.entries(genfile.tests)) {
+      // See the types.contracts guard above (AUD-217-04).
+      if (typeof path !== 'string') {
+        fail(`tests.${name}: expected a string path, got ${typeof path}`);
+        continue;
+      }
       fileExists(join(pkgDir, path), `tests.${name}: ${path}`);
     }
   } else {
@@ -332,6 +348,11 @@ function lintPackage(pkgDir) {
     const allGens = readdirSync(gensDir).filter(f => f.endsWith('.cmb.rb'));
     for (const f of allGens) {
       const content = readFileSync(join(gensDir, f), 'utf8');
+      // Comment-stripped view for the regex scans below (issue #158):
+      // the scaffolders' own commented-out examples (`# uses :…`,
+      // `# ... returns :SchemaName ...`) sit right next to the live
+      // declarations and must not be matched as if they were live.
+      const scan = stripCommentLines(content);
 
       // RED-210: `returns <Schema>` must resolve to an export in
       // contracts.ts. Upgrade from warn to fail — a typo here crashes
@@ -345,13 +366,20 @@ function lintPackage(pkgDir) {
       // inline into the IR and never consults contracts.ts, and
       // lowercase prose in comments ("…returns a structured…") must not
       // trip the check (issues #167 / #160).
-      const returnsMatch = content.match(/returns\s+:?([A-Z]\w*)/);
+      const returnsMatch = scan.match(/^\s*returns\s+:?([A-Z]\w*)/m);
       if (returnsMatch && genfile.types?.contracts) {
         const schemaName = returnsMatch[1];
         const contracts = Array.isArray(genfile.types.contracts) ? genfile.types.contracts : [genfile.types.contracts];
         const availableExports = new Set();
         let foundIn = null;
         for (const c of contracts) {
+          // See the types.contracts guard in section 3 above (AUD-217-04)
+          // — this is a second, independent consumption site for the
+          // same array and needs the same guard (AUD-217-09).
+          if (typeof c !== 'string') {
+            fail(`types.contracts: expected a string path, got ${typeof c}`);
+            continue;
+          }
           const contractsContent = readFileSync(join(pkgDir, c), 'utf8');
           const exportRe = /^\s*export\s+const\s+([A-Z][A-Za-z0-9_]*)\b/gm;
           for (const m of contractsContent.matchAll(exportRe)) availableExports.add(m[1]);
@@ -374,7 +402,7 @@ function lintPackage(pkgDir) {
 // runtime registry from `packages/cambium-runner/src/builtin-tools/` and
 // don't need a local definition. Don't warn on those — they're legitimate
 // refs in any app gen (issue #168 / RED-218).
-      const usesMatches = [...content.matchAll(/uses\s+([^\n]+)/g)];
+      const usesMatches = [...scan.matchAll(/uses\s+([^\n]+)/g)];
       for (const m of usesMatches) {
         const tools = m[1].match(/:(\w+)/g);
         if (tools) {
@@ -425,8 +453,22 @@ function lintPackage(pkgDir) {
 
       // 8c. 1:1 stance — exactly one `def`. Multiple methods would also
       // fail at compile time with a clearer message, but a lint heads-up
-      // is more user-friendly.
-      const defLines = [...content.matchAll(/^\s*def\s+([a-z_][a-z0-9_]*)/gm)];
+      // is more user-friendly. Stop counting once a `private` or
+      // `protected` keyword is seen — later helpers are not public
+      // methods (AUD-217-06 widens this from `private`-only). Strip
+      // `=begin`/`=end` block comments first: a documented example
+      // containing a bare `private` line must not truncate the real
+      // scan and silently drop every later `def`.
+      const noBlockComments = content.replace(/^=begin\b[\s\S]*?^=end\b.*$/gm, '');
+      // The inline `private def name` / `protected def name` form needs
+      // no separate handling here: unlike the bare keyword, it marks
+      // only that one method and doesn't change visibility for what
+      // follows, and the `def`-matching regex below already only matches
+      // a `def` that starts the line, so the modified line is excluded
+      // without truncating anything after it.
+      const privateIdx = noBlockComments.search(/^\s*(private|protected)\s*$/m);
+      const publicScan = privateIdx === -1 ? noBlockComments : noBlockComments.slice(0, privateIdx);
+      const defLines = [...publicScan.matchAll(/^\s*def\s+([a-z_][a-z0-9_]*)/gm)];
       if (defLines.length === 0) {
         fail(
           `app/pipelines/${f}: declares no entry method. ` +
@@ -449,6 +491,13 @@ function lintPackage(pkgDir) {
         const contracts = Array.isArray(genfile.types.contracts) ? genfile.types.contracts : [genfile.types.contracts];
         const availableExports = new Set();
         for (const c of contracts) {
+          // See the types.contracts guard in section 3 above (AUD-217-04)
+          // — a fifth independent consumption site for the same array
+          // needing the same guard (AUD-217-09).
+          if (typeof c !== 'string') {
+            fail(`types.contracts: expected a string path, got ${typeof c}`);
+            continue;
+          }
           const cc = readFileSync(join(pkgDir, c), 'utf8');
           const exportRe = /^\s*export\s+const\s+([A-Z][A-Za-z0-9_]*)\b/gm;
           for (const m of cc.matchAll(exportRe)) availableExports.add(m[1]);
@@ -524,7 +573,8 @@ function lintEngine(engineDir) {
   //    `returns <Schema>` against these below.
   const availableSchemas = new Set();
   const schemasPath = join(engineDir, 'schemas.ts');
-  if (existsSync(schemasPath)) {
+  const hasSchemasFile = existsSync(schemasPath);
+  if (hasSchemasFile) {
     pass('schemas.ts');
     const content = readFileSync(schemasPath, 'utf8');
     for (const m of content.matchAll(/^\s*export\s+const\s+([A-Z][A-Za-z0-9_]*)\b/gm)) {
@@ -676,23 +726,38 @@ function lintEngine(engineDir) {
   }
   for (const f of genFiles) {
     const content = readFileSync(join(engineDir, f), 'utf8');
+    // Comment-stripped view for the regex scans below (issue #158): the
+    // engine scaffold's own `# uses :web_search, :calculator` / `#
+    // corrects :math` examples must not be matched as if they were live.
+    const scan = stripCommentLines(content);
 
     // returns <Schema>
-    const returnsMatch = content.match(/returns\s+([A-Z]\w*)/);
-    if (returnsMatch && availableSchemas.size > 0) {
+    const returnsMatch = scan.match(/^\s*returns\s+([A-Z]\w*)/m);
+    if (returnsMatch) {
       const schemaName = returnsMatch[1];
-      if (availableSchemas.has(schemaName)) {
-        pass(`${f}: returns ${schemaName} (found in schemas.ts)`);
-      } else {
-        const sorted = [...availableSchemas].sort();
-        const suggestion = sorted.find(s => s.toLowerCase() === schemaName.toLowerCase());
-        const hint = suggestion ? ` Did you mean '${suggestion}'?` : '';
-        fail(`${f}: returns ${schemaName} — not exported from schemas.ts.${hint}`);
+      if (availableSchemas.size > 0) {
+        if (availableSchemas.has(schemaName)) {
+          pass(`${f}: returns ${schemaName} (found in schemas.ts)`);
+        } else {
+          const sorted = [...availableSchemas].sort();
+          const suggestion = sorted.find(s => s.toLowerCase() === schemaName.toLowerCase());
+          const hint = suggestion ? ` Did you mean '${suggestion}'?` : '';
+          fail(`${f}: returns ${schemaName} — not exported from schemas.ts.${hint}`);
+        }
+      } else if (hasSchemasFile) {
+        // schemas.ts exists but the `export const` scan (issue #210's
+        // territory, not this fix's) recognized no top-level exports —
+        // e.g. `const X = ...; export { X }`. The schema may genuinely be
+        // exported; lint just can't see it, so it must not claim a miss
+        // (that misdirection is exactly what the audit flagged about the
+        // compiler's own error message — issue #211).
+        warn(`${f}: returns ${schemaName} — schemas.ts has no \`export const\` declarations lint recognizes, could not validate this reference`);
       }
+      // else: no schemas.ts at all — already warned above (line ~556).
     }
 
     // system :name → <name>.system.md sibling
-    const systemMatch = content.match(/^\s*system\s+:(\w+)/m);
+    const systemMatch = scan.match(/^\s*system\s+:(\w+)/m);
     if (systemMatch) {
       const sysName = systemMatch[1];
       if (existsSync(join(engineDir, `${sysName}.system.md`))) {
@@ -703,7 +768,7 @@ function lintEngine(engineDir) {
     }
 
     // uses :tool — warn if no sibling .tool.json (framework builtins OK).
-    for (const m of content.matchAll(/uses\s+([^\n]+)/g)) {
+    for (const m of scan.matchAll(/uses\s+([^\n]+)/g)) {
       const tools = m[1].match(/:(\w+)/g) ?? [];
       for (const t of tools) {
         const toolName = t.slice(1);
@@ -714,7 +779,7 @@ function lintEngine(engineDir) {
     }
 
     // corrects :name — warn if no sibling .corrector.ts (framework builtins OK).
-    for (const m of content.matchAll(/corrects\s+([^\n]+)/g)) {
+    for (const m of scan.matchAll(/corrects\s+([^\n]+)/g)) {
       const correctors = m[1].match(/:(\w+)/g) ?? [];
       for (const c of correctors) {
         const cname = c.slice(1);
@@ -728,7 +793,7 @@ function lintEngine(engineDir) {
     // (stdout/http_json/datadog), a profile file, or an app log-plugin
     // (app/logs/<name>.log.ts). Warn on unknown names; don't fail
     // because the runtime registry is authoritative.
-    for (const m of content.matchAll(/^\s*log\s+:(\w+)/gm)) {
+    for (const m of scan.matchAll(/^\s*log\s+:(\w+)/gm)) {
       const logName = m[1];
       if (
         !BUILTIN_LOG_DESTINATIONS.has(logName) &&
@@ -747,15 +812,15 @@ function lintEngine(engineDir) {
     // one cron on the same gen. Purely lint-level — the Ruby compiler
     // is authoritative.
     const CRON_NAMED_VOCAB = new Set(['daily', 'hourly', 'weekly', 'weekdays', 'every_minute']);
-    const cronNamedDecls = [...content.matchAll(/^\s*cron\s+:(\w+)/gm)];
+    const cronNamedDecls = [...scan.matchAll(/^\s*cron\s+:(\w+)/gm)];
     for (const m of cronNamedDecls) {
       const vocab = m[1];
       if (!CRON_NAMED_VOCAB.has(vocab)) {
         warn(`${f}: cron :${vocab} — not in the framework named vocabulary (${[...CRON_NAMED_VOCAB].map(v => ':' + v).join(', ')}). Use a raw crontab string instead.`);
       }
     }
-    const hasCron = cronNamedDecls.length > 0 || /^\s*cron\s+"/m.test(content);
-    const scheduleScoped = /memory\s+:[a-z][a-z0-9_]*[^\n]*scope:\s*:schedule\b/m.test(content);
+    const hasCron = cronNamedDecls.length > 0 || /^\s*cron\s+"/m.test(scan);
+    const scheduleScoped = /memory\s+:[a-z][a-z0-9_]*[^\n]*scope:\s*:schedule\b/m.test(scan);
     if (scheduleScoped && !hasCron) {
       fail(`${f}: memory scope: :schedule declared but no cron found — RED-305 requires at least one cron declaration on the gen.`);
     } else if (scheduleScoped && hasCron) {
@@ -763,7 +828,7 @@ function lintEngine(engineDir) {
     }
 
     // security :pack → sibling <pack>.policy.rb.
-    const secMatch = content.match(/^\s*security\s+:(\w+)\s*$/m);
+    const secMatch = scan.match(/^\s*security\s+:(\w+)\s*$/m);
     if (secMatch) {
       const pack = secMatch[1];
       if (!knownPolicies.has(pack)) {
@@ -774,7 +839,7 @@ function lintEngine(engineDir) {
     }
 
     // budget :pack — same.
-    const budgetMatch = content.match(/^\s*budget\s+:(\w+)\s*$/m);
+    const budgetMatch = scan.match(/^\s*budget\s+:(\w+)\s*$/m);
     if (budgetMatch) {
       const pack = budgetMatch[1];
       if (!knownPolicies.has(pack)) {
@@ -783,17 +848,17 @@ function lintEngine(engineDir) {
     }
 
     // memory :x, scope: :pool_name → sibling <pool_name>.pool.rb.
-    for (const m of content.matchAll(/scope:\s*:(\w+)/g)) {
+    for (const m of scan.matchAll(/scope:\s*:(\w+)/g)) {
       const pool = m[1];
       // Skip the reserved scope names — those don't map to pools.
-      if (pool === 'session' || pool === 'global') continue;
+      if (pool === 'session' || pool === 'global' || pool === 'schedule' || pool === 'pipeline_run') continue;
       if (!knownPools.has(pool)) {
         fail(`${f}: memory scope :${pool} — no sibling ${pool}.pool.rb`);
       }
     }
 
     // action :name inside trigger blocks → sibling .action.json.
-    for (const m of content.matchAll(/\baction\s+:(\w+)/g)) {
+    for (const m of scan.matchAll(/\baction\s+:(\w+)/g)) {
       const a = m[1];
       if (!knownActions.has(a)) {
         warn(`${f}: action :${a} — no sibling ${a}.action.json (ok if framework builtin)`);
@@ -849,27 +914,52 @@ export function runLint() {
       // packages/cambium/ subdir path, without a Genfile at the root.
       lintPackage(shape.appPkgRoot);
     } else {
-      const ws = parseToml(readFileSync(rootGenfile, 'utf8'));
+      // The root workspace Genfile is already validated by
+      // classifyGenfile (called inside detectWorkspaceShape above), so
+      // this parse is not reachable with malformed input today — guard
+      // it anyway rather than rely on an ordering nobody wrote down
+      // (AUD-217-01).
+      let ws;
+      try {
+        ws = parseToml(readFileSync(rootGenfile, 'utf8'));
+      } catch (e) {
+        console.error(`${rootGenfile} — invalid TOML: ${e?.message ?? String(e)}`);
+        process.exit(2);
+      }
       const members = ws.workspace?.members;
       if (!members) {
         console.error(`${rootGenfile} has [workspace] without members.`);
         process.exit(2);
       }
-      const patterns = Array.isArray(members) ? members : [members];
-      for (const pattern of patterns) {
-        const abs = join(shape.workspaceRoot, pattern);
-        if (pattern.includes('*')) {
-          const dir = abs.replace('/*', '');
-          if (!existsSync(dir)) continue;
-          for (const entry of readdirSync(dir)) {
-            const pkgDir = join(dir, entry);
-            if (existsSync(join(pkgDir, 'Genfile.toml'))) {
-              lintPackage(pkgDir);
-            }
-          }
-        } else {
-          lintPackage(abs);
+      const { accepted, missingGenfile, rejected } = resolveMembers(shape.workspaceRoot, members);
+      // Report rejected members first, under their own heading — not
+      // after the member walk, where they used to render as if they were
+      // part of whichever package's block happened to print last
+      // (AUD-217-10). A rejected pattern is always something lint
+      // genuinely could not check: either a literal path the author
+      // named specifically (DEC-011's own test), or — since AUD-217-08 —
+      // a glob whose parent directory couldn't be scanned, which is not
+      // the same as a glob that legitimately matched nothing. Name it,
+      // don't drop it (AUD-217-02): the alternative — routing rejected
+      // patterns back through lintPackage — would re-join the escaping
+      // path and read a Genfile outside the workspace, which is the
+      // exact defect CS-32 filed.
+      if (rejected.length > 0) {
+        console.log(`\n\x1b[1mWorkspace: ${basename(shape.workspaceRoot)}\x1b[0m (${shape.workspaceRoot})\n`);
+        for (const { pattern, reason } of rejected) {
+          fail(`members entry ${JSON.stringify(pattern)} — ${reason}; not linted`);
         }
+      }
+      for (const pkgDir of accepted) {
+        lintPackage(pkgDir);
+      }
+      // A literal `members` entry names a path the author declared
+      // specifically; if it isn't a package, that's a reportable defect
+      // (DEC-011) — lintPackage's own Genfile check produces the loud
+      // fail. A glob sweeping over a non-package directory is not: it
+      // legitimately picks up non-package siblings, so those stay silent.
+      for (const { dir, fromGlob } of missingGenfile) {
+        if (!fromGlob) lintPackage(dir);
       }
     }
   }

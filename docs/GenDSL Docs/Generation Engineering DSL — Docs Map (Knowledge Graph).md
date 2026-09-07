@@ -14,6 +14,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[P - grounded_in]]
 - [[P - uses (tools)]]
 - [[P - corrects (correctors)]]
+- [[P - repair (model slot)]] — workspace-declared cheaper model for repair passes (`app/config/models.rb`); structural repair only, `max_tokens` floored at the gen's ceiling (RED-176)
 - [[P - constrain]]
 - [[P - Compound Generation]]
 - [[P - enrich]]
@@ -28,10 +29,10 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[C - IR (Intermediate Representation)]]
 - [[C - Runner (TS runtime)]]
 - [[C - Trace (observability)]]
-- [[C - Repair Loop]]
+- [[C - Repair Loop]] — schema / consensus / corrector / grounding repair loops; what repair sees per failure class and the deletion guard that fails a repair which deletes provenance (RED-175), the `repair` model slot and its floor rule (RED-176)
 - [[C - Signals, State, and Triggers]]
 - [[C - Schema Description (auto-generated)]]
-- [[C - Serve Mode]] — long-lived HTTP server hosting every gen in a workspace (RED-360); locked v1 wire format, closed `error.kind` enum, `--max-inflight` / `--run-timeout` / `--shutdown-timeout`
+- [[C - Serve Mode]] — long-lived HTTP server hosting every gen in a workspace (RED-360); locked v1 wire format, closed `error.kind` enum, `--max-inflight` / `--run-timeout` / `--shutdown-timeout`; `--precompiled` / `--ir-dir` boot with no Ruby on PATH (#195)
 - [[P - cambium replay]] — re-run a prior run's post-Generate tail from its candidate output, skipping the expensive Generate; trace-as-savepoint, `parent_run_id` lineage, `--edit` / `--from-step` (gen, RED-312); `--from-op` pipeline-operator resume reusing recorded outputs (RED-385 Phase B)
 - [[P - Golden Tests (RED-140)]] — field-level snapshot comparison with tolerances and normalizers (dates, numbers, citations, strings); deterministic via `--mock`/replay so regression runs never burn tokens; `goldenTest` exported from the runner package; `cambium new agent` scaffolds the pattern automatically
 
@@ -62,6 +63,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[N - Prior-Run State Accessors (RED-241)]] — settled as "no new primitive": existing memory + retro agents + `scope: :schedule` cover every forcing case; note documents the patterns and closes the ticket
 - [[N - Orchestration Layer]] — design note (RED-374): `Pipeline` primitive for multi-gen composition (sequential `step`, parallel `fan_out`, deterministic `branch_on :signal`) with rollup IR / trace / budget; load-bearing invariant is zero inference at the orchestration layer
 - [[N - Visual Trace Renderer]] — shipped read-only v1 (RED-313): `cambium inspect` local browser viewer over `runs/`; pure `projectTrace` (trace→graph), `node:http` API + SSE, vanilla SVG execution graph; zero deps, localhost-only. Replay-from-node is RED-406.
+- [[N - Precompiled IR Distribution (#195)]] — shipped: `cambium serve --precompiled`/`--ir-dir` and `cambium run --ir` execute compiled IR with no Ruby on the target machine; producer↔consumer symmetry, the shipped-workspace layout contract, the closed-IR rule (no pipeline/`enrich`/retro-agent site), and anchoring a shipped artifact on its own location instead of `entry.source`.
 
 ---
 

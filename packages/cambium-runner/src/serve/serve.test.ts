@@ -12,7 +12,8 @@
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseBind } from './bind.js';
@@ -22,6 +23,12 @@ import {
   type RunGenFromIrFn,
   type RunServeHandle,
 } from './serve.js';
+
+// #195: real `ruby compile.rb` path for producing precompiled artifacts
+// the same way `cambium compile --write` / `--out-dir` would — bare
+// mode (no --method), stdout written verbatim to the artifact file.
+const REPO_ROOT = process.cwd();
+const RUBY_COMPILE_RB = join(REPO_ROOT, 'ruby', 'cambium', 'compile.rb');
 
 // Fixture gen + permissive contracts. The runner imports contracts.ts
 // at run time; we keep it as a plain object literal (no @sinclair/typebox
@@ -535,13 +542,16 @@ describe('classifyThrownError (RED-360)', () => {
   });
 });
 
-// Schema that the mock provider's `{summary, metrics, key_facts}` payload
-// won't satisfy (mock has none of these required fields). Used to exercise
-// the validation_failed path end-to-end. We re-use the `AnalysisReport`
-// schema name because compile.rb's compile-time schema check searches
-// for the symbol in the in-tree contracts.ts (cwd-relative fallback),
-// where AnalysisReport exists. The runtime loads our LOCAL strict
-// version via [types].contracts in the tmp Genfile.
+// Schema the mock generator can NEVER satisfy (A-001a, #205): `name` is
+// `{ not: {} }`, the Draft-07 always-false subschema — no value passes it,
+// so this is immune to any future improvement in the mock's shape-guessing
+// (the schema-derived mock would otherwise happily synthesize `{ name:
+// 'mock name', role: 'mock role' }` and validate). Used to exercise the
+// validation_failed path end-to-end. We re-use the `AnalysisReport` schema
+// name because compile.rb's compile-time schema check searches for the
+// symbol in the in-tree contracts.ts (cwd-relative fallback), where
+// AnalysisReport exists. The runtime loads our LOCAL strict version via
+// [types].contracts in the tmp Genfile.
 const STRICT_FIXTURE_GEN = `
 class StrictGen < GenModel
   model "ollama:test"
@@ -563,7 +573,7 @@ export const AnalysisReport = {
   type: 'object',
   required: ['name', 'role'],
   properties: {
-    name: { type: 'string' },
+    name: { not: {} },
     role: { type: 'string' },
   },
   additionalProperties: false,
@@ -1325,5 +1335,479 @@ describe('runServe — boot failure (RED-360)', () => {
     });
     await expect(handle.ready).rejects.toThrow(/file does not exist/);
     await handle.close();
+  });
+});
+
+// ── #195: precompiled boot (--precompiled / --ir-dir) ───────────────────
+
+describe('runServe — precompiled boot (#195)', () => {
+  function setupWorkspace(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'cambium-serve-precompiled-'));
+    mkdirSync(join(dir, 'app/gens'), { recursive: true });
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'app/gens/test_gen.cmb.rb'), FIXTURE_GEN);
+    writeFileSync(join(dir, 'src/contracts.ts'), FIXTURE_CONTRACTS);
+    writeFileSync(
+      join(dir, 'Genfile.toml'),
+      `[package]
+name = "serve-precompiled"
+
+[types]
+contracts = ["src/contracts.ts"]
+
+[exports.gens]
+TestGen = "app/gens/test_gen.cmb.rb"
+`,
+    );
+    return dir;
+  }
+
+  /** Bare-mode `ruby compile.rb` stdout for `genPath` — the exact bytes
+   *  `cambium compile --write` / `--out-dir` would have written to the
+   *  sibling/flat artifact file. Used both to produce fixture artifacts
+   *  and, in the byte-identity test, to independently reproduce what the
+   *  default `compileBare` would return for the same gen. */
+  function compileBareStdout(genPath: string): string {
+    const res = spawnSync('ruby', [RUBY_COMPILE_RB, genPath], {
+      encoding: 'utf8',
+      maxBuffer: 50 * 1024 * 1024,
+    });
+    if (res.status !== 0) {
+      throw new Error(`ruby compile.rb ${genPath} failed (exit ${res.status}):\n${res.stderr}`);
+    }
+    return res.stdout;
+  }
+
+  let prevMock: string | undefined;
+  beforeAll(() => {
+    prevMock = process.env.CAMBIUM_ALLOW_MOCK;
+    process.env.CAMBIUM_ALLOW_MOCK = '1';
+  });
+  afterAll(() => {
+    if (prevMock === undefined) delete process.env.CAMBIUM_ALLOW_MOCK;
+    else process.env.CAMBIUM_ALLOW_MOCK = prevMock;
+  });
+
+  describe('no-Ruby boot', () => {
+    let tmp: string;
+    let handle: RunServeHandle | undefined;
+
+    beforeEach(() => {
+      tmp = setupWorkspace();
+      writeFileSync(
+        join(tmp, 'app/gens/test_gen.ir.json'),
+        compileBareStdout(join(tmp, 'app/gens/test_gen.cmb.rb')),
+      );
+    });
+    afterEach(async () => {
+      if (handle) await handle.close().catch(() => {});
+      rmSync(tmp, { recursive: true, force: true });
+    });
+
+    it('boots and dispatches with a compileBare that throws if ever called', async () => {
+      handle = runServe({
+        workspaceDir: tmp,
+        bind: parseBind('tcp://127.0.0.1:0'),
+        precompiled: true,
+        compileBare: () => {
+          throw new Error('ruby must not be spawned');
+        },
+      });
+      const addr = await handle.ready;
+      if (addr.kind !== 'tcp') throw new Error('expected tcp bind');
+      const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+      const health = await fetch(`${baseUrl}/v1/healthz`);
+      expect(health.status).toBe(200);
+      expect((await health.json()).gens).toEqual(['TestGen']);
+
+      const run = await fetch(`${baseUrl}/v1/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gen: 'TestGen', method: 'analyze', input: 'a document with 42 ms in it' }),
+      });
+      expect(run.status).toBe(200);
+      const runBody = await run.json();
+      expect(runBody.ok).toBe(true);
+      expect(runBody.output).toMatchObject({ summary: expect.any(String) });
+    });
+  });
+
+  describe('byte-identity: compile-at-boot vs precompiled', () => {
+    let tmp: string;
+    let handleA: RunServeHandle | undefined;
+    let handleB: RunServeHandle | undefined;
+
+    beforeEach(() => {
+      tmp = setupWorkspace();
+      writeFileSync(
+        join(tmp, 'app/gens/test_gen.ir.json'),
+        compileBareStdout(join(tmp, 'app/gens/test_gen.cmb.rb')),
+      );
+    });
+    afterEach(async () => {
+      if (handleA) await handleA.close().catch(() => {});
+      if (handleB) await handleB.close().catch(() => {});
+      rmSync(tmp, { recursive: true, force: true });
+    });
+
+    it('the artifact file IS what the default compileBare would produce for this gen', () => {
+      const expected = JSON.parse(compileBareStdout(join(tmp, 'app/gens/test_gen.cmb.rb')));
+      const onDisk = JSON.parse(readFileSync(join(tmp, 'app/gens/test_gen.ir.json'), 'utf8'));
+      expect(onDisk).toEqual(expected);
+    });
+
+    it('healthz and /v1/run wire bodies are identical (modulo run_id) either boot path', async () => {
+      handleA = runServe({ workspaceDir: tmp, bind: parseBind('tcp://127.0.0.1:0') });
+      handleB = runServe({ workspaceDir: tmp, bind: parseBind('tcp://127.0.0.1:0'), precompiled: true });
+
+      const [addrA, addrB] = await Promise.all([handleA.ready, handleB.ready]);
+      if (addrA.kind !== 'tcp' || addrB.kind !== 'tcp') throw new Error('expected tcp binds');
+      const baseA = `http://127.0.0.1:${addrA.port}`;
+      const baseB = `http://127.0.0.1:${addrB.port}`;
+
+      const [healthA, healthB] = await Promise.all([
+        fetch(`${baseA}/v1/healthz`).then((r) => r.json()),
+        fetch(`${baseB}/v1/healthz`).then((r) => r.json()),
+      ]);
+      expect(healthA).toEqual(healthB);
+
+      const body = JSON.stringify({ gen: 'TestGen', method: 'analyze', input: 'a document with 42 ms in it' });
+      const [runA, runB] = await Promise.all([
+        fetch(`${baseA}/v1/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body }).then((r) => r.json()),
+        fetch(`${baseB}/v1/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body }).then((r) => r.json()),
+      ]);
+      expect(runA.ok).toBe(true);
+      delete runA.run_id;
+      delete runB.run_id;
+      expect(runA).toEqual(runB);
+    });
+  });
+
+  describe('irDir boot', () => {
+    let tmp: string;
+    let irDir: string;
+    let handle: RunServeHandle | undefined;
+
+    beforeEach(() => {
+      tmp = setupWorkspace();
+      irDir = join(tmp, 'dist', 'ir');
+      mkdirSync(irDir, { recursive: true });
+      // No sibling artifact written — irDir is the ONLY artifact source,
+      // proving resolution actually used it (not a sibling fallback).
+      writeFileSync(join(irDir, 'test_gen.ir.json'), compileBareStdout(join(tmp, 'app/gens/test_gen.cmb.rb')));
+    });
+    afterEach(async () => {
+      if (handle) await handle.close().catch(() => {});
+      rmSync(tmp, { recursive: true, force: true });
+    });
+
+    it('boots from <irDir>/<basename>.ir.json', async () => {
+      handle = runServe({
+        workspaceDir: tmp,
+        bind: parseBind('tcp://127.0.0.1:0'),
+        irDir,
+        compileBare: () => {
+          throw new Error('ruby must not be spawned');
+        },
+      });
+      const addr = await handle.ready;
+      if (addr.kind !== 'tcp') throw new Error('expected tcp bind');
+      const health = await fetch(`http://127.0.0.1:${addr.port}/v1/healthz`);
+      expect(health.status).toBe(200);
+      expect((await health.json()).gens).toEqual(['TestGen']);
+    });
+  });
+
+  describe('fail-fast: rejected ready, no listener bound', () => {
+    let tmp: string | undefined;
+    afterEach(() => {
+      if (tmp) rmSync(tmp, { recursive: true, force: true });
+      tmp = undefined;
+    });
+
+    it('missing artifact', async () => {
+      tmp = setupWorkspace();
+      // No .ir.json written at all.
+      const handle = runServe({ workspaceDir: tmp, bind: parseBind('tcp://127.0.0.1:0'), precompiled: true });
+      await expect(handle.ready).rejects.toThrow(/precompiled artifact\(s\) not found/);
+      await handle.close();
+    });
+
+    it('malformed JSON artifact', async () => {
+      tmp = setupWorkspace();
+      writeFileSync(join(tmp, 'app/gens/test_gen.ir.json'), '{not json');
+      const handle = runServe({ workspaceDir: tmp, bind: parseBind('tcp://127.0.0.1:0'), precompiled: true });
+      await expect(handle.ready).rejects.toThrow(/not valid JSON/);
+      await handle.close();
+    });
+
+    it('wrong-version artifact', async () => {
+      tmp = setupWorkspace();
+      writeFileSync(
+        join(tmp, 'app/gens/test_gen.ir.json'),
+        JSON.stringify({ analyze: { version: '0.1', entry: { class: 'TestGen', method: 'analyze' } } }),
+      );
+      const handle = runServe({ workspaceDir: tmp, bind: parseBind('tcp://127.0.0.1:0'), precompiled: true });
+      await expect(handle.ready).rejects.toThrow(/unsupported compiler version/);
+      await handle.close();
+    });
+
+    it('an [exports.pipelines] entry', async () => {
+      tmp = setupWorkspace();
+      writeFileSync(join(tmp, 'app/gens/test_gen.ir.json'), compileBareStdout(join(tmp, 'app/gens/test_gen.cmb.rb')));
+      writeFileSync(
+        join(tmp, 'Genfile.toml'),
+        `[types]
+contracts = ["src/contracts.ts"]
+
+[exports.gens]
+TestGen = "app/gens/test_gen.cmb.rb"
+
+[exports.pipelines]
+MyPipeline = "app/pipelines/my_pipeline.pipeline.rb"
+`,
+      );
+      const handle = runServe({ workspaceDir: tmp, bind: parseBind('tcp://127.0.0.1:0'), precompiled: true });
+      await expect(handle.ready).rejects.toThrow(/\[exports\.pipelines\]/);
+      await handle.close();
+    });
+
+    it('an enrich gen', async () => {
+      tmp = setupWorkspace();
+      const enrichGen = `
+class EnrichGen < GenModel
+  model "ollama:test"
+  system "test"
+  returns AnalysisReport
+  enrich :document do
+    agent :SomeSubAgent, method: :run
+  end
+  def analyze(doc)
+    generate "go" do
+      with context: doc
+      returns AnalysisReport
+    end
+  end
+end
+`;
+      writeFileSync(join(tmp, 'app/gens/enrich_gen.cmb.rb'), enrichGen);
+      writeFileSync(
+        join(tmp, 'app/gens/enrich_gen.ir.json'),
+        compileBareStdout(join(tmp, 'app/gens/enrich_gen.cmb.rb')),
+      );
+      writeFileSync(
+        join(tmp, 'Genfile.toml'),
+        `[types]\ncontracts = ["src/contracts.ts"]\n\n[exports.gens]\nEnrichGen = "app/gens/enrich_gen.cmb.rb"\n`,
+      );
+      const handle = runServe({ workspaceDir: tmp, bind: parseBind('tcp://127.0.0.1:0'), precompiled: true });
+      await expect(handle.ready).rejects.toThrow(/needs Ruby at run time \(enrich\)/);
+      await handle.close();
+    });
+
+    it('a symbol-form gen in a [types]-less workspace', async () => {
+      tmp = mkdtempSync(join(tmpdir(), 'cambium-serve-precompiled-notypes-'));
+      mkdirSync(join(tmp, 'app/gens'), { recursive: true });
+      const symbolGen = `
+class SymbolGen < GenModel
+  model "ollama:test"
+  system "test"
+  returns AnalysisReport
+  def analyze(doc)
+    generate "go" do
+      with context: doc
+      returns AnalysisReport
+    end
+  end
+end
+`;
+      writeFileSync(join(tmp, 'app/gens/symbol_gen.cmb.rb'), symbolGen);
+      writeFileSync(
+        join(tmp, 'app/gens/symbol_gen.ir.json'),
+        compileBareStdout(join(tmp, 'app/gens/symbol_gen.cmb.rb')),
+      );
+      // Deliberately no [types] section, and no src/contracts.ts anywhere —
+      // the ruby-side best-effort schema check (compile.rb) is skipped
+      // when it can't find a candidates file, so this compiles fine; the
+      // DEC-004 refusal is a runtime (serve boot) check, not a compile one.
+      writeFileSync(join(tmp, 'Genfile.toml'), `[exports.gens]\nSymbolGen = "app/gens/symbol_gen.cmb.rb"\n`);
+      const handle = runServe({ workspaceDir: tmp, bind: parseBind('tcp://127.0.0.1:0'), precompiled: true });
+      await expect(handle.ready).rejects.toThrow(/\[types\]\.contracts/);
+      await handle.close();
+    });
+  });
+
+  describe('appRoot anchoring (#195 DEC-005)', () => {
+    let tmp: string | undefined;
+    afterEach(() => {
+      if (tmp) rmSync(tmp, { recursive: true, force: true });
+      tmp = undefined;
+    });
+
+    it('precompiled dispatch passes appRoot === workspaceDir; compile-at-boot dispatch passes none', async () => {
+      tmp = setupWorkspace();
+      writeFileSync(
+        join(tmp, 'app/gens/test_gen.ir.json'),
+        compileBareStdout(join(tmp, 'app/gens/test_gen.cmb.rb')),
+      );
+
+      const capturedOpts: any[] = [];
+      const captureRun: RunGenFromIrFn = async (opts: any) => {
+        capturedOpts.push(opts);
+        return {
+          ok: true, output: {}, trace: { steps: [] },
+          runId: 'r', schemaId: 'X', ir: {} as any,
+          tracePath: '/x', outputPath: '/x', irPath: '/x', runDir: '/x',
+        } as any;
+      };
+
+      const handleA = runServe({
+        workspaceDir: tmp,
+        bind: parseBind('tcp://127.0.0.1:0'),
+        runGenFromIrFn: captureRun,
+      });
+      const addrA = await handleA.ready;
+      if (addrA.kind !== 'tcp') throw new Error('expected tcp');
+      await fetch(`http://127.0.0.1:${addrA.port}/v1/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gen: 'TestGen', method: 'analyze', input: 'x' }),
+      });
+      await handleA.close();
+
+      const handleB = runServe({
+        workspaceDir: tmp,
+        bind: parseBind('tcp://127.0.0.1:0'),
+        precompiled: true,
+        runGenFromIrFn: captureRun,
+      });
+      const addrB = await handleB.ready;
+      if (addrB.kind !== 'tcp') throw new Error('expected tcp');
+      await fetch(`http://127.0.0.1:${addrB.port}/v1/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gen: 'TestGen', method: 'analyze', input: 'x' }),
+      });
+      await handleB.close();
+
+      expect(capturedOpts).toHaveLength(2);
+      expect(capturedOpts[0].appRoot).toBeUndefined();
+      expect(capturedOpts[1].appRoot).toBe(tmp);
+    });
+  });
+
+  describe('nested member package (A-003 / AUD-001) + boot-time contracts resolution (AUD-002)', () => {
+    const NESTED_GEN = `
+class NestedGen < GenModel
+  model "ollama:test"
+  system "test prompt"
+  returns SubReport
+
+  def analyze(doc)
+    generate "analyze the document" do
+      with context: doc
+      returns SubReport
+    end
+  end
+end
+`;
+    // Root workspace exports a gen that lives in a member package with its
+    // OWN Genfile + [types]. The root's contracts do NOT export SubReport —
+    // only the member's do. Compile-at-boot resolves the member (walk-up
+    // from entry.source); precompiled must do the same, per gen.
+    function setupNested(): string {
+      const dir = mkdtempSync(join(tmpdir(), 'cambium-serve-nested-'));
+      mkdirSync(join(dir, 'src'), { recursive: true });
+      mkdirSync(join(dir, 'vendor/subapp/app/gens'), { recursive: true });
+      mkdirSync(join(dir, 'vendor/subapp/src'), { recursive: true });
+      writeFileSync(join(dir, 'src/contracts.ts'), FIXTURE_CONTRACTS);
+      writeFileSync(
+        join(dir, 'Genfile.toml'),
+        `[package]\nname = "root"\n\n[types]\ncontracts = ["src/contracts.ts"]\n\n[exports.gens]\nNestedGen = "vendor/subapp/app/gens/nested_gen.cmb.rb"\n`,
+      );
+      writeFileSync(
+        join(dir, 'vendor/subapp/src/contracts.ts'),
+        `export const SubReport = { $id: 'SubReport', type: 'object', additionalProperties: true };\n`,
+      );
+      writeFileSync(join(dir, 'vendor/subapp/Genfile.toml'), `[package]\nname = "subapp"\n\n[types]\ncontracts = ["src/contracts.ts"]\n`);
+      writeFileSync(join(dir, 'vendor/subapp/app/gens/nested_gen.cmb.rb'), NESTED_GEN);
+      return dir;
+    }
+
+    let tmp: string | undefined;
+    afterEach(() => {
+      if (tmp) rmSync(tmp, { recursive: true, force: true });
+      tmp = undefined;
+    });
+
+    async function postRun(port: number) {
+      const res = await fetch(`http://127.0.0.1:${port}/v1/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gen: 'NestedGen', method: 'analyze', input: 'hello world' }),
+      });
+      return { status: res.status, body: (await res.json()) as any };
+    }
+
+    it('AUD-001: a nested gen anchors on its member package, not --workspace — 200 in both boot modes', async () => {
+      tmp = setupNested();
+      const genPath = join(tmp, 'vendor/subapp/app/gens/nested_gen.cmb.rb');
+      writeFileSync(join(tmp, 'vendor/subapp/app/gens/nested_gen.ir.json'), compileBareStdout(genPath));
+
+      const handleA = runServe({ workspaceDir: tmp, bind: parseBind('tcp://127.0.0.1:0') });
+      const addrA = await handleA.ready;
+      if (addrA.kind !== 'tcp') throw new Error('expected tcp');
+      const a = await postRun(addrA.port);
+      await handleA.close();
+
+      const handleB = runServe({ workspaceDir: tmp, bind: parseBind('tcp://127.0.0.1:0'), precompiled: true });
+      const addrB = await handleB.ready;
+      if (addrB.kind !== 'tcp') throw new Error('expected tcp');
+      const b = await postRun(addrB.port);
+      await handleB.close();
+
+      expect(a.status, JSON.stringify(a.body)).toBe(200);
+      expect(b.status, JSON.stringify(b.body)).toBe(200);
+      expect(b.body.ok).toBe(true);
+      delete a.body.run_id; delete b.body.run_id;
+      expect(b.body).toEqual(a.body);
+    });
+
+    it('AUD-001: precompiled dispatch passes the member package as appRoot', async () => {
+      tmp = setupNested();
+      const genPath = join(tmp, 'vendor/subapp/app/gens/nested_gen.cmb.rb');
+      writeFileSync(join(tmp, 'vendor/subapp/app/gens/nested_gen.ir.json'), compileBareStdout(genPath));
+      const captured: any[] = [];
+      const capture: RunGenFromIrFn = async (o: any) => {
+        captured.push(o);
+        return { ok: true, output: {}, trace: { steps: [] }, runId: 'r', schemaId: 'X', ir: {} as any, tracePath: '/x', outputPath: '/x', irPath: '/x', runDir: '/x' } as any;
+      };
+      const handle = runServe({ workspaceDir: tmp, bind: parseBind('tcp://127.0.0.1:0'), precompiled: true, runGenFromIrFn: capture });
+      const addr = await handle.ready;
+      if (addr.kind !== 'tcp') throw new Error('expected tcp');
+      await postRun(addr.port);
+      await handle.close();
+      expect(captured).toHaveLength(1);
+      expect(captured[0].appRoot).toBe(join(tmp, 'vendor/subapp'));
+    });
+
+    it('AUD-004: a contracts file that fails to import is reported under the gen, inside the aggregated boot error', async () => {
+      tmp = setupWorkspace();
+      writeFileSync(join(tmp, 'app/gens/test_gen.ir.json'), compileBareStdout(join(tmp, 'app/gens/test_gen.cmb.rb')));
+      writeFileSync(join(tmp, 'src/contracts.ts'), 'export const AnalysisReport = {\n  this is not typescript\n');
+      const handle = runServe({ workspaceDir: tmp, bind: parseBind('tcp://127.0.0.1:0'), precompiled: true });
+      await expect(handle.ready).rejects.toThrow(/contracts cannot be resolved for:\n  TestGen: contracts for .* could not be loaded/);
+      await handle.close().catch(() => {});
+    });
+
+    it('AUD-002: a returnSchemaId the declared contracts do not export fails boot, not the first request', async () => {
+      tmp = setupWorkspace();
+      const artifact = JSON.parse(compileBareStdout(join(tmp, 'app/gens/test_gen.cmb.rb')));
+      artifact.analyze.returnSchemaId = 'RenamedAwaySchema';
+      writeFileSync(join(tmp, 'app/gens/test_gen.ir.json'), JSON.stringify(artifact));
+      const handle = runServe({ workspaceDir: tmp, bind: parseBind('tcp://127.0.0.1:0'), precompiled: true });
+      await expect(handle.ready).rejects.toThrow(/TestGen\.analyze: returnSchemaId "RenamedAwaySchema" is not exported by/);
+      await handle.close().catch(() => {});
+    });
   });
 });

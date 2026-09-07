@@ -1,0 +1,99 @@
+# Golden IR Corpus (GitHub lane) — gate-zero contract for the Ruby DSL →
+# JSON IR compiler, run on the public GitHub mirror.
+#
+# Why this exists alongside .forgejo/workflows/golden-ir.yml:
+#
+#   1. External contributors open PRs on GitHub (the Forgejo instance is
+#      private). Those PRs never reach the Forgejo runner, so without this
+#      file they land with no compiler gate at all.
+#   2. GitHub-hosted runners are x86_64; the Forgejo runner is an arm64 Pi.
+#      Running both gives architecture coverage for free.
+#   3. This lane pins Ruby 3.4 — the version `scripts/test-on-ruby.mjs`
+#      defaults to and the one Alpine ships (SECURITY.md § Ruby supply
+#      chain). The Forgejo lane installs system Ruby from a bullseye
+#      container, which is EOL 2.7, so it does NOT exercise the Ruby 3.x
+#      surface the project actually targets. This one does.
+#
+# Cost: nothing. Public repositories get unlimited free minutes on standard
+# GitHub-hosted runners. Do not switch `runs-on` to a larger runner — those
+# are billed even on public repos.
+#
+# Deliberately NOT ported from the Forgejo lane: the `cambium_ci_review`
+# pipeline. It needs a local oMLX endpoint reachable only over Tailscale,
+# and GitHub withholds secrets from fork PRs — so on GitHub it could only
+# ever run in --mock mode, which is noise. Review stays where inference is.
+#
+# Fully offline: the golden tests only shell out to
+# `ruby ruby/cambium/compile.rb` (stdlib-only; CLAUDE.md dependency policy).
+# No provider, no secrets, no network beyond the npm registry.
+
+name: Golden IR Corpus
+
+on:
+  # `push` only for main so post-merge and mirror-sync commits still get a
+  # run; feature branches are covered once by `pull_request`.
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: this workflow only reads the tree. No PR comments, no
+# writes — unlike the Forgejo review lane, nothing here needs a token.
+permissions:
+  contents: read
+
+# Supersede in-flight runs for the same ref. Free minutes are not a reason
+# to leave five stale runs churning on a branch that has already moved on.
+concurrency:
+  group: golden-ir-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  golden:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Actions are pinned to full commit SHAs, not floating tags. A tag is
+      # mutable and can be repointed at new code by whoever controls the
+      # action repo — the same attack class CLAUDE.md § Dependency policy
+      # pins npm deps against. The trailing comment records the human
+      # version so upgrades stay reviewable.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes; don't leave a usable token in .git/config.
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      # Unlike the Forgejo lane, ruby/setup-ruby works fine here: the
+      # node24 runs.using problem is specific to Forgejo's action mirror
+      # and its node20-capped runner, not to GitHub.
+      #
+      # bundler-cache is left off on purpose — Cambium's Ruby surface is
+      # stdlib-only, so there is no Gemfile to install from.
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          ruby-version: '3.4'
+
+      # No `cache: 'npm'` and no actions/cache. GitHub's cache service does
+      # work (unlike the Forgejo runner's — see the note in the .forgejo
+      # lane), but a cold `npm ci` here is a few seconds and the golden
+      # tests need no build step, so a cache would add a save/restore
+      # round-trip to save nothing. Revisit only if install time grows.
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit --no-fund
+
+      - name: Show toolchain versions
+        run: |
+          node --version
+          ruby --version
+
+      # Compiles every in-tree gen and pipeline in bare mode and diffs
+      # against the committed JSON snapshots. Needs no runner build — the
+      # tests shell out to ruby directly.
+      - name: Run golden IR tests
+        run: npm run test:golden

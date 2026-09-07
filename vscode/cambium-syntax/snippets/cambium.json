@@ -76,12 +76,12 @@
     ],
     "description": "Multi-turn agentic generation with tools"
   },
-  "Repair policy": {
+  "Repair model slot": {
     "prefix": "repair",
     "body": [
-      "repair max_attempts: ${1:3}, stop_on_no_improvement: true"
+      "repair \"${1:omlx:nemotron-3-nano-4b}\", max_tokens: ${2:900}"
     ],
-    "description": "Validation repair policy configuration"
+    "description": "Workspace repair model slot — app/config/models.rb (RED-176)"
   },
   "Security config": {
     "prefix": "security",

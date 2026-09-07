@@ -453,6 +453,11 @@ module Cambium
   # them to literals before emitting IR so the runner always sees
   # a concrete `"omlx:name"` string.
   #
+  # RED-176 adds one non-alias entry: the `repair` slot. It names the
+  # model that runs repair passes instead of the gen's own model, and it
+  # is workspace-owned — no gen may reference it (`model :repair` is a
+  # CompileError). See `C - Repair Loop` for the authority rule.
+  #
   # File syntax is flat, same convention as `.policy.rb` and
   # `.pool.rb` — each line is `<name> "<literal>"`:
   #
@@ -467,13 +472,19 @@ module Cambium
   class ModelAliases
     NAME_RE = /\A[a-z][a-z0-9_]*\z/
 
-    attr_reader :aliases, :source_file, :active_profile, :declared_profiles
+    # `repair_slot` is the RED-176 repair model ({ 'id' => … } plus any
+    # declared ceiling/temperature), or nil when the workspace declares
+    # none. It sits beside `aliases`, never inside them: `aliases` values
+    # are model-referenceable and must resolve to a String, so a Hash
+    # living there would let `model :repair` emit an object as `model.id`.
+    attr_reader :aliases, :source_file, :active_profile, :declared_profiles, :repair_slot
 
-    def initialize(aliases, source_file, active_profile: nil, declared_profiles: [])
+    def initialize(aliases, source_file, active_profile: nil, declared_profiles: [], repair_slot: nil)
       @aliases = aliases
       @source_file = source_file
       @active_profile = active_profile        # nil when no profiles declared OR no profile selected
       @declared_profiles = declared_profiles  # ordered list of all profile names (for error messages)
+      @repair_slot = repair_slot              # nil == "repair runs on the gen's model"
     end
 
     def lookup(name)
@@ -548,10 +559,13 @@ module Cambium
 
       active = resolve_active_profile(builder, file)
       effective = builder.aliases.dup  # globals first
+      repair = builder.repair_slot
       if active
         effective.merge!(builder.profiles[active] || {})  # profile shadows globals
+        repair = builder.profile_repair[active] || repair # same shadowing for the repair slot
       end
-      new(effective, file, active_profile: active, declared_profiles: builder.profile_order.dup)
+      new(effective, file, active_profile: active, declared_profiles: builder.profile_order.dup,
+          repair_slot: repair)
     end
 
     # Pick the active profile from CAMBIUM_PROFILE / :dev / first
@@ -624,13 +638,67 @@ module Cambium
   # the identifier-shape regex so a Symbol ref can't interpolate into
   # anything surprising.
   class ModelAliasesBuilder
-    attr_reader :aliases, :profiles, :profile_order
+    # `repair` is the one models.rb name with its own collector instead of
+    # falling through to method_missing: it carries an option bundle, not a
+    # bare literal. Everything else stays an open vocabulary.
+    REPAIR_KWARGS = %w[max_tokens temperature].freeze
+
+    attr_reader :aliases, :profiles, :profile_order, :repair_slot, :profile_repair
 
     def initialize
       @aliases = {}        # globals — aliases declared outside any profile block
       @profiles = {}       # name => { alias_name => literal }
       @profile_order = []  # declaration order; default-selection prefers `:dev` else first
       @current_profile = nil  # set inside a `profile :name do ... end` block
+      @repair_slot = nil   # RED-176: { 'id' => …, 'max_tokens' => …, 'temperature' => … }
+      @profile_repair = {} # profile name => repair slot
+    end
+
+    # RED-176: declare the workspace's repair model.
+    #
+    #   repair "omlx:nemotron-3-nano-4b", max_tokens: 900, temperature: 0
+    #   repair :fast                      # resolved against the aliases above
+    #
+    # Absent → the runner keeps using each gen's own model (byte-identical
+    # IR). Declared → it owns every structural repair pass in the workspace;
+    # see `C - Repair Loop` for why semantic sites still run on the gen model.
+    # `effort` and `fallbacks` are deliberately not accepted here: repair is
+    # a no-reasoning, one-shot edit, and its failure is already handled by the
+    # loop that called it. Threading the gen's values would be the bug.
+    def repair(id = nil, **opts)
+      unless id.is_a?(String) || id.is_a?(Symbol)
+        raise CompileError,
+              'repair: a model id is required — e.g. repair "omlx:nemotron-3-nano-4b", max_tokens: 900'
+      end
+      unknown = opts.keys.map(&:to_s) - REPAIR_KWARGS
+      unless unknown.empty?
+        raise CompileError,
+              "repair: unknown kwargs: #{unknown.join(', ')}. " \
+              "Allowed: #{REPAIR_KWARGS.join(', ')}."
+      end
+
+      scope_label = @current_profile ? "profile :#{@current_profile}" : 'models.rb'
+      slot = { 'id' => id }
+      if opts.key?(:max_tokens)
+        n = opts[:max_tokens]
+        unless n.is_a?(Integer) && n > 0
+          raise CompileError, "repair: max_tokens must be a positive Integer (got #{n.inspect})"
+        end
+        slot['max_tokens'] = n
+      end
+      if opts.key?(:temperature)
+        t = opts[:temperature]
+        raise CompileError, "repair: temperature must be Numeric (got #{t.inspect})" unless t.is_a?(Numeric)
+        slot['temperature'] = t
+      end
+
+      if @current_profile
+        raise CompileError, "duplicate repair slot in #{scope_label}" if @profile_repair.key?(@current_profile)
+        @profile_repair[@current_profile] = slot
+      else
+        raise CompileError, 'duplicate repair slot in models.rb' unless @repair_slot.nil?
+        @repair_slot = slot
+      end
     end
 
     # RED-326: declare a named profile. Aliases inside the block scope
@@ -1928,7 +1996,13 @@ module Cambium
       # producing a brittle IR.
       GROUNDING_SOURCE_REGEX = /\A[a-z][a-z0-9_]*\z/
       GROUNDING_VERIFY_VALUES = %w[field_values].freeze
-      def grounded_in(source, from: nil, require_citations: false, verify: nil, fields: nil)
+      # #169: `format:` names the shape of a *text* source so the verifier
+      # can match against a derived plain-text view of it (visible Markdown
+      # text, decoded JSON strings) in addition to the raw bytes the model
+      # sees. Closed enum; `:text` is the explicit opt-out of compile-time
+      # inference from the source path (compile.rb).
+      GROUNDING_FORMAT_VALUES = %w[markdown json text].freeze
+      def grounded_in(source, from: nil, require_citations: false, verify: nil, fields: nil, format: nil)
         source_str = source.to_s
         unless source_str.match?(GROUNDING_SOURCE_REGEX)
           raise ArgumentError,
@@ -1943,6 +2017,15 @@ module Cambium
           raise ArgumentError,
                 "grounded_in #{source.inspect} verify: must be nil or one of " \
                 "#{GROUNDING_VERIFY_VALUES.map { |v| ":#{v}" }.join(', ')}, got #{verify.inspect}"
+        end
+
+        # #169: same guard shape as `verify:` — a Symbol from the closed
+        # enum, or nil. Widening the enum is additive; the names are a
+        # promised surface (COMPATIBILITY surface 1).
+        unless format.nil? || GROUNDING_FORMAT_VALUES.include?(format.to_s)
+          raise ArgumentError,
+                "grounded_in #{source.inspect} format: must be nil or one of " \
+                "#{GROUNDING_FORMAT_VALUES.map { |v| ":#{v}" }.join(', ')}, got #{format.inspect}"
         end
 
         # RED-383 minimum-cut: `from:` accepts a file path; compile.rb
@@ -1982,7 +2065,52 @@ module Cambium
         entry['from'] = from unless from.nil?
         entry['verify'] = verify.to_s unless verify.nil?
         entry['fields'] = fields.map(&:to_s) unless fields.nil?
+        # #169: absent-when-unset. compile.rb may still infer a format from
+        # the source path when this is nil; an explicit value always wins.
+        entry['format'] = format.to_s unless format.nil?
         _cambium_defaults[:grounding] = entry
+      end
+
+      # #182: name context keys that must reach the model but must NOT
+      # contribute to the cacheable prompt prefix.
+      #
+      #   exclude_from_prefix :page_id
+      #
+      # The prefix is addressed by a content hash, so one per-call byte
+      # splits the provider's prompt cache: a fan-out of 200 reviewers whose
+      # branches differ only in `page_id` gets 200 cache entries and shares
+      # nothing. Excluded keys are rendered into the *uncached tail* of the
+      # user prompt instead (DEC-012) — fully model-visible, just after the
+      # cache breakpoint.
+      #
+      # The `_` prefix convention (framework-internal keys, dropped from the
+      # prompt entirely) keeps its exact meaning; that is what makes this
+      # additive. Same `/\A[a-z][a-z0-9_]*\z/` shape every other named-key
+      # surface uses (RED-283 grounding sources, RED-214 pack names, ...).
+      EXCLUDE_FROM_PREFIX_KEY_REGEX = /\A[a-z][a-z0-9_]*\z/
+      def exclude_from_prefix(*keys)
+        list = (_cambium_defaults[:exclude_from_prefix] ||= [])
+        keys.each do |key|
+          key_str = key.to_s
+
+          # DEC-013(b): `_` keys are already dropped from the prompt
+          # entirely, so excluding one is a no-op that reads as if it did
+          # something. Checked before the regex, which would also reject it
+          # but with a message that describes the wrong problem.
+          if key_str.start_with?('_')
+            raise CompileError,
+                  "exclude_from_prefix #{key.inspect}: `_`-prefixed context keys are " \
+                  "framework-internal and never reach the prompt at all, so excluding " \
+                  "one from the cacheable prefix does nothing. Drop the declaration."
+          end
+
+          unless key_str.match?(EXCLUDE_FROM_PREFIX_KEY_REGEX)
+            raise CompileError,
+                  "exclude_from_prefix key must match /^[a-z][a-z0-9_]*$/, got: #{key.inspect}"
+          end
+
+          list << key_str unless list.include?(key_str)
+        end
       end
 
       # Signals: declare a typed extraction from the output.

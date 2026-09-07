@@ -21,12 +21,13 @@ loadEnvFiles();
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, statSync, readFileSync } from 'node:fs';
 import { readExplicitStdinArg } from './stdin-arg.mjs';
 import { runGenerate } from './generate.mjs';
 import { runLint } from './lint.mjs';
 import { runInit } from './init.mjs';
 import { runDoctor } from './doctor.mjs';
+import { loadRunner } from './runner-freshness.mjs';
 
 // Framework files resolved relative to the CLI's own location, not cwd.
 // External apps (app-mode, cf. RED-220 / RED-274) run `cambium run` from
@@ -49,10 +50,11 @@ Usage:
   cambium init [name]
   cambium new <type> <Name>
   cambium run <file.cmb.rb> --method <method> [--arg <path>|-] [--trace <path>] [--out <path>] [--mock] [--memory-key <name>=<value> ...] [--session-id <id>] [--profile <name>] [--fired-by <id>]
+  cambium run --ir <file.ir.json> [--method <method>] [--arg <path>|-] [--trace <path>] [--out <path>] [--mock] [--memory-key <name>=<value> ...] [--session-id <id>] [--fired-by <id>]
   cambium replay <run-id|path> [--edit] [--from-step <type>] [--from-op <id>] [--mock]
   cambium compile <file.cmb.rb> [--method <method>] [--arg <path>|-] [-o <output>]
   cambium compile [--out-dir <dir>] [--write]   # (no file) recompile every gen/pipeline IR in the workspace
-  cambium serve --workspace <path> --bind <uri> [--allow-remote]
+  cambium serve --workspace <path> --bind <uri> [--allow-remote] [--precompiled|--ir-dir <dir>]
   cambium inspect [run-id] [--port <n>] [--runs-dir <path>] [--host <h>] [--allow-remote] [--no-open]
   cambium schedule preview|list|compile <args>
   cambium doctor
@@ -78,6 +80,22 @@ Commands:
   schedule  Manage cron-style scheduled fires (preview, list, compile manifests)
 
 Run flags:
+  --arg <path>|-            Optional input. Omitted keeps whatever compile time bakes
+                            in for the method (a from: default, RED-383, or an empty
+                            string with no bake-in) — the same default cambium compile
+                            and cambium run --ir use for an omitted --arg (#220).
+                            --arg '' is treated as omitted too (never forwarded to
+                            Ruby's File.read); neither cambium run --ir nor cambium
+                            compile makes this same allowance for --arg '' (both gate
+                            on arg !== null, so both try to read the empty path —
+                            cambium compile with a raw Ruby Errno::ENOENT, cambium
+                            run --ir with a Cambium-shaped error; see --ir's own
+                            --arg note below).
+                            A pipeline (not a gen) with one or more declared input
+                            slots refuses an omitted --arg instead: exit 2, naming the
+                            pipeline, its slots, and how to supply a value (#223) —
+                            a slot has no optional: or default:, so omitting it is
+                            always a caller mistake, never a value to default.
   --trace <path>            Write trace JSON to <path> (default: runs/<id>/trace.json)
   --out <path>              Write output JSON to <path> (default: runs/<id>/output.json)
   --mock                    Use deterministic mock instead of live LLM
@@ -88,8 +106,28 @@ Run flags:
                             /^[a-zA-Z0-9_\-]+$/ and be 1-128 chars. Wins over CAMBIUM_SESSION_ID.
   --profile <name>          Pick the active profile from app/config/models.rb (RED-326).
                             Must match /^[a-z][a-z0-9_]*$/. Wins over CAMBIUM_PROFILE.
+                            Not valid with --ir (profiles resolve at compile time; recompile
+                            with --profile instead).
   --fired-by <id>           Label recording why this run was triggered (e.g. a cron job
                             id). Surfaces in trace.json and observability logs.
+
+Run --ir flags (#195): execute a precompiled .ir.json artifact directly — no
+Ruby, no positional .cmb.rb. Mutually exclusive with a positional file.
+  --ir <file.ir.json>       The artifact to run — a single IR (compile --method) or a
+                            {method → IR} map (bare-mode compile). Refused if the IR
+                            still needs Ruby at run time (a pipeline, an enrich gen,
+                            or a retro memory-write agent — #195 DEC-001).
+  --method <method>         Required for a map artifact (error lists the available
+                            methods); optional for a single-IR artifact, and must match
+                            its own entry.method when given.
+  --arg <path>|-            Overrides the artifact's baked-in context. Omitted keeps
+                            what compile time baked in (the from: default, RED-383) —
+                            same default the compile-then-run path above uses for an
+                            omitted --arg (#220). Not parity for every input: --arg ''
+                            gates on arg !== null here, so it reads the artifact's own
+                            file at the empty path and exits 1, while the compile-then-
+                            run path treats --arg '' as omitted too (see its own --arg
+                            note above).
 
 Compile flags:
   -o <path>                 Write IR JSON to <path> (default: <basename>.ir.json next to the input)
@@ -103,6 +141,7 @@ Compile-all flags (no file argument):
 Examples:
   cambium run packages/cambium/app/gens/analyst.cmb.rb --method analyze --arg document.txt
   cambium run gen.cmb.rb --method summarize --arg data.json --trace trace.json --out result.json
+  cambium run --ir dist/ir/analyst.ir.json --method analyze --arg document.txt --mock
   cambium replay run_20260422_114135_abc --edit
   cambium compile cambium/summarizer/summarizer.cmb.rb --method analyze
   cambium new engine Summarizer
@@ -208,11 +247,212 @@ if (cmd === 'replay') {
   process.exit(0);
 }
 
+// ── cambium run --ir (#195 DEC-006) ─────────────────────────────────────
+//
+// Executes a precompiled `.ir.json` artifact directly: no Ruby spawn, no
+// positional .cmb.rb. Shares the run flags (--mock, --trace, --out,
+// --memory-key, --session-id, --fired-by) with the compile-then-run path
+// below; --profile is refused outright (profiles resolve at compile
+// time, RED-326) and --arg's default differs (keeps the artifact's baked
+// context instead of Ruby's empty-string default) — both called out in
+// `cambium run --help`.
+async function runFromPrecompiledIr(args) {
+  let irPath = null;
+  let method = null;
+  let arg = null;
+  let traceOut = null;
+  let outputOut = null;
+  let mock = false;
+  let sessionId = null;
+  const memoryKeys = [];
+  let firedBy = null;
+  let profile = null;
+  let positional = null;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--ir') irPath = args[++i];
+    else if (a === '--method') method = args[++i];
+    else if (a === '--arg') arg = args[++i];
+    else if (a === '--trace') traceOut = args[++i];
+    else if (a === '--out') outputOut = args[++i];
+    else if (a === '--mock') mock = true;
+    else if (a === '--memory-key') memoryKeys.push(args[++i]);
+    else if (a === '--session-id') sessionId = args[++i];
+    else if (a === '--fired-by') firedBy = args[++i];
+    else if (a === '--profile') profile = args[++i];
+    else if (a === '--help' || a === '-h') usage();
+    else if (!a.startsWith('-') && positional === null) positional = a;
+    else usage(`Unknown flag: ${a}\nRun 'cambium run --help' for usage.`);
+  }
+
+  if (positional !== null) {
+    usage(`cambium run: --ir and a positional file ("${positional}") are mutually exclusive.`);
+  }
+  if (!irPath) usage('Missing --ir <file.ir.json>\nRun "cambium run --help" for usage.');
+  if (profile !== null) {
+    usage(
+      'cambium run --ir: --profile has no effect on a precompiled artifact (profiles resolve ' +
+        'at compile time, RED-326). Recompile with --profile (or CAMBIUM_PROFILE) instead.',
+    );
+  }
+  // RED-284: same session-id validation the compile-then-run path applies.
+  if (sessionId !== null) {
+    if (sessionId.length === 0 || sessionId.length > 128 || !/^[a-zA-Z0-9_\-]+$/.test(sessionId)) {
+      console.error(
+        `Invalid --session-id "${sessionId}". Must match /^[a-zA-Z0-9_\\-]+$/ and be 1-128 chars.`,
+      );
+      process.exit(2);
+    }
+  }
+
+  const runner = await loadRunner();
+
+  // Size-bounded read + structural validation, one path shared with
+  // `cambium serve --precompiled` (ir-artifact.ts#readIrArtifactFile).
+  let parsed;
+  try {
+    parsed = runner.readIrArtifactFile(irPath);
+  } catch (err) {
+    console.error(`cambium run --ir: ${err?.message ?? String(err)}`);
+    process.exit(1);
+  }
+
+  let ir;
+  if (parsed.kind === 'single') {
+    if (method !== null && method !== parsed.ir.entry.method) {
+      usage(
+        `cambium run --ir: --method "${method}" does not match this artifact's method ` +
+          `"${parsed.ir.entry.method}".`,
+      );
+    }
+    ir = parsed.ir;
+  } else {
+    const methods = Object.keys(parsed.irs).sort();
+    if (method === null) {
+      usage(
+        `cambium run --ir: --method is required for a multi-method artifact. ` +
+          `Available: ${methods.join(', ')}`,
+      );
+    }
+    ir = parsed.irs[method];
+    if (!ir) {
+      // Flag misuse, like a --method that mismatches a single-IR artifact
+      // (AUD-003): both are "you named a method this artifact doesn't have".
+      usage(`cambium run --ir: artifact has no method "${method}". Available: ${methods.join(', ')}`);
+    }
+  }
+
+  // #195 DEC-005: anchor discovery on the ARTIFACT's own location, not
+  // cwd or the build-machine ir.entry.source — the operator contract for
+  // a shipped precompiled IR. Explicit engineDir/appRoot win outright
+  // inside runGenFromIr (the RED-353/RED-393 tiers below them untouched).
+  const irAbsPath = resolve(irPath);
+  let anchors;
+  try {
+    anchors = runner.resolveArtifactAnchors(irAbsPath);
+  } catch (err) {
+    // Malformed Genfile / missing declared contracts file in the
+    // artifact's workspace (DEV-002 class) — a clean exit 1, not an
+    // uncaught rejection.
+    console.error(err?.message ?? String(err));
+    process.exit(1);
+  }
+  const { engineDir, appRoot } = anchors;
+
+  // #195 DEC-004: a symbol-form gen needs a contracts module at run time —
+  // check it against the workspace this artifact anchors on BEFORE any
+  // run dir is created. Engine mode sources its own
+  // `<engineDir>/schemas.ts` instead (checked inside runGenFromIr), so
+  // `contractsDeclared` is null there and this check is app-mode only.
+  if (!engineDir && runner.needsContracts(ir) && !anchors.contractsDeclared) {
+    console.error(
+      `cambium run --ir: "${ir.entry.class}" uses symbol-form returns (\`returns :Symbol\`) but ` +
+        `${appRoot ?? dirname(irAbsPath)} declares no [types].contracts. Ship inline ` +
+        `\`returns do … end\` schemas, or declare [types].contracts and ship the contracts file.`,
+    );
+    process.exit(1);
+  }
+
+  // --arg: omitted keeps the artifact's baked-in context (RED-383's
+  // `from:` default); explicit --arg overrides it exactly like serve's
+  // per-request injection (DEC-003's injectContextInput).
+  if (arg !== null) {
+    let argText;
+    if (arg === '-') {
+      try {
+        argText = readExplicitStdinArg('cambium run --ir');
+      } catch (err) {
+        console.error(err?.message ?? String(err));
+        process.exit(2);
+      }
+    } else {
+      try {
+        argText = readFileSync(arg, 'utf8');
+      } catch (err) {
+        console.error(`cambium run --ir: failed to read --arg ${arg}: ${err?.message ?? err}`);
+        process.exit(1);
+      }
+    }
+    runner.injectContextInput(ir, argText);
+  }
+
+  const previousMockEnv = process.env.CAMBIUM_ALLOW_MOCK;
+  const previousSessionEnv = process.env.CAMBIUM_SESSION_ID;
+  if (mock) process.env.CAMBIUM_ALLOW_MOCK = '1';
+  if (sessionId !== null) process.env.CAMBIUM_SESSION_ID = sessionId;
+
+  try {
+    const result = await runner.runGenFromIr({
+      ir,
+      cwd: process.cwd(),
+      traceOut,
+      outputOut,
+      mock,
+      memoryKeys,
+      sessionId: sessionId ?? undefined,
+      firedBy: firedBy ?? undefined,
+      ...(engineDir ? { engineDir } : {}),
+      ...(appRoot ? { appRoot } : {}),
+    });
+
+    if (!result.ok) {
+      if (result.errorMessage) {
+        console.error(`${result.errorMessage}. See ${result.tracePath}`);
+      }
+      process.exit(1);
+    }
+
+    console.log(JSON.stringify(result.output, null, 2));
+    console.error(`Trace: ${result.tracePath}`);
+  } catch (err) {
+    console.error(err?.stack || String(err));
+    process.exit(1);
+  } finally {
+    if (mock) {
+      if (previousMockEnv === undefined) delete process.env.CAMBIUM_ALLOW_MOCK;
+      else process.env.CAMBIUM_ALLOW_MOCK = previousMockEnv;
+    }
+    if (sessionId !== null) {
+      if (previousSessionEnv === undefined) delete process.env.CAMBIUM_SESSION_ID;
+      else process.env.CAMBIUM_SESSION_ID = previousSessionEnv;
+    }
+  }
+}
+
 // ── cambium run ───────────────────────────────────────────────────────
 if (cmd !== 'run') usage(`Unknown command: ${cmd}`);
 
 // Handle --help for run
 if (args.includes('--help') || args.includes('-h')) usage();
+
+// #195 DEC-006: `--ir <artifact>` executes a precompiled IR directly —
+// no Ruby spawn, no positional .cmb.rb. Checked before the positional
+// parsing below so `--ir`'s own value can't be mistaken for the gen file.
+if (args.includes('--ir')) {
+  await runFromPrecompiledIr(args);
+  process.exit(0);
+}
 
 const file = args[0];
 if (!file || file.startsWith('-')) usage('Missing .cmb.rb file');
@@ -241,18 +481,43 @@ for (let i = 1; i < args.length; i++) {
   else usage(`Unknown flag: ${a}\nRun 'cambium run --help' for usage.`);
 }
 if (!method) usage('Missing --method\nRun "cambium run --help" for usage.');
-// --arg is optional (RED-244, RED-bug). When omitted, pass an empty JSON
-// object via stdin — works for both pipelines (which expect an object
-// matching their input schema) and gens with all-optional inputs.
-// Documented behavior on line 82; the previous "Missing --arg" block
-// contradicted the docs.
-// RED-397: distinguish an OMITTED --arg (default to an empty JSON object
-// fed via stdin) from an EXPLICIT `--arg -` (forward the real piped stdin).
-// `argFromStdin = !arg` is true only when omitted; capture the explicit
-// dash BEFORE the default reassignment below.
+// --arg is optional (RED-244, RED-bug). An omitted --arg is forwarded to
+// Ruby as an omission — no --arg flag at all — so compile.rb (the
+// authority on gen-vs-pipeline, since it dispatches on the class
+// registry after `load file`) applies the right default for a gen: a
+// `from:` bake-in applies, or the method receives ''. The CLI never
+// guesses from the filename.
+//
+// A pipeline's own "nothing supplied" case is NOT a default anymore
+// (#223 DEC-001) — a declared `input` slot is mandatory by construction
+// (there is no `optional:`/`default:` on `input`), so an omitted --arg
+// against a pipeline with >=1 slot is a caller error, refused below once
+// the compiled IR's own `kind` says this is a Pipeline (see the
+// `isPipeline` gate near the dispatch call — note that's a different
+// gate than #195's above, same label, different plan). The refusal
+// lives here and nowhere else: two earlier designs tried elsewhere and
+// leaked — inside compile.rb (#220 DEC-002) into the golden corpus and
+// `cambium serve` boot cataloging, because compile.rb can't tell this
+// CLI call from a bare `ruby compile.rb` invocation; inside
+// `parsePipelineInputs` (#220 DEC-005) into `cambium serve` dispatch,
+// `cambium replay`, and library callers of `runPipelineFromIr`, because
+// none of them go through this CLI either — an audit
+// (records/AUDIT-220-round1-2026-09-03.md, AUD-001) caught it end to
+// end. The CLI is the only layer that saw the argv and can tell "the
+// caller supplied nothing" from "the caller supplied emptiness"; both
+// `parsePipelineInputs` and `compile.rb` end this change untouched too
+// (#223 DEC-002). (#220 had forged `--arg -` + stdin `'{}'` for every
+// omission, clobbering `from:` bake-ins on the gen path; #223 removes
+// the pipeline-side substitute that replaced it, `'{}'` in the recorded
+// `context._pipeline_arg`, since a literal `{}` reaching a model as its
+// document was the same bug in a different shape — see
+// records/PLAN-223-pipeline-arg-default-2026-09-04.md.)
+// RED-397: distinguish an OMITTED --arg (forwarded as an omission) from
+// an EXPLICIT `--arg -` (forward the real piped stdin). `argOmitted =
+// !arg` is true only when omitted; capture the explicit dash first since
+// both read the same `arg` value.
 const explicitStdin = arg === '-';
-const argFromStdin = !arg;
-if (argFromStdin) arg = '-';
+const argOmitted = !arg;
 
 // RED-326: validate --profile against the same regex Ruby's
 // ModelAliases::NAME_RE enforces. Failing here is nicer than failing
@@ -319,14 +584,12 @@ if (sessionId !== null) compileEnv.CAMBIUM_SESSION_ID = sessionId;
 // CAMBIUM_PROFILE to pick the active profile.
 if (profile !== null) compileEnv.CAMBIUM_PROFILE = profile;
 // Resolve what to feed the Ruby child's stdin:
-//   - omitted --arg      → '{}' (empty JSON object; valid when every input
-//                          field is optional, and the shape pipelines expect)
+//   - omitted --arg      → undefined; compile.rb applies its own default
+//                          (#220 — no --arg flag is forwarded at all, below)
 //   - explicit `--arg -` → the parent's real piped stdin (RED-397)
 //   - `--arg <file>`     → undefined; compile.rb reads the file itself
 let compileInput;
-if (argFromStdin) {
-  compileInput = '{}';
-} else if (explicitStdin) {
+if (explicitStdin) {
   try {
     compileInput = readExplicitStdinArg('cambium run');
   } catch (err) {
@@ -336,7 +599,13 @@ if (argFromStdin) {
 } else {
   compileInput = undefined;
 }
-const compile = spawnSync('ruby', [RUBY_COMPILE_SCRIPT, file, '--method', method, '--arg', arg], {
+// #220: forward --arg only when the user supplied it, mirroring
+// cli/compile.mjs's rubyArgs construction — an omission stays an
+// omission all the way to compile.rb, instead of being forged into
+// `--arg -` + stdin `'{}'` here.
+const rubyArgs = [RUBY_COMPILE_SCRIPT, file, '--method', method];
+if (!argOmitted) rubyArgs.push('--arg', arg);
+const compile = spawnSync('ruby', rubyArgs, {
   encoding: 'utf8',
   maxBuffer: 50 * 1024 * 1024,
   env: compileEnv,
@@ -375,7 +644,48 @@ try {
   // `pipeline.rb`'s PipelineCompiler emits; gen IRs don't carry a kind.
   // Falls through to runGenFromIr for all gen IRs unchanged.
   const isPipeline = ir?.kind === 'Pipeline';
-  const runner = await import('@redwood-labs/cambium-runner');
+  // #223 DEC-001/DEC-002: `cambium run <pipeline>` with no --arg is a
+  // hard refusal when the pipeline declares >=1 `input` slot, not a
+  // substitution. A slot is mandatory by construction (no `optional:`/
+  // `default:` on `input`), so an omission is always a caller mistake,
+  // never a legitimate invocation — refuse it here, before `loadRunner()`
+  // and before any dispatch, so a mis-invocation costs nothing. Gated on
+  // the compiled IR's own `kind` and `input` -- compile.rb's class
+  // registry is still the authority (#220 DEC-001); the CLI reads its
+  // answer back, it does not re-derive one. Confined to this caller:
+  // `parsePipelineInputs` and `compile.rb` are both untouched, so
+  // `cambium serve`, `cambium replay`, and library callers of
+  // `runPipelineFromIr` are wholly unaffected by this refusal (#220
+  // DEC-005 tried the binder for this and leaked; see
+  // records/CHANGE-220-run-arg-bakein-2026-09-03.md and
+  // records/AUDIT-220-round1-2026-09-03.md AUD-001). A zero-slot
+  // pipeline is untouched and still runs.
+  if (argOmitted && isPipeline) {
+    const slotNames = Object.keys(ir.input ?? {});
+    if (slotNames.length > 0) {
+      console.error(
+        `cambium run: pipeline "${ir.name}" declares input slot(s) ` +
+          `${slotNames.map((n) => `:${n}`).join(', ')} but no value was supplied ` +
+          `(--arg was omitted, or given as an empty string). ` +
+          `A declared input slot is required -- supply a value one of these ways:\n` +
+          `  --arg <path>            read the value from a file` +
+          (slotNames.length > 1
+            ? ` (a JSON object keyed by slot name: {${slotNames
+                .map((n) => `"${n}": ...`)
+                .join(', ')}})`
+            : '') +
+          `\n` +
+          `  --arg -                 read the value from piped stdin` +
+          (slotNames.length > 1
+            ? ` (same: a JSON object keyed by slot name)`
+            : '') +
+          `\n` +
+          `  (remove the \`input\` declaration if this pipeline genuinely needs no input)`,
+      );
+      process.exit(2);
+    }
+  }
+  const runner = await loadRunner();
   const result = isPipeline
     ? await runner.runPipelineFromIr({
         ir,

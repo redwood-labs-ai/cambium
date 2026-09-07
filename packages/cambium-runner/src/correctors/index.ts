@@ -1,11 +1,11 @@
-import type { CorrectorFn, CorrectorResult } from './types.js';
+import type { CorrectorContext, CorrectorFn, CorrectorResult } from './types.js';
 import { math } from './math.js';
 import { dates } from './dates.js';
 import { currency } from './currency.js';
 import { citations } from './citations.js';
 import { fieldValues } from './field_values.js';
 
-export type { CorrectorFn, CorrectorResult, CorrectorIssue } from './types.js';
+export type { CorrectorContext, CorrectorFn, CorrectorResult, CorrectorIssue, MatchedVia } from './types.js';
 
 // RED-299: per-`runGen` corrector registry. Replaces the mutable
 // module-global that RED-275 introduced — see `docs/GenDSL Docs/N -
@@ -79,7 +79,7 @@ export function _resetLegacyCorrectorsForTests(): void {
 export function runCorrectorPipeline(
   names: string[],
   data: any,
-  context: { document?: string },
+  context: CorrectorContext,
   correctors: Record<string, CorrectorFn>,
 ): { data: any; results: CorrectorResult[] } {
   const results: CorrectorResult[] = [];

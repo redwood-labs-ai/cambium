@@ -1,4 +1,4 @@
-import type { CorrectorFn, CorrectorResult, CorrectorIssue } from './types.js';
+import type { CorrectorFn, CorrectorResult, CorrectorIssue, MatchedVia } from './types.js';
 
 /**
  * Citations corrector: verifies that cited quotes exist in the source document
@@ -9,7 +9,11 @@ import type { CorrectorFn, CorrectorResult, CorrectorIssue } from './types.js';
  */
 /** Result from citation verification — structured for trace + repair. */
 export type CitationResult = {
-  passed: Array<{ path: string; quote: string }>;
+  // #169: `matched_via` says which haystack the quote was found in —
+  // 'derived' means it passes ONLY because of the format-aware view, which
+  // is the signal a trace reader wants when tuning a deriver. Optional so
+  // hand-built results stay assignable.
+  passed: Array<{ path: string; quote: string; matched_via?: MatchedVia }>;
   failed: Array<{ path: string; quote: string; reason: string }>;
   missing: Array<{ path: string }>;
   totalChecked: number;
@@ -20,6 +24,7 @@ export const citations: CorrectorFn = (data, context): CorrectorResult => {
   const issues: CorrectorIssue[] = [];
   const output = structuredClone(data);
   const document = context.document ?? '';
+  const derivedDocument = context.derivedDocument;
 
   const citationResult: CitationResult = {
     passed: [],
@@ -29,7 +34,7 @@ export const citations: CorrectorFn = (data, context): CorrectorResult => {
     allValid: true,
   };
 
-  walkAndCheck(output, '', document, issues, citationResult);
+  walkAndCheck(output, '', document, derivedDocument, issues, citationResult);
 
   return {
     corrected: false,
@@ -39,12 +44,12 @@ export const citations: CorrectorFn = (data, context): CorrectorResult => {
   };
 };
 
-function walkAndCheck(obj: any, basePath: string, document: string, issues: CorrectorIssue[], citationResult: CitationResult): void {
+function walkAndCheck(obj: any, basePath: string, document: string, derivedDocument: string | undefined, issues: CorrectorIssue[], citationResult: CitationResult): void {
   if (obj == null || typeof obj !== 'object') return;
 
   if (Array.isArray(obj)) {
     for (let i = 0; i < obj.length; i++) {
-      walkAndCheck(obj[i], `${basePath}[${i}]`, document, issues, citationResult);
+      walkAndCheck(obj[i], `${basePath}[${i}]`, document, derivedDocument, issues, citationResult);
     }
     return;
   }
@@ -67,8 +72,13 @@ function walkAndCheck(obj: any, basePath: string, document: string, issues: Corr
         const cit = cits[i];
         if (cit.quote && typeof cit.quote === 'string') {
           citationResult.totalChecked++;
-          if (quoteExistsInDocument(cit.quote, document)) {
-            citationResult.passed.push({ path: `${basePath}.citations[${i}].quote`, quote: cit.quote });
+          const matchedVia = findQuoteMatch(cit.quote, document, derivedDocument);
+          if (matchedVia) {
+            citationResult.passed.push({
+              path: `${basePath}.citations[${i}].quote`,
+              quote: cit.quote,
+              matched_via: matchedVia,
+            });
           } else {
             citationResult.failed.push({
               path: `${basePath}.citations[${i}].quote`,
@@ -91,8 +101,24 @@ function walkAndCheck(obj: any, basePath: string, document: string, issues: Corr
   // Recurse into nested objects/arrays
   for (const key of Object.keys(obj)) {
     if (key === 'citations') continue; // already checked
-    walkAndCheck(obj[key], `${basePath}.${key}`, document, issues, citationResult);
+    walkAndCheck(obj[key], `${basePath}.${key}`, document, derivedDocument, issues, citationResult);
   }
+}
+
+/**
+ * #169: any-of over the two haystacks. Raw first, derived second — so
+ * `matched_via: 'derived'` means exactly "this quote passes ONLY because
+ * of the format-aware view", and a model that copied the literal markup
+ * keeps passing the way it always did.
+ */
+function findQuoteMatch(
+  quote: string,
+  document: string,
+  derivedDocument: string | undefined,
+): MatchedVia | null {
+  if (quoteExistsInDocument(quote, document)) return 'document';
+  if (derivedDocument !== undefined && quoteExistsInDocument(quote, derivedDocument)) return 'derived';
+  return null;
 }
 
 /**

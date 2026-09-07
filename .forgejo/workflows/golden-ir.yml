@@ -35,11 +35,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # NOTE: no `cache: 'npm'` here, and no actions/cache steps below. The
+      # Forgejo runner advertises its cache server at a Docker address
+      # (172.19.0.3:42607) on the runner container's own network, while each
+      # job runs on an isolated per-job network with no route to it. Every
+      # cache call therefore hangs to timeout: ~280s to restore ~/.npm, ~20s
+      # per actions/cache restore, and another ~280s in the post-job save.
+      # That was ~90% of an 11-minute run whose real work is under a minute.
+      # `npm ci` from cold takes ~7s here, so the cache never paid for itself
+      # even in principle. If the runner's cache.host is ever fixed to an
+      # address job containers can route to, re-adding it is a two-line change.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: 'npm'
 
       - name: Setup Ruby
         # Cambium's Ruby surface is stdlib-only (see CLAUDE.md
@@ -54,22 +63,7 @@ jobs:
           apt-get install -y --no-install-recommends ruby
           ruby --version
 
-      # setup-node's `cache: 'npm'` only caches ~/.npm (the download
-      # cache), not node_modules — `npm ci` still rebuilds it every run.
-      # Cache node_modules keyed on the lockfile and skip install on a
-      # hit. Safe because postinstall scripts are forbidden (CLAUDE.md),
-      # so an exact-lockfile-match node_modules is fully deterministic.
-      - name: Cache node_modules
-        id: node-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            node_modules
-            packages/*/node_modules
-          key: node-modules-${{ runner.os }}-node22-${{ hashFiles('**/package-lock.json') }}
-
       - name: Install dependencies
-        if: steps.node-cache.outputs.cache-hit != 'true'
         run: npm ci --prefer-offline --no-audit --no-fund
 
       - name: Run golden IR tests

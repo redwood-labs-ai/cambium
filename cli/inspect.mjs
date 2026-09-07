@@ -7,6 +7,7 @@
 
 import { spawn } from 'node:child_process';
 import process from 'node:process';
+import { loadRunner } from './runner-freshness.mjs';
 
 function usage(msg) {
   if (msg) console.error(`\n${msg}`);
@@ -64,7 +65,7 @@ export async function runInspectCli(args) {
     else usage(`Unknown flag: ${a}`);
   }
 
-  const { runInspect, resolveRunsDir, isLoopback } = await import('@redwood-labs/cambium-runner');
+  const { runInspect, resolveRunsDir, isLoopback } = await loadRunner();
 
   // The viewer is unauthenticated and serves run outputs. Refuse a non-loopback
   // bind unless the operator explicitly opts in — same gate as `cambium serve`.

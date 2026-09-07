@@ -92,6 +92,16 @@ cambium run packages/cambium/app/gens/<name>.cmb.rb \
 
 The run writes `runs/<id>/output.json`. Copy it to `examples/fixtures/<name>-snapshot.json` and commit. This snapshot is now the approved expected output.
 
+### What `--mock` emits
+
+The mock provider is a pure function of the prompt and the step's return schema — no randomness, no clock, no environment — which is what makes the snapshot reproducible. Its output is chosen in three tiers (`packages/cambium-runner/src/mock-output.ts`, #205):
+
+1. **Canned framework ids.** `MemoryWrites`, `CambiumDiffAnalysis` and `CambiumCiReview` get fixed strings so retro memory agents and the CI-review gens run end to end.
+2. **The default analyst payload** (`summary`, `metrics`, `key_facts`) — used when the gen has no schema, or when that payload validates against the schema, decided by the same validator configuration the run's Validate step uses (so "fits" means exactly "Validate would pass", nested constraints included). This is the output every pre-#205 mock run produced, kept byte-identical for the gens it fits.
+3. **A schema-derived payload** for everything else — the case for any real `returns do … end` block. The walker visits every declared property and derives a placeholder: `const`, then the first `enum` value, then `default`, then by type — strings become `"mock <field>"`, numbers `0` (or `minimum` when it is positive), booleans `false`, arrays one element (or `minItems`), nested objects recurse, `$ref` resolves within the schema, `anyOf`/`oneOf` take their first branch and `allOf` merges. A `required` key with no declared shape gets `null`, unless `additionalProperties: false` makes the schema unsatisfiable. The walk is bounded: at most 10,000 values are constructed per mock (a cyclic `$ref` under an array with `minItems: 2` would otherwise never return), and past that budget arrays and objects stop growing and the output simply fails Validate. The walker never synthesizes `pattern`, `minLength`, `multipleOf` or `format` values, so a schema that needs them still fails Validate deterministically — and the canonical way to *inject* a validation failure in a test is a property whose subschema is `{ not: {} }`, which no future mock improvement can satisfy.
+
+**A mock golden pins shape and determinism, not quality.** Placeholder strings are not colors, dates or verbatim quotes, so correctors flag them and citation checks fail on them: a mock run of a gen with error-severity correctors normally ends in `CorrectAcceptedWithErrors`, and a `grounded_in` gen ends with `GroundingCheck` / `GroundingCheckAfterRepair` reporting the placeholder quote as unverified while the run stays `ok: true` (nothing was deleted, so the RED-175 guard does not trip). That is the expected snapshot, and the golden's job is to notice when it moves. Claims about quality — a valid palette out of a healthy candidate, a quote that verifies — belong in tests that feed hand-authored candidates through `cambium replay --edit` or call the corrector directly.
+
 ### Step 3: write the test
 
 `cambium new agent <Name>` scaffolds this automatically. The generated test:
@@ -133,7 +143,7 @@ Match the normalizer to what varies in mock output but should not constitute a r
 | Prose / LLM-generated strings with variable whitespace | `normalizeStrings` |
 | Floating-point recomputed fields (math corrector) | `numberTolerance: 0.01` or `normalizeNumbers` |
 | ISO timestamps (the mock produces the same value, but real runs vary) | `normalizeDates` |
-| Citations (present in live runs, absent in mock or not under test) | `stripCitations` or `ignoreFields: ['citations']` |
+| Citations (real quotes in live runs, `mock quote` placeholders under `--mock`, or not under test) | `stripCitations` or `ignoreFields: ['citations']` |
 | Run-level metadata (run_id, timestamps) | `ignoreFields: ['run_id', 'generated_at']` |
 | Array elements whose citation quotes may drift | `ignoreFields: ['items[*].quote']` |
 

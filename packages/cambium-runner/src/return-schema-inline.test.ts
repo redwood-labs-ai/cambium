@@ -14,13 +14,14 @@ import { runGen } from './runner.js';
 // default branch: { summary: string, metrics: object, key_facts: array }.
 const MOCK_PAYLOAD_KEYS = ['summary', 'metrics', 'key_facts'];
 
-function inlineSchema(required: string[]) {
+function inlineSchema(required: string[], extraProperties: Record<string, any> = {}) {
   return {
     type: 'object',
     properties: {
       summary: { type: 'string' },
       metrics: { type: 'object' },
       key_facts: { type: 'array' },
+      ...extraProperties,
     },
     required,
     additionalProperties: false,
@@ -82,12 +83,32 @@ describe('RED-419 runner consumes inline returnSchema (STEP-003)', () => {
 
   it('fails validation when the mock output violates the inline schema', async () => {
     // Require a field the mock never emits → validation fails after repair.
+    // NOTE (A-001, #205): this is an UNSATISFIABLE schema, not a mock
+    // limitation — `missing_required_field` is required but never declared
+    // in `properties`, and `additionalProperties: false` forbids adding a
+    // key with no declared shape. No mock (schema-derived or otherwise)
+    // could ever satisfy it; that's the point — it's the fail-closed proof
+    // that a genuinely-unsatisfiable schema still fails Validate.
     const result = await runGen({
       ir: blockFormIR(inlineSchema(['summary', 'missing_required_field'])),
       schemas: {},
     });
     expect(result.ok).toBe(false);
     expect(result.failureKind).toBe('validation');
+  });
+
+  it('#205 (DEC-005/A-001b): derives a schema-valid mock when the default payload does not fit', async () => {
+    // Same shape as the test above, but `extra` IS declared this time — the
+    // walker can derive it, so the schema is satisfiable and the run
+    // succeeds. This is the ticket's headline case: a `returns do … end`
+    // schema with a field the default mock payload lacks.
+    const result = await runGen({
+      ir: blockFormIR(inlineSchema(['summary', 'extra'], { extra: { type: 'string' } })),
+      schemas: {},
+    });
+    expect(result.ok).toBe(true);
+    expect(result.output.extra).toBe('mock extra');
+    expect(Object.keys(result.output)).toEqual(['summary', 'metrics', 'key_facts', 'extra']);
   });
 
   it('inline returnSchema wins over an injected returnSchemaId match', async () => {

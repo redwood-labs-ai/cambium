@@ -34,7 +34,7 @@ Roughly, the runner does this per IR:
 
 ## Model providers
 
-Since RED-393, every model call resolves the model-id prefix through a per-run **`ProviderRegistry`** (`packages/cambium-runner/src/providers/`). `runGen` builds it after the tool/action registries: framework built-ins first, then app-supplied `app/providers/*.ts` (filename = prefix), last-write-wins so an app provider shadows a built-in. The two dispatchers — `makeGenerateText` / `makeGenerateWithTools` in `runner.ts` — close over that registry and own the cross-cutting gates (native-document support, `--mock` short-circuit, fetch-failure hinting, inline tool-call markup parsing); a provider implements ONLY build-body → fetch → normalize.
+Since RED-393, every model call resolves the model-id prefix through a per-run **`ProviderRegistry`** (`packages/cambium-runner/src/providers/`). `runGen` builds it after the tool/action registries: framework built-ins first, then app-supplied `app/providers/*.ts` (filename = prefix), last-write-wins so an app provider shadows a built-in. The two dispatchers — `makeGenerateText` / `makeGenerateWithTools` in `runner.ts` — close over that registry and own the cross-cutting gates (native-document support, `--mock` short-circuit — its output is built by `mock-output.ts`: canned id → default-if-it-fits → schema-derived (#205) — fetch-failure hinting, inline tool-call markup parsing); a provider implements ONLY build-body → fetch → normalize.
 
 Built-in providers (all support agentic `mode :agentic` and single-turn `generate`):
 
@@ -54,6 +54,10 @@ Tool calls remain fully guarded: every tool dispatch builds a `ToolContext` with
 
 The memory subsystem (`packages/cambium-runner/src/memory/`, `packages/cambium-runner/src/providers/embed.ts`) is gated behind dynamic imports of `better-sqlite3` and `sqlite-vec`, both in `optionalDependencies`. A gen with no `memory :...` decls never triggers the import. A gen that uses memory without the deps installed gets a clear plan-time error pointing at `npm install better-sqlite3 sqlite-vec`.
 
+## Precompiled-IR consumers (#195)
+
+`ir-artifact.ts` is the shared validator `cambium serve --precompiled`/`--ir-dir` and `cambium run --ir` both use to load compiler output straight off disk instead of `runGenFromIr`'s normal in-process compile-then-run path — version gate, structural checks, and the closed-IR rule (no pipeline/`enrich`/retro-agent site) in one place. `RunGenFromIrOptions.engineDir` lets a caller state the engine folder explicitly instead of relying on the `entry.source`-then-cwd fallback, and `opts.appRoot` now wins as the tier-1 workspace for contracts + correctors (not just tool/action/provider/log-sink discovery) whenever `<appRoot>/Genfile.toml` exists — both anchor a shipped artifact on its own location rather than a build-machine path. See [[N - Precompiled IR Distribution (#195)]].
+
 ## See also
 
 - [[C - IR (Intermediate Representation)]]
@@ -61,3 +65,4 @@ The memory subsystem (`packages/cambium-runner/src/memory/`, `packages/cambium-r
 - [[S - Tool Sandboxing (RED-137)]]
 - [[P - Memory]]
 - [[N - Model Identifiers]]
+- [[N - Precompiled IR Distribution (#195)]]

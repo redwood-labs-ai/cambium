@@ -125,7 +125,7 @@ output.json + trace.json
 │   │   ├── memory_pools/  # Named memory pools (.pool.rb) for shared strategy+embed
 │   │   ├── log_profiles/  # Named log profiles (.log_profile.rb) — trace fan-out config (RED-302)
 │   │   ├── logs/          # App log plugins (.log.ts) — custom backends (RED-302)
-│   │   └── config/        # Workspace config — models.rb (RED-237), memory_policy.rb (RED-239)
+│   │   └── config/        # Workspace config — models.rb (RED-237 aliases + RED-176 repair slot), memory_policy.rb (RED-239)
 │   ├── src/
 │   │   └── contracts.ts   # TypeBox schemas (source of truth)
 │   └── tests/
@@ -152,7 +152,7 @@ output.json + trace.json
 │   │   ├── context.ts         # Grounding-source document lookup (RED-276)
 │   │   ├── genfile.ts         # Genfile.toml [types].contracts resolver (RED-274)
 │   │   └── schema-describe.ts # Auto-generated schema descriptions
-│   ├── scripts/copy-assets.mjs # Post-tsc asset copy for tool/action .json (RED-306)
+│   ├── scripts/copy-assets.mjs # Post-tsc asset copy for tool/action .json (RED-306) + dist/build-info.json stamp
 │   ├── tsconfig.build.json    # Emit config: outDir dist/, declaration: true (RED-306)
 │   └── README.md              # Per-package library README (RED-306)
 ├── ruby/cambium/
@@ -168,6 +168,7 @@ output.json + trace.json
 │   ├── init.mjs           # `cambium init` workspace bootstrap
 │   ├── lint.mjs           # `cambium lint` package validation
 │   ├── scaffold-tool.mjs  # `cambium new tool --describe ...` agentic scaffolder (RED-216)
+│   ├── runner-freshness.mjs # Stale-dist/ guard + loadRunner() — the only sanctioned runner import
 │   ├── schedule.mjs       # `cambium schedule preview|list|compile` (RED-305)
 │   ├── schedule-targets/  # Compile targets: k8s-cronjob, crontab, systemd, github-actions, render-cron
 │   └── workspace-shape.mjs # detectWorkspaceShape — [workspace] vs [package] layout (RED-286)
@@ -189,6 +190,31 @@ npx tsx scripts/gaia-eval.ts \
   --expected packages/cambium/examples/gaia-questions/expected.jsonl \
   --output results.jsonl
 ```
+
+### Rebuild the runner after editing it
+
+`cambium run` (and `replay` / `serve` / `inspect`) load the runner through
+`import('@redwood-labs/cambium-runner')`, whose `main` is `./dist/index.js`.
+In a source checkout that means **the CLI executes the last build, not your
+working tree** — so an edit under `packages/cambium-runner/src/` doesn't take
+effect until you run:
+
+```bash
+npm run build
+```
+
+`npm test` builds first, so the test suite always sees your edits. The CLI
+does not. Worse, because `npm test` rebuilds `dist/` from whatever tree was
+checked out at the time, a `git stash` / test / `stash pop` — or a rebase, or
+a bisect — leaves `dist/` holding *another branch's* code while your working
+tree shows yours.
+
+`cli/runner-freshness.mjs` guards against this: it compares src/dist mtimes
+before every runner import and refuses to run stale, naming the branch and
+commit `dist/` was built from (stamped into `dist/build-info.json` at build
+time). Set `CAMBIUM_SKIP_BUILD_CHECK=1` to run the existing `dist/` anyway.
+The guard is a no-op outside a source checkout, so installed users never see
+it.
 
 ## Docs
 

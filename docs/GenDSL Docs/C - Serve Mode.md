@@ -25,6 +25,14 @@ cambium serve --workspace <path> --bind <uri> [flags]
                          tcp://127.0.0.1:9000
                          unix:///tmp/cambium.sock
                          pipe://cambium                (Windows named pipe)
+--precompiled          Boot from each gen's sibling <gen>.ir.json artifact (what
+                       `cambium compile --write` / engine mode write) instead of
+                       spawning `ruby compile.rb` — no Ruby needed on PATH. See
+                       "Precompiled boot" below (#195).
+--ir-dir <dir>         Like --precompiled, but every artifact lives flat under
+                       <dir>/<basename>.ir.json (what `cambium compile --out-dir
+                       <dir>` writes). Implies --precompiled; wins when both are
+                       passed.
 --allow-remote         Allow non-loopback tcp:// binds. The runner is unauthenticated
                        in v1; only pass when the orchestrator isolates the address.
 --max-inflight <n>     Cap concurrent /v1/run dispatches; over-cap → 503 + overloaded.
@@ -150,6 +158,11 @@ boot:
      <path>` in bare mode. The Ruby compiler emits a {method → IR} map
      for every public user method; the server caches them all. Pipeline
      IRs carry `kind: "Pipeline"`; gen IRs have no kind field.
+     — `--precompiled` / `--ir-dir` (#195): skip the Ruby spawn entirely
+     and read each gen's `.ir.json` artifact off disk instead, through
+     the same validator `cambium run --ir` uses (`ir-artifact.ts`). See
+     "Precompiled boot" below — `[exports.pipelines]` is refused
+     outright in this mode.
   3. Bind the HTTP listener (parseBind) and resolve `handle.ready`.
 
 per-request:
@@ -210,6 +223,36 @@ Precedence chain: `opts.compileRb` → `process.env.CAMBIUM_COMPILE_RB` → a mo
 
 If ANY `[exports.gens]` entry fails to compile (Ruby syntax error, missing referenced schema, etc.), the server fails to start with a clear error. Half-loaded servers — where some gens work and others fail at first request — are NOT a state the runtime allows. Operators see compile errors at boot, not as 500s in production traffic.
 
+In precompiled mode (`--precompiled` / `--ir-dir`, #195) the same stance covers a wider failure surface — each of the following fails `ready` before the listener binds, never as a 500 at first request:
+
+- A declared gen's artifact is missing. Every missing artifact is listed in one error (mixed catalogs — some resolved, some not — are not a thing).
+- The artifact is malformed JSON, over 50 MB, or an unsupported/missing compiler `version`; a `returnSchemaId` that is not an identifier (or is a reserved property name), or a memory decl whose `name`/`scope` is not a safe directory segment.
+- The IR is not closed — it still needs Ruby at run time (a Pipeline, an `enrich` gen, or a retro memory-write agent). `[exports.pipelines]` is refused outright at catalog load for the same reason.
+- A symbol-form gen (`returns :Symbol`) is loaded but its workspace declares no `[types].contracts`, **or** the declared contracts module does not export the gen's `returnSchemaId` — boot imports the contracts module for every gen that needs one and checks the export is present (own-property), so a stale or hand-edited artifact fails here, not on its first request (AUD-002).
+
+## Precompiled boot (`--precompiled` / `--ir-dir`, #195)
+
+The same Genfile serves both dev (compile at boot) and prod (`--precompiled`) — config names the gens, the environment decides how they're served, and the choice is visible on the process's own command line. This is the `assets:precompile` shape, not a second dialect of `[exports.gens]`.
+
+**Artifact location.** For `Name = "app/gens/x.cmb.rb"`:
+
+| Flag | Artifact resolved at |
+| -- | -- |
+| `--precompiled` | `app/gens/x.ir.json` (sibling of the declared `.cmb.rb`) — what `cambium compile --write` / engine mode write. |
+| `--ir-dir <dir>` | `<dir>/x.ir.json` (flat, by basename) — what `cambium compile --out-dir <dir>` writes. Implies `--precompiled`; wins when both flags are passed. |
+
+In either mode, the declared `.cmb.rb` need not exist on disk — a shipped workspace can carry `Genfile.toml` + `.ir.json` artifacts + runtime `app/` plugin dirs (`app/correctors/`, `app/tools/`, …) with no Ruby source and no Ruby on PATH at all. The catalog value must still end in `.cmb.rb`, though — the Genfile names gens, not artifact files.
+
+**Closed-IR rule.** A precompiled artifact must be a **closed** gen IR: no pipeline, no `enrich`, no `writes_memory_via` retro agent. Each of those spawns Ruby to compile a sub-agent's IR at request time, which would make "no Ruby on PATH" a per-gen surprise instead of a whole-process property. Refused at boot (see "Boot fail-fast" above); lifting this is a tracked follow-up (see [`N - Precompiled IR Distribution (#195)`](N%20-%20Precompiled%20IR%20Distribution%20%28%23195%29.md)).
+
+**Symbol-form gens.** `returns do … end` (RED-419) gens carry their schema inline and need nothing else. `returns :Symbol` gens need a contracts module — declare `[types].contracts` in the Genfile and ship the contracts file alongside the artifacts, or switch the gen to an inline schema.
+
+**Anchoring.** Discovery for tools/actions/providers/log sinks/correctors/contracts is anchored on the **workspace** (`--workspace`) in precompiled mode, not on the artifact's `entry.source` — a build-machine path that has no reason to exist (or to mean anything) on the machine running the shipped artifact. Compile-at-boot mode is unaffected (no `appRoot` is passed; behavior is byte-identical to before #195).
+
+**Freshness is the operator's build step, not serve's.** There is no mtime check between a `.cmb.rb` and its artifact — package installs and fresh git checkouts stamp files in an arbitrary order, so a mtime comparison would produce false "stale" failures. Serve logs `[cambium serve] precompiled: <n> gen(s) from <where>` at boot so the mode — and which artifacts it loaded — is visible to the operator. A content-digest staleness check would need an additive IR field and a corpus regeneration; deferred (see the design note).
+
+**Byte-identical responses.** The same workspace, requested the same way, returns identical `/v1/healthz` and `/v1/run` bodies (modulo `run_id`) whichever way it booted — the artifact file **is** the same bytes `compileBare` would have produced (`cambium compile --write` / `--out-dir` and serve's default `compileBare` both spawn `ruby compile.rb` in bare mode; the artifact is that stdout, saved).
+
 ## Concurrency
 
 Node is single-threaded but `runGen` is async throughout — N concurrent calls share the event loop. Provider rate limits remain the bottleneck; `--max-inflight` is the *server-side* cap (returns 503 + `overloaded` when full).
@@ -237,17 +280,24 @@ The wire format is the contract; clients are thin. The Cambium monorepo's first-
 ## Architecture
 
 ```
-packages/cambium-runner/src/serve/
-  bind.ts          # URI parser (tcp/unix/pipe) + loopback enforcement
-  bind.test.ts
-  gen-catalog.ts   # Genfile.toml [exports.gens] loader + path validation
-  gen-catalog.test.ts
-  serve.ts         # node:http server, runGen dispatch, error mapping
-  serve.test.ts    # 32 e2e + unit tests covering happy + every error.kind
+packages/cambium-runner/src/
+  ir-artifact.ts   # #195: shared IR-artifact reader (version gate, structural
+                   #   checks, DEC-001 closed-IR rule) — serve boot AND
+                   #   `cambium run --ir` both load compiler output through this
+  ir-artifact.test.ts
+  serve/
+    bind.ts          # URI parser (tcp/unix/pipe) + loopback enforcement
+    bind.test.ts
+    gen-catalog.ts   # Genfile.toml [exports.gens] loader + path validation;
+                     #   #195: precompiled artifact resolution (sibling / --ir-dir)
+    gen-catalog.test.ts
+    serve.ts         # node:http server, runGen dispatch, error mapping
+    serve.test.ts    # e2e + unit tests covering happy + every error.kind +
+                     #   the #195 precompiled-boot describe block
 
 cli/
-  serve.mjs        # argv parsing, runServe, SIGTERM/SIGINT drain
-  cambium.mjs      # cambium serve case in main switch
+  serve.mjs        # argv parsing, runServe, SIGTERM/SIGINT drain, --precompiled/--ir-dir
+  cambium.mjs      # cambium serve case in main switch; cambium run --ir (#195)
 ```
 
 The runner package's public surface includes `runServe`, `parseBind`, `RunServeOptions`, `RunServeHandle`, and the `BindTarget` / `ErrorKind` type aliases — engine-mode hosts that want to embed the server have the same entry point as the CLI.
@@ -281,3 +331,4 @@ Items the original RFC said we'd ship but that didn't pull their weight on close
 - [[S - Tool Sandboxing (RED-137)]] — the dispatch invariants serve mode does NOT relitigate.
 - [[N - App Mode vs Engine Mode (RED-220)]] — engine-mode embedding context this builds on.
 - [[N - Engine-Mode Corrector Registry Isolation (RED-281)]] — per-`runGen` isolation that makes serve mode's "many calls, one process" safe.
+- [[N - Precompiled IR Distribution (#195)]] — the full producer↔consumer symmetry, the shipped-workspace layout contract, and `cambium run --ir`'s equivalent boot.

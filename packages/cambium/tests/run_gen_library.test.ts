@@ -96,6 +96,19 @@ describe('runGen library entry (RED-220 POC follow-up)', () => {
     ).rejects.toThrow(/runId/);
   });
 
+  it('a returnSchemaId of "__proto__" is "Schema not found", not a validator that accepts anything (#195 security gate F1)', async () => {
+    // On a plain-object contracts module, `contractsMod['__proto__']` is
+    // `Object.prototype` — truthy — and AJV compiles it into a validator
+    // that passes every output. The lookup is own-property-only now.
+    await expect(
+      runGen({
+        ir: minimalIr('__proto__') as never,
+        schemas: { MockReport },
+        mock: true,
+      } as RunGenOptions),
+    ).rejects.toThrow(/Schema not found/);
+  });
+
   it('accepts a normal runId override (auto-generated shape)', async () => {
     // Belt-and-suspenders: confirm the validator doesn't reject the
     // auto-generated shape if a caller pins it explicitly.

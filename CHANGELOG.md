@@ -4,6 +4,465 @@ All notable changes to Cambium are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and Cambium adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+_Nothing yet._
+
+## [0.11.0] — 2026-09-07 — The Meter
+
+An agentic run died at 39 turns. A quantized 35B model got an unsatisfying
+`web_search` result, re-issued the identical query verbatim, and kept going until
+the 87k-token transcript tripped the inference server's context window and the
+run 400'd. The only backstop was `budget per_run: { max_calls: }` — which catches
+this only when set tight enough to also reject legitimate retries on healthy runs.
+
+That run is the shape of the release. Cambium could tell you in exhaustive detail
+what a run *did* and almost nothing about what it *cost* — and the two places cost
+actually accumulates, the agentic loop and the repair loop, were the two places
+nothing was watching. Every agentic turn re-sent the whole transcript at full
+price, because that path placed no cache breakpoints inside the messages array at
+all. Repair passes ran on whatever frontier model the gen declared, doing
+janitorial work at frontier rates. A model that asked the same question twice got
+billed twice.
+
+Each of those now has a lever: prompt caching on the agentic path, a `repair`
+model slot that sends the janitorial passes somewhere cheap, a duplicate tool-call
+guard, and `exclude_from_prefix` for the one per-call key that would otherwise
+shard a cache entry per fan-out branch. Precompiled-IR distribution takes the Ruby
+toolchain out of the serving path entirely.
+
+The other half is provenance, and that half fails closed. A grounded run can no
+longer pass by deleting the citations it could not verify — a repair that removes
+them fails the run rather than reporting `ok: true` with nothing checked. A
+pipeline no longer runs on inputs nobody supplied, whether the caller omitted
+`--arg` entirely or handed over an object with slots missing. Both were silent
+before. Neither is now.
+
+### Breaking Changes
+
+- **A grounded run can no longer pass by deleting its citations (#175).** The grounding re-verify
+  (`GroundingCheckAfterRepair`, `GroundingFieldValueCheckAfterRepair`) now counts citations — or grounded
+  values, under `verify: :field_values` — on the output repair was handed and on the output it returned.
+  Fewer after than before means the "fix" was a deletion: the step reports `ok: false` with
+  `deleted_by_repair: true`, the run's `ok` flips to `false`, and the caller gets `validation_failed`
+  instead of `200`. Runs this changes: a `grounded_in` gen whose model fabricated a quote and whose repair
+  then dropped the citation — `ok: true` / `totalChecked: 0` before, `ok: false` / `deleted_by_repair: true`
+  now. **Migration:** if you read `totalChecked: 0` as "grounded", read
+  `citations_after > 0 and deleted_by_repair != true` (or `values_after`) instead. Deliberately unchanged:
+  unhealed-but-undeleted findings still ship `ok: false` on the step with `ok: true` on the run (RED-298),
+  and an output that never had citations is not a deletion. Breaks promised surface 4 (trace step
+  vocabulary) inside the pre-1.0 window, per `COMPATIBILITY.md` — that window is why it was taken now.
+  Closes #175.
+
+- **`cambium run <pipeline>` with no `--arg` now refuses instead of running on a substituted `'{}'`
+  (#223).** A declared `input :name, schema:` slot has no `optional:`/`default:` — it is mandatory by
+  construction — so an omitted `--arg` against a pipeline with one or more input slots was never a
+  legitimate invocation, only a caller mistake that used to run anyway: single-slot pipelines received
+  the literal 2-char string `"{}"` as their document, and multi-slot pipelines bound every declared slot
+  to `undefined` with no error (`JSON.parse('{}')` happening to succeed, not a designed affordance). Both
+  are now a hard CLI error, exit `2`, printed before the runner loads and before any model call or spend
+  — naming the pipeline, the declared slot names, and the three ways to supply a value.
+  **Migration:** a command like `cambium run app/pipelines/foo.pipeline.rb --method run` that relied on
+  the substitution now fails; supply `--arg <path>` (read a file), `--arg -` (pipe stdin), or remove the
+  `input` declaration if the pipeline genuinely needs no input. `runs/<id>/ir.json` no longer records a
+  substituted `context._pipeline_arg` — only a value the caller actually supplied. `cambium serve`,
+  `cambium replay`, and library callers of `runPipelineFromIr` are unaffected: the refusal lives only in
+  the CLI, the one layer that saw the argv and can tell "the caller supplied nothing" from "the caller
+  supplied emptiness" (two earlier designs tried putting it in the binder or in `compile.rb` and both
+  leaked into those callers — see #220). Breaks promised surface §6 (CLI — a flag's meaning) inside the
+  pre-1.0 window, per `COMPATIBILITY.md`. §2 (IR JSON shape) is **not** broken: `context._pipeline_arg`
+  is unchanged in name, type and meaning — what changed is which invocations produce an IR at all. That
+  window is why it was taken now, in one release, with no deprecation cycle: no caller in-tree depends on
+  the old behavior, and the new behavior is itself a loud, actionable error rather than a silent change.
+  Closes #223.
+
+- **A multi-slot pipeline no longer runs on a partially-populated `--arg` object (#226).**
+  `parsePipelineInputs` bound every declared slot from the supplied JSON object with a plain
+  property read, so a slot **missing** from that object bound `undefined` and the pipeline ran
+  anyway — reaching the same all-or-partly-unbound end state that the adjacent non-object branch
+  exists to reject, by a path that happens to satisfy the type check. Every declared slot is
+  mandatory by construction: `input(name, schema:)` takes no `optional:` and no `default:`. A
+  parseable object that leaves any declared slot unbound now raises, naming **the missing slots
+  specifically** rather than re-listing every declared one.
+
+  The read is now own-property only. `NAME_RE` (`/\A[a-z][a-z0-9_]*\z/`) permits `constructor`,
+  so `input :constructor` is a legal declaration on which the old plain read bound
+  `Object.prototype.constructor` — a function — and reported nothing missing. That is fail-open
+  through the documented DSL, and the same guard family as #195's `returnSchemaId` lookup closes
+  it. A slot supplied as `null` is *present*, not missing; judging its value is the schema's job.
+
+  **Migration:** supply every declared slot in the `--arg` object. Unlike #223, this one lives in
+  the **binder**, so it reaches `cambium serve`, `cambium replay`, and library callers of
+  `runPipelineFromIr` — that difference is exactly why it could not ride along with #223 and
+  needed its own decision. Blast radius in-tree is nil: all three in-tree pipelines declare a
+  single `input` and return before this branch. Pre-1.0 break taken in one release with no
+  deprecation cycle, on the same reasoning as #223 — the new behavior is a loud, actionable error
+  replacing a silent wrong one. Whether pipeline `input` should gain `optional:` / `default:` at
+  all is a DSL vocabulary question (`COMPATIBILITY.md` §1) and deliberately not folded in here.
+  Closes #226.
+
+### Added
+
+- **Prompt caching on the agentic path (`mode :agentic`).** An agentic turn
+  carried exactly two cache breakpoints — the `system` block and the last tool
+  — and **none inside the messages array**, so every turn re-sent the entire
+  transcript, shared document included, at full price. Cost grew quadratically
+  in turn count: measured on an ungrounded agentic gen with a 6 KB document,
+  the uncached payload went 6,102 bytes on turn 1 to 16,056 on turn 8, the
+  document re-billed every time. Now the shared head of the first user message
+  (document + non-primary context sections) is split into a cacheable prefix
+  and marked, and the request asks for Anthropic's **automatic** breakpoint — a
+  top-level `cache_control` the API advances through the transcript itself,
+  rather than a marker Cambium places and has to keep in sync with the loop.
+  The allocation is exactly Anthropic's ceiling of four: `system` +
+  `tools[last]` + user-prefix + automatic. Because the automatic breakpoint
+  consumes one of those four and a fifth explicit marker is an HTTP 400, the
+  now-redundant last-document marker is suppressed on this path (documents sit
+  before the prefix in the same message, and a cache region extends *backward*
+  from its marker, so they were already covered). Eligibility here is
+  **size-only** — no `grounded_in` requirement, unlike the single-turn path —
+  because an agentic prefix is re-sent every turn, so the write pays for itself
+  from turn 2 onward; a gen that answers on turn 1 pays a write with no read.
+  The single-turn path is untouched and byte-identical. A fan-out no longer
+  prewarms an agentic branch: prewarm fires through the single-turn path, which
+  sends no tools, and Anthropic builds cache prefixes `tools` → `system` →
+  `messages`, so the warm-up diverged at the first level and wrote an entry the
+  branch could never read. Closes #228.
+
+  **Semantic repair does not ride this entry, and cannot.** Repair dispatches
+  through the single-turn, tools-less path, so it differs from an agentic
+  Generate at the first level of Anthropic's `tools` → `system` → `messages`
+  prefix hierarchy — the same reason prewarm skips agentic branches. Repair
+  therefore keeps building through the non-agentic assembler variant for every
+  gen, which is also the accurate description of the request it makes: no tools
+  are wired up, and the `REPAIR RULES` block names `OUTPUT_JSON_TEMPLATE` by
+  hand. Repair prompts are byte-identical whether or not the gen declares
+  `mode :agentic`. Recorded rather than "fixed" (#232).
+
+  **Prompt layout change, Anthropic only.** For an agentic gen whose prefix
+  clears the ~4 KB cache floor, the same prompt text is now laid out
+  prefix-first: the per-call instruction moves from the **head** of the user
+  message to its **tail**, and the `\n\n` that separated instruction from
+  document is dropped (measured: 6,069 → 6,067 characters). This is required —
+  instruction-first would put the varying text inside the backward-extending
+  cached region and defeat the cache — and it is the layout the single-turn
+  path has used since 0.8.1. Prompt *content* is unchanged. Gens below the
+  cache floor, and every non-Anthropic provider, keep the legacy
+  `<instruction>\n\n<document>` ordering byte-for-byte. If you have tuned an
+  agentic prompt against the old ordering on Anthropic, re-read it. See
+  [`N - Model Identifiers`](docs/GenDSL%20Docs/N%20-%20Model%20Identifiers.md)
+  § Anthropic prompt caching → Agentic → Ordering note.
+
+  **Custom-provider authors: action required if you set
+  `supportsPromptCacheControl: true`.** That flag previously gated forwarding
+  of `GenerateTextOpts.cachedPrefix` only; it now also gates the new
+  `GenerateWithToolsOpts.cachedPrefix`. A provider that sets the flag and
+  consumes `cachedPrefix` in `generateText` but not in `generateWithTools`
+  will **silently drop the prefix** — the whole document and context payload —
+  on every agentic run, with no error and no trace signal. Consume it in both
+  methods. No in-tree provider is affected. Recorded in `COMPATIBILITY.md`
+  § Behavior register.
+
+- **`exclude_from_prefix` — keep a per-call context key out of the prompt-cache
+  prefix.** A `fan_out` of 200 reviewers over one large grounded document, where
+  each branch carries its own `page_id` from a pipeline binding, shared *nothing*:
+  provider prompt caches address the prefix by a content hash, so that single
+  per-branch key gave every branch its own prefix, the prewarm found no two
+  branches alike and skipped entirely (`meta.prewarm.skipped: "no-shared-prefix"`),
+  and all 200 raced cold for the same document. The only way to keep a key out of
+  the prefix was to rename it with a leading `_` — which also hides it from the
+  model entirely, so a value that has to be *visible* had nowhere to live.
+
+  ```ruby
+  class PageReviewer < GenModel
+    grounded_in :raw_diff, require_citations: true
+    exclude_from_prefix :page_id
+  end
+  ```
+
+  Named keys still reach the model — they render as their usual `<KEY>:` section
+  into the **uncached tail** of the user prompt, appended after the `generate`
+  instruction, where the provider's backward-extending cache region can't reach
+  them. Only their position changes. With the declaration, those 200 branches
+  collapse to **one** prewarm group.
+
+  Declared on the gen, not on the key: prefix identity is a property of the gen,
+  and in the reproducing case `page_id` arrives from a *pipeline* `fan_out`
+  binding, so a per-key marker would have put a gen-tuning knob in the pipeline
+  author's hands. Naming the `grounded_in` source is a compile error (the document
+  is the largest stable payload in the prefix and the reason it exists); so is
+  naming a `_`-prefixed key (a no-op that reads as if it did something). The `_`
+  convention keeps its exact current meaning — hidden **and** excluded — untouched.
+
+  The declaration only takes effect where it can help: on a provider that can
+  mark a cache breakpoint, with the prefix over the ~4 KB floor. Everywhere else
+  — oMLX and Ollama always, Anthropic below the floor — it is a **no-op** and the
+  prompt is byte-identical to a gen that declared nothing, rather than a
+  reordering bought for zero caching benefit. One caveat worth knowing: excluding
+  a *large* key can itself drop the prefix under the floor and switch caching
+  off, the inverse of the intent, so every `Generate` step now carries
+  `meta.cache_prefix: { judged_chars, used, excluded_chars }` and the runner prints one
+  stderr line when a declaration is specifically the reason caching went off.
+
+  Nothing changes for a gen that doesn't declare it: no `excludeFromPrefix` IR
+  field is emitted (absent, not `[]`), and the assembled system block, cacheable
+  prefix and user prompt are byte-identical on all three paths — single-turn,
+  agentic, **and semantic repair**. Prompt-cache keys are content hashes, so that
+  is the whole ballgame: `npm run test:golden` stays at 50 passed across the
+  corpus. Additive under `COMPATIBILITY.md` §1 (DSL vocabulary), §2 (IR JSON
+  shape) and §4 (trace vocabulary) — nothing to migrate. Closes #182.
+
+- **Precompiled-IR distribution: `cambium serve --precompiled`/`--ir-dir` and
+  `cambium run --ir` execute compiled `.ir.json` artifacts with no Ruby on the
+  target machine.** The runtime was already Ruby-free — `runGenFromIr` consumes
+  IR JSON, nothing else — but the two operational entry points still spawned
+  `ruby compile.rb` on every boot or run, so "ship compiled IR; Ruby is a
+  build-time dependency" wasn't reachable through the CLI. `cambium compile
+  --write` / `--out-dir` already produced the artifacts; now `cambium serve
+  --precompiled` (sibling `<gen>.ir.json`) / `--ir-dir <dir>` (flat by
+  basename) read them at boot instead of compiling, and `cambium run --ir
+  <file.ir.json>` executes one directly. A precompiled artifact must be a
+  closed gen IR — a pipeline, an `enrich` gen, or a retro memory-write agent
+  is refused at boot/startup, never a first-request surprise, since each
+  still needs Ruby per sub-gen; a symbol-form gen (`returns :Symbol`) without
+  a declared `[types].contracts` is refused the same way. Discovery for
+  tools/correctors/contracts anchors on the artifact's own on-disk location,
+  not the build-machine path recorded in `entry.source`. Same workspace,
+  same request, byte-identical response either boot path. Library consumers
+  (engine-mode hosts embedding the runner) get the same reader:
+  `readIrArtifactFile`, `resolveArtifactAnchors`, `needsContracts` and
+  `injectContextInput` are now named exports of
+  `@redwood-labs/cambium-runner`, alongside `IrArtifactError` and the two
+  limits needed to interpret a throw (`SUPPORTED_IR_VERSIONS`,
+  `MAX_IR_ARTIFACT_BYTES`). Additive under COMPATIBILITY.md §5 — nothing to
+  migrate. The validator's internals stay package-private. Closes #195.
+
+- **Format-aware grounding text (`grounded_in ... format:`).** A gen grounded in a
+  Markdown or JSON source used to reject correct quotes as fabricated: the matcher
+  normalizes case and whitespace and then substring-matches, so `**` and `\n` stayed
+  in the haystack and a model quoting `Revenue grew 12% in Q3` from
+  `Revenue grew **12%** in Q3` was told it made the quote up — firing the repair loop
+  against an output that was right. `format: :markdown | :json | :text` gives the
+  verifier a derived plain-text view of the source (visible Markdown text; decoded
+  JSON strings, so `\n`, `\"` and `\u00fc` match what the model read, and a compact
+  source matches a pretty-printed quote). Usually you never write it: the compiler
+  infers it from the extension of whichever path supplied the value — `--arg
+  notes.md` over `from: "notes.md"`. Matching is any-of, raw first, so a model that
+  quotes the literal markup passes exactly as before, and `matched_via: "derived"` on
+  a passing citation says it verified only because of the new view. What the *model*
+  sees does not change: the derived text is verifier-only and never enters the prompt,
+  so no prompt-cache prefix moves. Gens that set no format compile byte-identically.
+  Closes #169.
+
+- **`repair` model slot (`app/config/models.rb`).** Repair passes can now run on a
+  dedicated, cheaper model instead of inheriting the gen's frontier model:
+  `repair "omlx:nemotron-3-nano-4b", max_tokens: 16000, temperature: 0`. Workspace-
+  authoritative — there is no per-gen `repair:` — and structural-only: the schema-
+  validation and consensus-shape repair sites, plus the `enrich` sub-gen's own repair
+  loop. Semantic repair (review, consensus disagreement, corrector feedback, grounding)
+  runs on the gen's model — the model that has to read a 40-page filing to answer the
+  complaint (#175).
+  Omit the slot and IR is byte-identical to before. Declaring `repair` also makes
+  `model :repair` a compile error — it is a slot, not an alias. Closes #176.
+
+- **Exact-duplicate tool-call guard (RED-184).** Within one agentic run, a tool
+  call with a (tool name, arguments) pair that has already *returned* is not
+  re-dispatched: the model gets a synthetic `duplicate: true` result telling it the
+  call already ran (with the prior result attached) and to change tack or answer.
+  The call still counts toward `max_calls` and still appears in the trace
+  (`AgenticTurn.meta.results[].duplicate`), so this is a faster trigger for the
+  budget backstop rather than a replacement for it. Only successful dispatches are
+  remembered — a call that threw is retried normally, since a throw is a fact about
+  that attempt and not about the call. Exact match only — zero false positives on
+  reworded near-duplicates, and a duplicate `read_file` after a write returns the
+  pre-write result.
+
+### Changed
+
+- **`@redwood-labs/cambium`** and **`@redwood-labs/cambium-runner`** bump to `0.11.0`, and the
+  CLI's runner dependency pin moves `0.10.1` → `0.11.0` in lockstep. `package-lock.json` was
+  regenerated; no dependency resolution changed.
+
+- **`cambium-client` (Python) stays at `0.2.0`.** It is independently versioned and nothing under
+  `packages/cambium-client-python/` changed in this window. `error.kind` is unchanged in 0.11 —
+  none added, none removed — so a client on `0.1.0` or `0.2.0` talks to a `0.11.0` server without
+  regeneration.
+
+### Fixed
+
+- **`cambium run` no longer clobbers a `from:` bake-in with a literal `"{}"` (#220).**
+  `cambium run <gen.cmb.rb> --method <m>` with no `--arg` forged `--arg -` plus a
+  stdin payload of `'{}'` for every omission, so a `grounded_in :doc, from:
+  "notes.md"` gen ran with `context.doc` set to the two-character string `"{}"`
+  instead of the document `from:` was supposed to bake in at compile time — and,
+  less visibly, suppressed #169's `format:` inference along with it, since both
+  read the same "was anything supplied?" check. For a `require_citations` gen this
+  surfaced as a grounding failure that looked like a bad model response, not a CLI
+  bug; for a gen with no citation checks it was invisible. An omitted `--arg` is
+  now forwarded to `compile.rb` as an omission — no flag at all — so `cambium run`
+  produces exactly the IR `cambium compile`, `cambium run --ir`, and the golden
+  corpus already agreed on: the `from:` bake-in and its inferred format apply, or
+  `context.<source>` is `''` when there is no bake-in (a second, convergent
+  behavior change from the CLI's previous `'{}'` default — no in-tree gen depended
+  on the old value). Pipelines were left on their pre-#220 `'{}'` default by
+  this fix — that default was applied by the CLI itself, immediately after
+  compiling and reading back the IR's own `kind` (`compile.rb`'s class
+  registry answer, not a second guess at it), not inside the compiler and not
+  inside the pipeline runtime's input binder. **#223 (see Changed, above)
+  removed that default outright**: `cambium run <pipeline>` with no `--arg`
+  against a pipeline with declared `input` slots now refuses instead of
+  running on a substituted `'{}'`. The design history below is why the
+  default (and, after #223, the refusal that replaced it) lives in the CLI
+  and not in the binder or the compiler — both of which end this change
+  untouched. An earlier version of this fix put the default in the binder
+  instead and shipped it; an audit caught
+  that it reached `cambium serve`'s dispatch, `cambium replay`, and any library
+  caller of `runPipelineFromIr` too, turning a served pipeline request with no
+  `input` key into one where the model saw the literal string `{}` as its
+  document, and flipping a multi-slot pipeline's clear "must be a JSON object"
+  error into a silent all-`undefined` bind. Neither ever shipped past the same
+  pre-release branch this bullet describes; the default lived — and #223's
+  refusal now lives — only where the CLI itself sees the argv at all, which is
+  the one piece of information the binder never had.
+
+  Two gen shapes that `cambium run` previously ran green now fail the way
+  `cambium compile` and `cambium run --ir` always have, because the same "was
+  anything supplied?" check gates all four of its consumers, not just the two
+  named above: `grounded_in ..., from: <binary>, format: :<text>` now raises the
+  DEC-011 contradiction at compile time (`format:` claims a text view of
+  something that resolved to a base64 envelope — drop `format:` or point `from:`
+  at a text file), and `from:` pointing at a PDF or image now emits the real
+  document envelope instead of the forged `'{}'`, so a non-`anthropic:` model
+  fails the native-document gate at dispatch (switch to an `anthropic:` model, or
+  pre-extract the text and pass it as a plain string) rather than silently
+  running with no document at all. Both are the correct outcome — those gens were
+  already broken under every sibling verb — but they are a migration worth
+  naming: a `from: <pdf>` gen now performs real PDF extraction under `--mock` too
+  and base64-embeds the document into `runs/<id>/ir.json`, which it did not
+  before.
+
+  Two more consequences of the same check: a `from:` PDF that `pdfjs` cannot
+  parse — or one that is scanned/image-only and extracts to no text, even on an
+  `anthropic:` model that passes the native-document gate — now fails the run at
+  `DocumentExtractionFailed` instead of silently running with `"{}"` (pre-extract
+  the text and pass it as a plain string; OCR is not supported in v1), and a gen
+  method that parses its own argument (`JSON.parse(input)` in the method body)
+  now raises `JSON::ParserError` on `''` where the forged `'{}'` previously
+  parsed clean. Both already failed this way under `cambium compile` and
+  `cambium run --ir` — this is convergence, not a new failure mode, and neither
+  should be "fixed" by resurrecting the old default. `cambium schedule compile`
+  manifests invoke `cambium run <gen> --method <m>` with no `--arg`, so a
+  deployed schedule picks up either shape on its next fire, not just on an
+  interactive run.
+
+- **`--mock` output is derived from the gen's schema (#205).** Every gen scaffolded
+  after RED-419 failed `--mock` at Validate: the mock provider knew three framework
+  schema ids and one `AnalysisReport`-shaped default, so a `returns do … end` block
+  with any other field set came back missing every required field, repair replayed
+  the same stub, and the run exited 1 — the golden test `cambium new agent`
+  scaffolds could never produce its first snapshot, and the 26-key ThemePalette gen
+  had pinned its own failure as the "expected" mock behavior. `mockGenerate` now
+  delegates to `mock-output.ts`: the three canned ids and the default payload are
+  unchanged (the default still wins whenever it validates against the schema —
+  decided by the same AJV configuration the Validate step uses, not a shape
+  heuristic — so every mock output that passed before is byte-identical), and for
+  everything else
+  a deterministic walker derives a schema-valid placeholder from the schema itself
+  (`const` → first `enum` → `default` → by type: `"mock <field>"`, `0`, `false`, one
+  array element, nested objects, `$ref`). The agentic `--mock` path receives the
+  step schema too. Placeholders are shape, not quality: correctors and citation
+  checks still flag them, so a mock run of a gen with correctors or `grounded_in`
+  now ends accepted-with-errors instead of dying at Validate — which is the
+  snapshot a golden is meant to pin. Tests that relied on the mock being *unable*
+  to satisfy a schema now inject the failure with an unsatisfiable `{ not: {} }`
+  property. Closes #205.
+
+- **A Genfile without `[types]` is not "no Genfile" (#205 A-002/A-003).** `cambium
+  run` crashed with `Error [ERR_MODULE_NOT_FOUND]: Cannot find module
+  '<workspace>/packages/cambium/src/contracts.ts'` for any flat `[package]`
+  workspace whose `Genfile.toml` declared no `[types]` section — the normal shape
+  for an app whose gens use 100% inline `returns do … end` schemas (RED-419) and
+  never needed a contracts file at all. `runGenFromIr` treated "Genfile with no
+  `[types]`" the same as "no Genfile found," falling back to importing the
+  in-tree monorepo's own contracts.ts before Generate ever ran, even though the
+  inline schema meant that module was never going to be read. It now branches on
+  whether a Genfile reached by walking up from the gen's source was found, not on
+  whether it declared contracts and not on whether cwd merely happens to contain
+  an unrelated one: a `[types]`-less Genfile in the gen's own workspace is app
+  mode with no contracts (inline-schema gens run with nothing else needed; a
+  symbol-form gen fails loudly at "Schema not found," naming `[types].contracts`,
+  instead of crashing on a missing module), app correctors are discovered either
+  way, cwd's own declared contracts are still consulted as a fallback exactly as
+  before when the gen has no workspace of its own, and only a genuinely missing
+  Genfile anywhere still falls back to the monorepo's own contracts.ts.
+
+- **Repair now sees what it is fixing (#175).** Every semantic repair site — Review,
+  consensus disagreement, corrector feedback, grounding citations, grounding
+  field-values — hands `handleRepair` the task text and the source document, built
+  through the same `buildGenSystem` / `buildCacheablePrefix` the Generate step used, so
+  a fabricated quote can be corrected against the source instead of deleted. Before
+  this, repair was handed the complaint and not the material: a grounded gen could come
+  back with its citations removed and `ok: true`, and the operator had no way to see it.
+  Structural repair (schema shape, consensus-pass shape) keeps the lean, context-free
+  prompt byte-for-byte. `Repair.meta` gains `source_chars`, `source_docs` and
+  `source_doc_bytes` (all three `0` = context-free pass; a semantic pass over a
+  native PDF has no extracted text, so `source_chars` alone would read as
+  context-free). The guard that catches a deletion anyway is the `### Changed` entry above.
+
+- **CI review no longer blocks on docs it cannot see.** The two-stage review
+  pipeline made the Stage 2 reviewer confirm "docs exist in the diff" without
+  ever receiving the diff — so PRs with complete docs got false `request_changes`
+  (PR #191, twice). Stage 1 now classifies docs presence and must excerpt the
+  `P - *.md` / `C - IR` / `C - Trace` hunks alongside the code; Stage 2 judges
+  missing-docs claims from that evidence and blocks only on true absence or on
+  doc-vs-code contradictions.
+
+- **A fan-out with nothing to share stops paying for it (RED-183).** The automatic cache prewarm gated on *finding* a cacheable prefix (`groups.size === 0` skips) but not on *sharing* one, so a heterogeneous `fan_out` — every reviewer with its own system prompt or its own source document — still fired one warm-up per branch and cached a prefix exactly one branch would read, one tick later. On a 200-page reviewer sweep that was 200 wasted LLM calls; `meta.prewarm` reported them faithfully as 200 groups and 200 warm-ups, but nothing in the run distinguished "helped" from "could not have helped". A fan-out whose cacheable branches all land in singleton groups now skips the prewarm, logs the reason to stderr, and records `meta.prewarm.skipped: "no-shared-prefix"` on the `PipelineFanOut` step. The comparison counts *eligible* (cacheable) branches rather than declared ones — five branches with three ungrounded and two distinct groups have nothing to warm either — and the compile-once memo is still built, so `runBranch` keeps reusing it. Fan-outs that do share a prefix are byte-for-byte unchanged.
+
+### Upgrade from 0.10.1
+
+Nothing in the DSL, the IR, or the serve wire requires a change: every keyword this release adds is
+opt-in, a gen that declares none of them compiles byte-identically, and `error.kind` is unchanged.
+Three behaviors differ. All three are cases that used to succeed quietly and now fail loudly.
+
+**Grounded gens whose repair deleted citations (#175).** 0.10.1 filed those runs as `ok: true` with
+`totalChecked: 0` — the citations the model could not support were simply gone, and the run was
+reported as grounded anyway. 0.11.0 counts citations (or grounded values, under
+`verify: :field_values`) on the output repair was handed and on the output it returned, and a drop
+fails the run: `deleted_by_repair: true` on the step, `validation_failed` at the caller. If you
+read `totalChecked: 0` as "grounded", read `citations_after > 0 and deleted_by_repair != true`
+instead. Expect this on any `grounded_in` gen whose model has been fabricating quotes — those runs
+were already wrong; what changes is that they now say so.
+
+**`cambium run <pipeline>` with no `--arg` (#223).** An omitted `--arg` used to substitute the
+literal two-character string `"{}"`. It is now a hard CLI error, exit `2`, printed before the runner
+loads and before any model call or spend. Supply `--arg <path>`, pipe with `--arg -`, or drop the
+`input` declaration if the pipeline genuinely takes none. Scripts and CI jobs that leaned on the
+substitution are what to check. `cambium serve`, `cambium replay`, and library callers of
+`runPipelineFromIr` are unaffected — the refusal lives only in the CLI.
+
+**Multi-slot pipelines with a partial `--arg` object (#226).** A declared `input` slot missing from
+the supplied JSON object used to bind `undefined` and run anyway. It now raises, naming the missing
+slots specifically. Unlike #223 this one lives in the binder, so it reaches `cambium serve`,
+`cambium replay`, and `runPipelineFromIr` as well as the CLI. Supply every declared slot; a slot
+supplied as `null` counts as present, and judging that value is the schema's job.
+
+Two more changes alter outcomes without requiring action.
+
+**Agentic gens (`mode :agentic`).** Prompt caching now places a breakpoint inside the messages
+array, so turns after the first read the shared head from cache — a cost change, not a behavior
+one. Separately, an exact-duplicate tool call (same name, same arguments, already returned
+successfully) is answered from memory with `duplicate: true` rather than re-dispatched. Exact match
+only, and only successful calls are remembered, so a retry after a failure still dispatches. The
+ceiling worth knowing: a duplicate `read_file` issued after a write returns the pre-write result.
+
+**Grounded gens over Markdown or JSON sources (#169).** The verifier now also matches against a
+derived plain-text view, inferred from the extension of whichever path supplied the value. A gen
+that was failing verification because the model quoted `Revenue grew 12% in Q3` from
+`Revenue grew **12%** in Q3` starts passing, with `matched_via: "derived"` on the citation saying
+why. This only ever loosens — raw matching is tried first and is unchanged — and the derived text
+is verifier-only, so no prompt-cache prefix moves.
+
 ## [0.10.1] — 2026-08-27
 
 Every Anthropic call was going out malformed. RED-325 built the provider on a premise that

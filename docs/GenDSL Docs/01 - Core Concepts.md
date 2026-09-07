@@ -7,8 +7,10 @@ This DSL is "Rails for generation engineering": reliable LLM programs via conven
 
 ## Key ideas
 - **Programs with contracts:** generation is a transaction with validation + repair.
+- **Repair on the cheap:** `app/config/models.rb` can name a `repair` model (`repair "omlx:...", max_tokens: N`) so *structural* repair passes run there instead of on the gen's frontier model — the floor rule guarantees repair never gets less output room than generate had (RED-176). See [[P - repair (model slot)]].
+- **Repair gets the source:** *semantic* repair (review, consensus disagreement, corrector feedback, grounding) runs on the gen's own model and is handed the task plus the source document, so a bad quote can be corrected instead of deleted — and a repair that deletes it anyway fails the run instead of reporting `ok: true` with nothing left to check. Structural repair stays context-free (RED-175). See [[C - Repair Loop]] § What repair sees, per failure class and § The deletion guard.
 - **Typed returns:** outputs validate against JSON Schema. Two forms: `returns do … end` (block form, default) compiles field declarations to an inline Draft-07 schema — no hand-written TypeScript needed; `returns :Symbol` (escape hatch) references a hand-written TypeBox export in `src/contracts.ts`. Both → AJV validation. See [[P - returns]].
-- **Grounding as policy:** citations/provenance are enforced, not requested.
+- **Grounding as policy:** citations/provenance are enforced, not requested — a run that loses them fails rather than passing silently (RED-175).
 - **Tools as capabilities:** tool calls are declared, permissioned, typed, and logged. Handlers live next to their schemas in `app/tools/` and are auto-discovered (RED-209).
 - **Sandboxing as declaration:** `security network: { allowlist: [...] }` and `budget per_tool: {...}` are first-class primitives. SSRF guard + IP pinning + per-tool call caps are enforced at the dispatch site, not hand-plumbed in each tool (RED-137).
 - **Reusable policy:** security and budget can be bundled into named policy packs (`security :research_defaults`) so a gen reads as a declaration of intent, not a tuning panel (RED-214).

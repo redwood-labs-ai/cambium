@@ -188,7 +188,12 @@ export async function runEnrichment(
     traceSteps.push(vResult);
     if (attempt >= maxRepairAttempts) break;
 
-    const repair = await handleRepair(raw, vResult.errors ?? [], subSchema, subIr, attempt + 1, generateText, extractJson);
+    // RED-176: the sub-agent's repair pass is structural (its own schema), and
+    // `subIr` is a compiled gen IR — so the workspace repair slot rides along
+    // on it rather than on the parent gen's IR.
+    const repair = await handleRepair(
+      raw, vResult.errors ?? [], subSchema, subIr, attempt + 1, generateText, extractJson, subIr.repairModel,
+    );
     traceSteps.push({ ...repair.result, id: `enrich_${enrichment.field}_repair_${attempt + 1}` });
     raw = repair.raw;
     parsed = repair.parsed;

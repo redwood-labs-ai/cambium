@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import type { MemoryDecl, MemoryRunContext } from './types.js';
+import { validateSafeSegment } from './keys.js';
 
 /**
  * RED-215 phase 3: resolve a memory decl to a concrete bucket file path.
@@ -11,12 +12,17 @@ import type { MemoryDecl, MemoryRunContext } from './types.js';
  *   :global scope + no keyed_by   → key = '_'
  *   <other> with keyed_by <name>  → key = ctx.keys[<name>], missing = clear error
  *
- * The scope segment comes straight from the IR (validated at compile
- * time against the pool-name regex), so it can't contain traversal
- * bytes. Key values from --memory-key go through parseMemoryKeys,
- * which rejects anything outside [a-zA-Z0-9_\\-].
+ * The `name` and `scope` segments come straight from the IR. Named pools
+ * are regex-checked at compile time, but a free-form `memory <name>,
+ * scope:` decl never was — and an IR can now arrive from disk (#195), so
+ * both are validated HERE, regardless of origin, with the same guard
+ * `--memory-key` values get (`validateSafeSegment`: [a-zA-Z0-9_\\-], 128
+ * max). Without it a decl name like `../../x` was an arbitrary-directory
+ * write (security gate, #195 F2).
  */
 export function resolveBucketPath(decl: MemoryDecl, ctx: MemoryRunContext): string {
+  validateSafeSegment('name', decl.name, 'memory decl');
+  validateSafeSegment('scope', decl.scope, `memory '${decl.name}'`);
   const scopeSeg = decl.scope;
   let keySeg: string;
 

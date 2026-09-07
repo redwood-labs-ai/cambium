@@ -857,3 +857,186 @@ describe('acceptsEffortParams', () => {
     expect(acceptsEffortParams('claude-3-5-sonnet-20241022')).toBe(false);
   });
 });
+
+// ── #228: the agentic (tools-path) breakpoint allocation ──────────────
+//
+// Anthropic allows FOUR cache breakpoints, and the automatic (top-level)
+// one occupies a slot: "If 4 explicit block-level breakpoints already
+// exist, the API returns a 400 error (no slots left for automatic
+// caching)." So the tools path gets at most THREE explicit markers —
+// system + tools[last] + user-prefix — and the automatic breakpoint takes
+// the fourth. These tests are the thing standing between a future prompt
+// edit and a hard 400 on every agentic turn.
+
+/** Every `cache_control` anywhere under `node`. */
+function countCacheControl(node: any): number {
+  if (Array.isArray(node)) return node.reduce((n, v) => n + countCacheControl(v), 0);
+  if (node && typeof node === 'object') {
+    let n = node.cache_control ? 1 : 0;
+    for (const [k, v] of Object.entries(node)) {
+      if (k === 'cache_control') continue;
+      n += countCacheControl(v);
+    }
+    return n;
+  }
+  return 0;
+}
+
+/** system + tools + messages markers. Excludes the top-level automatic one. */
+function explicitBreakpoints(body: any): number {
+  return countCacheControl(body.system)
+    + countCacheControl(body.tools)
+    + countCacheControl(body.messages);
+}
+
+describe('buildAnthropicMessagesRequest — agentic breakpoint allocation (#228)', () => {
+  const longPrefix = 'DOCUMENT:\n' + 'x'.repeat(MIN_USER_CACHE_CHARS);
+  const pdfDoc = {
+    key: 'invoice',
+    kind: 'base64_pdf' as const,
+    data: 'UERGIGRhdGE=',
+    media_type: 'application/pdf',
+  };
+  const tools = [
+    { type: 'function', function: { name: 'a', description: '', parameters: {} } },
+    { type: 'function', function: { name: 'b', description: '', parameters: {} } },
+  ];
+  const transcript = (turns: number) => {
+    const msgs: any[] = [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'Investigate.' },
+    ];
+    for (let t = 1; t <= turns; t++) {
+      msgs.push({
+        role: 'assistant',
+        content: null,
+        tool_calls: [{ id: `t${t}`, type: 'function', function: { name: 'a', arguments: '{}' } }],
+      });
+      msgs.push({ role: 'tool', content: `{"n":${t}}`, tool_call_id: `t${t}` });
+    }
+    return msgs;
+  };
+
+  it('sets the automatic (top-level) cache_control on the tools path', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: transcript(3),
+      tools,
+      cacheUserPrefix: longPrefix,
+    });
+    // Sibling of model/system/messages — NOT inside any of them.
+    expect(body.cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('sets it on the forced-final turn too, where the loop passes an EMPTY tools array', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: transcript(3),
+      tools: [],
+      cacheUserPrefix: longPrefix,
+    });
+    expect(body.tools).toBeUndefined();
+    expect(body.cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('never sets it on the generateText path (no tools key) — C-1', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: 'instr' },
+      ],
+      cacheUserPrefix: longPrefix,
+    });
+    expect(body.cache_control).toBeUndefined();
+  });
+
+  it('respects cache:false — no automatic breakpoint when caching is off', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: transcript(1),
+      tools,
+      cacheUserPrefix: longPrefix,
+      cache: false,
+    });
+    expect(body.cache_control).toBeUndefined();
+  });
+
+  it('suppresses the redundant document marker when the prefix marker is emitted (DEC-003)', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: transcript(2),
+      tools,
+      documents: [pdfDoc],
+      cacheUserPrefix: longPrefix,
+    });
+    const blocks = body.messages[0].content;
+    // doc + prefix + instruction, prefix-first ordering preserved.
+    expect(blocks).toHaveLength(3);
+    expect(blocks[0].type).toBe('document');
+    // Document marker gone — the prefix marker's region extends backward
+    // through it, and a fifth explicit marker would 400.
+    expect(blocks[0].cache_control).toBeUndefined();
+    expect(blocks[1].cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('keeps the document marker when no prefix marker is emitted (below the floor)', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: transcript(2),
+      tools,
+      documents: [pdfDoc],
+      cacheUserPrefix: 'too short to cache',
+    });
+    const blocks = body.messages[0].content;
+    // Prefix inlined with the instruction, so the document marker is the
+    // only thing covering the docs — it must stay. Still 3 explicit total.
+    expect(blocks[0].cache_control).toEqual({ type: 'ephemeral' });
+    expect(explicitBreakpoints(body)).toBe(3);
+  });
+
+  it('keeps the document marker on the generateText path even with a prefix marker (C-1)', () => {
+    const body = buildAnthropicMessagesRequest({
+      model: 'claude-sonnet-4-6',
+      messages: [{ role: 'user', content: 'instr' }],
+      documents: [pdfDoc],
+      cacheUserPrefix: longPrefix,
+    });
+    const blocks = body.messages[0].content;
+    expect(blocks[0].cache_control).toEqual({ type: 'ephemeral' });
+    expect(blocks[1].cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('explicit breakpoints never exceed 3 on the tools path, across the whole option matrix', () => {
+    // Collected rather than asserted in place so a regression prints the
+    // whole matrix and names the exact combination that overflowed.
+    const overflows: string[] = [];
+    for (const turns of [0, 1, 4, 8]) {
+      for (const t of [tools, []]) {
+        for (const docs of [[], [pdfDoc], [pdfDoc, { ...pdfDoc, key: 'second' }]]) {
+          for (const prefix of [undefined, 'short', longPrefix]) {
+            const body = buildAnthropicMessagesRequest({
+              model: 'claude-sonnet-4-6',
+              messages: transcript(turns),
+              tools: t,
+              documents: docs,
+              cacheUserPrefix: prefix,
+            });
+            const explicit = explicitBreakpoints(body);
+            const automatic = body.cache_control ? 1 : 0;
+            // Three explicit + one automatic = Anthropic's four. A fourth
+            // explicit marker leaves no slot for the automatic one and the
+            // API answers 400 — on EVERY turn of the loop.
+            if (explicit > 3 || explicit + automatic > 4) {
+              overflows.push(
+                `turns=${turns} tools=${t.length} docs=${docs.length} ` +
+                `prefix=${prefix?.length ?? 0} explicit=${explicit} automatic=${automatic}`,
+              );
+            }
+          }
+        }
+      }
+    }
+    expect(overflows).toEqual([]);
+  });
+});

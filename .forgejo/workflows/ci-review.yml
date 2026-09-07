@@ -46,11 +46,20 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
+      # NOTE: no `cache: 'npm'` here, and no actions/cache steps below. The
+      # Forgejo runner advertises its cache server at a Docker address
+      # (172.19.0.3:42607) on the runner container's own network, while each
+      # job runs on an isolated per-job network with no route to it. Every
+      # cache call therefore hangs to timeout: ~280s to restore ~/.npm, ~20s
+      # per actions/cache restore, and another ~280s + ~50s in the post-job
+      # saves. That was ~90% of a 12-minute run whose real work — install,
+      # tsc build, diff, and the LLM review itself — is about 70s total. If
+      # the runner's cache.host is ever fixed to an address job containers
+      # can route to, re-adding these is a small, local change.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: 'npm'
 
       - name: Setup Ruby
         # Cambium's Ruby surface is stdlib-only (see CLAUDE.md
@@ -65,21 +74,7 @@ jobs:
           apt-get install -y --no-install-recommends ruby
           ruby --version
 
-      # setup-node's `cache: 'npm'` caches only ~/.npm, not node_modules;
-      # cache node_modules on the lockfile hash and skip install on a hit
-      # (postinstall scripts are forbidden, so it's deterministic). Shares
-      # the same key as golden-ir.yml, so either workflow warms the other.
-      - name: Cache node_modules
-        id: node-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            node_modules
-            packages/*/node_modules
-          key: node-modules-${{ runner.os }}-node22-${{ hashFiles('**/package-lock.json') }}
-
       - name: Install dependencies
-        if: steps.node-cache.outputs.cache-hit != 'true'
         run: npm ci --prefer-offline --no-audit --no-fund
 
       # Supply-chain gate. `npm ci` above runs with --no-audit for speed and
@@ -92,17 +87,7 @@ jobs:
       - name: Audit dependency ages + Ruby surface
         run: npm run audit:all
 
-      # Cache the compiled runner keyed on its source + deps, so tsc only
-      # re-runs when the runner actually changed.
-      - name: Cache runner build
-        id: runner-build
-        uses: actions/cache@v4
-        with:
-          path: packages/cambium-runner/dist
-          key: runner-dist-${{ runner.os }}-${{ hashFiles('packages/cambium-runner/src/**', 'packages/cambium-runner/tsconfig*.json', 'packages/cambium-runner/package.json', '**/package-lock.json') }}
-
       - name: Build runner
-        if: steps.runner-build.outputs.cache-hit != 'true'
         run: cd packages/cambium-runner && npm run build
 
       - name: Compute PR diff

@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { detectWorkspaceShape } from './workspace-shape.mjs';
+import { loadRunner } from './runner-freshness.mjs';
 
 // Framework files resolved relative to the CLI's own location, not cwd
 // (RED-274 — mirrors cambium.mjs and compile.mjs). The scaffolder gen,
@@ -89,7 +90,7 @@ export async function runAgenticToolScaffold(description) {
     }
     let runResult;
     try {
-      const { runGenFromIr } = await import('@redwood-labs/cambium-runner');
+      const { runGenFromIr } = await loadRunner();
       runResult = await runGenFromIr({
         ir,
         cwd: process.cwd(),

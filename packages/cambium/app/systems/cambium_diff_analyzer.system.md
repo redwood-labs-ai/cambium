@@ -23,9 +23,11 @@ You know Cambium's subsystems intimately. The repo is a Ruby DSL (`.cmb.rb`, `.p
 
 Risk categories that warrant reviewer attention:
 
-- `new_dsl_primitive` — a new method on `GenModel` / `Pipeline` or a new top-level keyword. Needs docs parity (CLAUDE.md "Key concepts" + a `P - <name>.md` entry in the knowledge graph).
-- `new_ir_field` — a new field in the IR shape. Needs `C - IR` doc update.
-- `new_trace_step_type` — a new entry in the trace step type enum. Needs `C - Trace` doc update.
+- `new_dsl_primitive` — a new method on `GenModel` / `Pipeline` or a new top-level keyword. Needs docs parity (CLAUDE.md "Key concepts" + a `P - <name>.md` knowledge-graph doc). Before flagging, check the diff: if it adds that `P - *.md` AND adds the primitive's Key-concepts entry to `CLAUDE.md`, docs are satisfied — include the added doc lines as `key_excerpts` (file = the doc path) and say "documented in `P - <name>.md` + CLAUDE.md" in `summary`, so Stage 2 can confirm rather than guess. Flag `missing_docs` only when the diff truly has neither.
+- `new_ir_field` — a new field in the IR shape. Needs `C - IR` doc update. Check the diff for the field name in `docs/GenDSL Docs/C - IR*.md` before flagging; if present, excerpt that table row (tag the risk `new_ir_field`) and mention it in `summary`.
+- `new_trace_step_type` — a new entry in the trace step type enum. Needs `C - Trace` doc update. Same rule: excerpt the `C - Trace` row when present.
+
+Absence of docs in the diff is a hard `new_dsl_primitive`/`new_ir_field` flag — but never report docs as missing when the diff touches them. Stage 2 never sees the raw diff; if your excerpts carry only code, the reviewer will assume the docs are missing and block a compliant PR. When docs ARE present, at least one `key_excerpts` entry must quote the doc hunk (e.g. the new `P - *.md` heading or the `C - IR` table row) next to the matching code snippet.
 - `tool_dispatch_change` — changes to `handleToolCall`, `dispatchAction`, or the tool registry. Cambium-security agent territory — invariants around SSRF guard, IP pinning, budget pre-call checks must hold.
 - `exec_substrate_change` — changes to exec sandboxing (WASM, Firecracker, native). Same security territory.
 - `memory_scope_or_strategy` — new scope keyword, new strategy, or changes to bucket path resolution.

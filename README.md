@@ -78,7 +78,7 @@ cambium inspect            # local browser viewer over runs/ (or: cat runs/<run_
 ## Key features
 
 - **Typed contracts** — TypeBox schemas define output shape; AJV validates before the output propagates.
-- **Repair loops** — Failed validation triggers targeted repair with configurable stop conditions.
+- **Repair loops** — Failed validation triggers targeted repair with configurable stop conditions. Declare a cheaper `repair` model in `app/config/models.rb` and structural repair passes run there instead of on your frontier model (RED-176).
 - **Tool use** — Declared, permissioned, logged, SSRF-guarded fetch with IP pinning and per-call budgets. Plugin pattern for app tools; bundled policy packs for shared security postures.
 - **Citation enforcement** — `grounded_in` verifies quotes exist verbatim in source documents.
 - **Agentic multi-turn** — Models that need mid-generation tool calls get a full conversation loop.
@@ -92,7 +92,8 @@ cambium inspect            # local browser viewer over runs/ (or: cat runs/<run_
 - **Scheduled runs** — `cron :daily, at: "9:00"` declares the schedule; `cambium schedule compile` emits deploy manifests for your platform (k8s CronJob, crontab, systemd, GitHub Actions, Render Cron).
 - **Orchestration layer** — `Pipeline` primitive composes multiple sub-gens via `step` (sequential), `fan_out` (parallel branches with concurrency / threshold / failure modes), and `branch_on :signal` (deterministic conditional routing). Rollup IR / trace / budget owned by the framework; zero inference at the orchestration layer — the DSL compiles to a deterministic IR DAG, LLM calls happen only inside sub-gens. Pipeline-shared intra-run memory bucket via `scope: :pipeline_run`. RED-374 design / RED-381 impl.
 - **Observability** — `log :datadog` ships run + step events with a framework-owned severity mapping so monitors key off real run state.
-- **Serve mode** — `cambium serve --workspace <path> --bind tcp://127.0.0.1:9000` hosts every gen in a workspace as a long-lived HTTP server (RED-360). Locked v1 wire format (`POST /v1/run` + `GET /v1/healthz`); `--max-inflight`, `--run-timeout`, and `--shutdown-timeout` for ops. The transport for non-Node hosts (FastAPI, Django, Go, Elixir) — anything that speaks HTTP + JSON. First-party Python client: `pip install cambium-client` (RED-361; sync + async, one exception per `error.kind`).
+- **Serve mode** — `cambium serve --workspace <path> --bind tcp://127.0.0.1:9000` hosts every gen in a workspace as a long-lived HTTP server (RED-360). Locked v1 wire format (`POST /v1/run` + `GET /v1/healthz`); `--max-inflight`, `--run-timeout`, and `--shutdown-timeout` for ops. The transport for non-Node hosts (FastAPI, Django, Go, Elixir) — anything that speaks HTTP + JSON. First-party Python client: `pip install cambium-client` (RED-361; sync + async, one exception per `error.kind`). `--precompiled`/`--ir-dir` boot from compiled `.ir.json` artifacts instead of spawning Ruby, for target machines with no Ruby installed (#195).
+- **Distribution** — authoring a gen needs Ruby; running one doesn't. `cambium compile --write`/`--out-dir` produces `.ir.json` artifacts a Ruby-free machine can execute directly — `cambium serve --precompiled`/`--ir-dir`, or `cambium run --ir <file.ir.json>` for a one-shot (#195).
 
 ## How it works
 

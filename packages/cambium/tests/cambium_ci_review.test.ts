@@ -15,8 +15,9 @@
  */
 import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tryReadRunDir, cleanupRunDir } from './helpers/run-dir.js';
 
 const REPO_ROOT = process.cwd();
 const CLI = join(REPO_ROOT, 'cli/cambium.mjs');
@@ -33,12 +34,6 @@ function runReview(extraArgs: string[] = []) {
       maxBuffer: 50 * 1024 * 1024,
     },
   );
-}
-
-function readRunDir(stderr: string): string {
-  const m = stderr.match(/dir=(\S+)/);
-  expect(m).toBeTruthy();
-  return m![1];
 }
 
 describe('Cambium CI Review pipeline (real two-stage POC)', () => {
@@ -92,58 +87,70 @@ describe('Cambium CI Review pipeline (real two-stage POC)', () => {
 
   it('emits a PipelineRun trace with both PipelineStep entries + nested sub-gen traces', () => {
     const result = runReview();
-    expect(result.status).toBe(0);
-    const runDir = readRunDir(result.stderr);
-    const trace = JSON.parse(readFileSync(join(runDir, 'trace.json'), 'utf8'));
+    const runDir = tryReadRunDir(result.stderr);
+    try {
+      expect(result.status).toBe(0);
+      expect(runDir).toBeTruthy();
+      const trace = JSON.parse(readFileSync(join(runDir!, 'trace.json'), 'utf8'));
 
-    expect(trace.type).toBe('PipelineRun');
-    expect(trace.ok).toBe(true);
-    expect(trace.name).toBe('CambiumCiReview');
-    expect(trace.meta.operators_executed).toBe(2);
+      expect(trace.type).toBe('PipelineRun');
+      expect(trace.ok).toBe(true);
+      expect(trace.name).toBe('CambiumCiReview');
+      expect(trace.meta.operators_executed).toBe(2);
 
-    expect(trace.operators).toHaveLength(2);
-    expect(trace.operators[0].id).toBe('analyze');
-    expect(trace.operators[0].gen).toBe('CambiumDiffAnalyzer');
-    expect(trace.operators[1].id).toBe('review');
-    expect(trace.operators[1].gen).toBe('CambiumPrReviewer');
-    // Each PipelineStep nests its sub-gen's full trace.
-    expect(Array.isArray(trace.operators[0].trace?.steps)).toBe(true);
-    expect(Array.isArray(trace.operators[1].trace?.steps)).toBe(true);
+      expect(trace.operators).toHaveLength(2);
+      expect(trace.operators[0].id).toBe('analyze');
+      expect(trace.operators[0].gen).toBe('CambiumDiffAnalyzer');
+      expect(trace.operators[1].id).toBe('review');
+      expect(trace.operators[1].gen).toBe('CambiumPrReviewer');
+      // Each PipelineStep nests its sub-gen's full trace.
+      expect(Array.isArray(trace.operators[0].trace?.steps)).toBe(true);
+      expect(Array.isArray(trace.operators[1].trace?.steps)).toBe(true);
 
-    try { rmSync(runDir, { recursive: true, force: true }); } catch {}
+    } finally {
+      cleanupRunDir(runDir);
+    }
   });
 
   it('Stage 2 receives Stage 1 structured analysis in its sub-gen context', () => {
     const result = runReview();
-    expect(result.status).toBe(0);
-    const runDir = readRunDir(result.stderr);
-    const trace = JSON.parse(readFileSync(join(runDir, 'trace.json'), 'utf8'));
+    const runDir = tryReadRunDir(result.stderr);
+    try {
+      expect(result.status).toBe(0);
+      expect(runDir).toBeTruthy();
+      const trace = JSON.parse(readFileSync(join(runDir!, 'trace.json'), 'utf8'));
 
-    // The review step's sub-gen IR (preserved in its trace) carries
-    // the analysis from Stage 1 in its context.
-    const reviewStep = trace.operators[1];
-    // Sub-gen traces include the Generate step with the context that
-    // was used. Validate that the analysis flowed through.
-    const subGen = reviewStep.trace;
-    const generateStep = subGen.steps.find((s: any) => s.type === 'Generate');
-    expect(generateStep).toBeDefined();
-    expect(generateStep.ok).toBe(true);
-    // The output of Stage 1 (CambiumDiffAnalysis shape) was visible to
-    // Stage 2 — verified by the successful trace; the mock returns the
-    // canned CambiumCiReview shape for Stage 2's schema id regardless
-    // of context contents.
+      // The review step's sub-gen IR (preserved in its trace) carries
+      // the analysis from Stage 1 in its context.
+      const reviewStep = trace.operators[1];
+      // Sub-gen traces include the Generate step with the context that
+      // was used. Validate that the analysis flowed through.
+      const subGen = reviewStep.trace;
+      const generateStep = subGen.steps.find((s: any) => s.type === 'Generate');
+      expect(generateStep).toBeDefined();
+      expect(generateStep.ok).toBe(true);
+      // The output of Stage 1 (CambiumDiffAnalysis shape) was visible to
+      // Stage 2 — verified by the successful trace; the mock returns the
+      // canned CambiumCiReview shape for Stage 2's schema id regardless
+      // of context contents.
 
-    try { rmSync(runDir, { recursive: true, force: true }); } catch {}
+    } finally {
+      cleanupRunDir(runDir);
+    }
   });
 
   it('output.json round-trips the assembled CambiumCiReview', () => {
     const result = runReview();
-    expect(result.status).toBe(0);
-    const runDir = readRunDir(result.stderr);
-    const output = JSON.parse(readFileSync(join(runDir, 'output.json'), 'utf8'));
-    // Default last_step output: Stage 2's CambiumCiReview.
-    expect(output.summary).toBeTruthy();
-    expect(output.overall_verdict).toBeTruthy();
-    try { rmSync(runDir, { recursive: true, force: true }); } catch {}
+    const runDir = tryReadRunDir(result.stderr);
+    try {
+      expect(result.status).toBe(0);
+      expect(runDir).toBeTruthy();
+      const output = JSON.parse(readFileSync(join(runDir!, 'output.json'), 'utf8'));
+      // Default last_step output: Stage 2's CambiumCiReview.
+      expect(output.summary).toBeTruthy();
+      expect(output.overall_verdict).toBeTruthy();
+    } finally {
+      cleanupRunDir(runDir);
+    }
   });
 });

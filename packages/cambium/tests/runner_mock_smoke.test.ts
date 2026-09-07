@@ -14,6 +14,13 @@
  * CAMBIUM_ALLOW_MOCK gate. Now they're in the matrix below — they must
  * complete offline with the mock generator returning one turn of text
  * and zero tool_calls (terminates the agentic loop after one turn).
+ *
+ * #205: the mock is schema-derived (`mock-output.ts`), so every gen in
+ * the matrix now gets a candidate shaped like ITS OWN `returns` schema,
+ * not the analyst-shaped stub. `requiredOutputKeys` is therefore valid
+ * for any gen; the two #205 rows (theme_palette, notes_summarizer) also
+ * have full goldens in `theme_palette.test.ts` / `notes_summarizer.test.ts`
+ * — this matrix only proves the orchestration completes.
  */
 import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
@@ -26,8 +33,9 @@ type Case = {
   gen: string;
   method: string;
   fixture: string;
-  /** When set, assert these keys exist on the output. Only valid for
-   *  gens whose schema matches mockGenerate's analyst-shaped stub. */
+  /** When set, assert these keys exist on the output. Since #205 the
+   *  mock is derived from the gen's own schema, so any declared
+   *  required key is fair to assert. */
   requiredOutputKeys?: string[];
 };
 
@@ -54,15 +62,16 @@ const CASES: Case[] = [
     requiredOutputKeys: ['summary'],
   },
   {
-    name: 'log_summarizer (distinct schema — mock output won\'t pass validation but orchestration must complete)',
+    name: 'log_summarizer (distinct schema — pre-#205 the analyst-shaped mock failed validation here)',
     gen: 'packages/cambium/app/gens/log_summarizer.cmb.rb',
     method: 'summarize',
     fixture: 'packages/cambium/examples/fixtures/incident_with_logs.txt',
-    // No requiredOutputKeys — mockGenerate produces analyst-shaped
-    // output which doesn't match LogSummary. The value of this test
-    // is that the orchestration (compile + run + validate + repair +
-    // grounding + signals + triggers + trace-write) completes without
-    // crashing, not that the mock output is semantically correct.
+    // #205: the mock is now derived from LogSummary, so its top-level
+    // key is present. The value of this row is still that the
+    // orchestration (compile + run + validate + repair + grounding +
+    // signals + triggers + trace-write) completes without crashing,
+    // not that the mock output is semantically correct.
+    requiredOutputKeys: ['key_events'],
   },
   {
     // RED-375: agentic gen under --mock must terminate offline (no
@@ -76,6 +85,25 @@ const CASES: Case[] = [
     method: 'analyze',
     fixture: 'packages/cambium/examples/fixtures/incident.txt',
     requiredOutputKeys: ['summary'],
+  },
+  {
+    // #205: 26-key `returns do … end` block with an enum — the case that
+    // motivated schema-derived mock output (pre-#205: 26 missing
+    // required fields, exit 1 on every --mock run).
+    name: 'theme_palette (#205 — 26-key inline returns block, enum-first mode)',
+    gen: 'packages/cambium/app/gens/theme_palette.cmb.rb',
+    method: 'generate_palette',
+    fixture: 'packages/cambium/examples/fixtures/omarchy_swatches.json',
+    requiredOutputKeys: ['mode', 'accent', 'background', 'foreground'],
+  },
+  {
+    // #205 + #169: nested array-of-objects under a grounded_in with an
+    // inferred markdown format.
+    name: 'notes_summarizer (#205 — nested arrays; #169 inferred markdown grounding)',
+    gen: 'packages/cambium/app/gens/notes_summarizer.cmb.rb',
+    method: 'summarize',
+    fixture: 'packages/cambium/examples/fixtures/release_notes.md',
+    requiredOutputKeys: ['summary', 'highlights'],
   },
 ];
 

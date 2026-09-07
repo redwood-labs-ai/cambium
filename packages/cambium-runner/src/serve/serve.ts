@@ -10,7 +10,10 @@
  *   1. Load the gen catalog (Genfile.toml [exports.gens] → file paths).
  *   2. For each gen, spawn `ruby compile.rb <path>` in bare mode and
  *      cache every (method → IR) pair. Compile failures fail boot
- *      (no half-loaded server).
+ *      (no half-loaded server). #195: `{ precompiled: true }` / `{ irDir }`
+ *      skip the Ruby spawn entirely and read each gen's `.ir.json`
+ *      artifact off disk instead (`ir-artifact.ts`'s validator) — same
+ *      fail-boot-not-first-request contract, no `ruby` on PATH required.
  *   3. Bind the HTTP listener and resolve `ready`.
  *
  * Per-request:
@@ -39,6 +42,8 @@ import { fileURLToPath } from 'node:url';
 import { runGenFromIr, type IR, type IRInternal } from '../runner.js';
 import { runPipelineFromIr } from '../pipeline.js';
 import { parseMemoryKeys } from '../memory/keys.js';
+import { injectContextInput, readIrArtifactFile, needsContracts } from '../ir-artifact.js';
+import { resolveGenfileContracts, loadContractsFromGenfile } from '../genfile.js';
 import { loadGenCatalog, type GenCatalog } from './gen-catalog.js';
 import type { BindTarget } from './bind.js';
 
@@ -176,6 +181,23 @@ export interface RunServeOptions {
    * wave 4.
    */
   shutdownTimeoutMs?: number;
+  /**
+   * #195: boot from precompiled `.ir.json` artifacts instead of spawning
+   * `ruby compile.rb` — for each `[exports.gens]` entry, the artifact is
+   * the sibling `<gen>.ir.json` (what `cambium compile --write` / engine
+   * mode write). No `ruby` needed on PATH in this mode. `[exports.pipelines]`
+   * is refused at catalog load (DEC-001: a Pipeline IR still needs Ruby
+   * per sub-gen at request time). Implied by `irDir`. Defaults to `false`
+   * (compile-at-boot, byte-identical to pre-#195 behavior).
+   */
+  precompiled?: boolean;
+  /**
+   * #195: boot from precompiled artifacts under `<irDir>/<basename
+   * without .cmb.rb>.ir.json` (what `cambium compile --out-dir <dir>`
+   * writes) instead of the sibling-of-source location. Implies
+   * `precompiled`; wins when both are set.
+   */
+  irDir?: string;
 }
 
 export type RunServeAddress =
@@ -211,6 +233,9 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
     typeof opts.shutdownTimeoutMs === 'number' && opts.shutdownTimeoutMs > 0
       ? opts.shutdownTimeoutMs
       : DEFAULT_SHUTDOWN_TIMEOUT_MS;
+  // #195: `irDir` implies `precompiled`. Read once, reused by the boot
+  // loop (dispatch source) and `handleRun` (appRoot anchoring, DEC-005).
+  const precompiledMode = Boolean(opts.precompiled || opts.irDir);
 
   // Per-(gen, method) IR cache populated at boot. Map<gen, Map<method, IRInternal>>.
   const cache = new Map<string, Map<string, IRInternal>>();
@@ -220,14 +245,83 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
   const inflight = new Set<Promise<unknown>>();
   let closing = false;
 
-  // Boot: load catalog → compile each gen → start listening.
+  // Boot: load catalog → compile (or read) each gen → start listening.
   let server: Server | null = null;
   const ready = (async (): Promise<RunServeAddress> => {
-    const catalog = loadGenCatalog(opts.workspaceDir);
+    const catalog = loadGenCatalog(opts.workspaceDir, {
+      precompiled: opts.precompiled,
+      irDir: opts.irDir,
+    });
     catalogRef = catalog;
 
+    // #195: read (not compile) every gen first, so a malformed/wrong-
+    // version/non-closed artifact and a missing-contracts workspace both
+    // fail before the listener binds — never a half-loaded server.
+    const perGenMethodMaps = new Map<string, Record<string, IR>>();
     for (const [name, entry] of catalog.entries) {
-      const irMap = await compileBare(entry.genFilePath);
+      const irMap = entry.irPath
+        ? readPrecompiledArtifact(entry.irPath)
+        : await compileBare(entry.genFilePath);
+      perGenMethodMaps.set(name, irMap);
+    }
+
+    if (precompiledMode) {
+      // #195 DEC-004 as amended by A-003 (AUD-002): a symbol-form gen
+      // (`returns :Symbol`) needs a contracts module at run time. Resolve
+      // it NOW, per gen, against the gen's own workspace (AUD-001) — the
+      // contracts module is imported here and the export checked (own-
+      // property, matching the runner's lookup), so a workspace with no
+      // `[types]`, a stale artifact whose id was renamed away, or a
+      // hand-edited id all fail before the listener binds, never on the
+      // gen's first request. Node caches the module, so the per-run
+      // import in runGenFromIr costs nothing extra.
+      const contractProblems: string[] = [];
+      for (const [name, irMap] of perGenMethodMaps) {
+        const entry = catalog.entries.get(name)!;
+        const anchor = entry.appRoot ?? opts.workspaceDir;
+        const needing = Object.entries(irMap).filter(([, ir]) => needsContracts(ir));
+        if (needing.length === 0) continue;
+        // AUD-004: anything the Genfile parse or the contracts import throws
+        // (malformed TOML, a declared file missing, a syntax error in the
+        // contracts module) is this gen's problem too — record it under the
+        // gen's name and keep going, so one bad gen never hides another's.
+        try {
+          const genfile = resolveGenfileContracts(anchor);
+          if (genfile === null) {
+            contractProblems.push(
+              `${name}: symbol-form returns (\`returns :Symbol\`) but ${anchor} declares no ` +
+                `[types].contracts — ship inline \`returns do … end\` schemas, or declare ` +
+                `[types].contracts and ship the contracts file`,
+            );
+            continue;
+          }
+          const contractsMod = await loadContractsFromGenfile(genfile);
+          for (const [method, ir] of needing) {
+            const id = (ir as IRInternal).returnSchemaId as string;
+            if (!Object.prototype.hasOwnProperty.call(contractsMod, id)) {
+              contractProblems.push(
+                `${name}.${method}: returnSchemaId "${id}" is not exported by ` +
+                  `${genfile.contractsPaths.join(', ')} — recompile the artifact or restore the export`,
+              );
+            }
+          }
+        } catch (e) {
+          contractProblems.push(`${name}: contracts for ${anchor} could not be loaded — ${errorMessage(e)}`);
+        }
+      }
+      if (contractProblems.length > 0) {
+        throw new Error(
+          `cambium serve --precompiled: contracts cannot be resolved for:\n  ${contractProblems.join('\n  ')}`,
+        );
+      }
+
+      const where = opts.irDir ? pathResolve(opts.irDir) : 'sibling .ir.json artifacts';
+      process.stderr.write(
+        `[cambium serve] precompiled: ${catalog.entries.size} gen(s) from ${where}\n`,
+      );
+    }
+
+    for (const [name, irMap] of perGenMethodMaps) {
       const methodMap = new Map<string, IRInternal>();
       for (const [method, ir] of Object.entries(irMap)) {
         methodMap.set(method, ir as IRInternal);
@@ -396,7 +490,7 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
     // injecting per-call input. JSON round-trip is the cheapest deep-clone
     // for IR (plain JSON objects throughout).
     const ir = JSON.parse(JSON.stringify(cachedIr)) as IRInternal;
-    injectInput(ir, input);
+    injectContextInput(ir as unknown as IR, input);
 
     // RED-381 Phase F.3: route by IR kind. Pipeline IRs (kind: "Pipeline")
     // dispatch through runPipelineFromIr; gen IRs (kind absent) go through
@@ -421,6 +515,15 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
             cwd: runCwd,
             memoryKeys,
             firedBy: typeof body.fired_by === 'string' ? body.fired_by : undefined,
+            // #195 DEC-005 / A-003: a precompiled artifact's `entry.source`
+            // is a build-machine path — anchor discovery on the gen's OWN
+            // workspace (nearest Genfile above its declared source path,
+            // resolved at catalog load; AUD-001), falling back to the serve
+            // workspace. Compile-at-boot passes nothing (byte-identical to
+            // pre-#195).
+            ...(precompiledMode
+              ? { appRoot: catalogRef?.entries.get(gen)?.appRoot ?? opts.workspaceDir }
+              : {}),
           });
 
       if (runTimeoutMs === Infinity) {
@@ -647,26 +750,6 @@ function addressOf(server: Server, bind: BindTarget): RunServeAddress {
 
 // ── input injection + helpers ─────────────────────────────────────
 
-function injectInput(ir: IRInternal, input: unknown): void {
-  // The compile-time IR has exactly one context key (set by compile.rb,
-  // either `grounded_in :name` source or the default 'document'). Per-call
-  // input overrides it.
-  const ctx = (ir as any).context;
-  if (!ctx || typeof ctx !== 'object') return;
-  const keys = Object.keys(ctx);
-  if (keys.length === 0) return;
-  const key = keys[0];
-  if (typeof input === 'string') {
-    ctx[key] = input;
-  } else if (input === undefined || input === null) {
-    ctx[key] = '';
-  } else {
-    // dicts/lists JSON-stringify so the runner sees a string in context,
-    // matching the existing `cambium run --arg <file>` convention.
-    ctx[key] = JSON.stringify(input);
-  }
-}
-
 function memoryKeysFromObject(obj: unknown): string[] | undefined {
   if (!obj || typeof obj !== 'object') return undefined;
   return Object.entries(obj as Record<string, unknown>).map(
@@ -702,4 +785,22 @@ function makeDefaultCompileBare(compileRbPath: string): CompileBareFn {
         );
       }
     });
+}
+
+// ── precompiled artifact reader (#195) ──────────────────────────────
+
+/**
+ * Read + validate a `.ir.json` artifact off disk via `ir-artifact.ts`,
+ * returning the same `{ method → IR }` shape `compileBare` would have
+ * produced from the same gen. `compile.rb --write` / `--out-dir` always
+ * emit bare-mode (method-map) artifacts; a single-IR artifact (produced
+ * via `compile <file> --method m -o`) is also accepted, keyed by its own
+ * `entry.method`, so a hand-pointed sibling still boots.
+ */
+function readPrecompiledArtifact(irPath: string): Record<string, IR> {
+  // Size-bounded read + structural validation (ir-artifact.ts).
+  const parsed = readIrArtifactFile(irPath);
+  if (parsed.kind === 'map') return parsed.irs;
+  const irInternal = parsed.ir as IRInternal;
+  return { [irInternal.entry.method]: parsed.ir };
 }

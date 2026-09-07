@@ -52,12 +52,20 @@ import {
 import { findGenfileDir, resolveGenfileContracts, loadContractsFromGenfile } from './genfile.js';
 import { loadAppCorrectors } from './correctors/app-loader.js';
 import { builtinCorrectors, _getLegacyAppCorrectors } from './correctors/index.js';
-import type { CorrectorFn } from './correctors/types.js';
+import type { CorrectorContext, CorrectorFn } from './correctors/types.js';
 import { builtinLogSinks, emitLogEvent, loadAppLogSinks, buildRunLogEvent, classifyRunOutcome } from './log/index.js';
 import type { LogSink, LogDestination } from './log/index.js';
 import { getGroundingDocument } from './context.js';
+import { mockOutputText } from './mock-output.js';
+import { deriveGroundingText } from './grounding-text.js';
 import { resolveAppRoot } from './app-root.js';
 import { resolveEngineDir, findEngineDirFromCwd } from './engine-root.js';
+
+// #195 DEC-005: name of the Genfile `runGenFromIr` checks for under an
+// explicit `opts.appRoot` before it's trusted as the tier-1 workspace.
+// Each module that resolves a Genfile path defines this locally rather
+// than importing a shared export (matches `genfile.ts` / `gen-catalog.ts`).
+const GENFILE_NAME = 'Genfile.toml';
 
 // Road to 1.0 — Gate 1 ("IR is Arel").
 //
@@ -386,7 +394,27 @@ type GenerateWithToolsResult = {
   usage?: TokenUsage;
 };
 
-function makeGenerateWithTools(providerRegistry: ProviderRegistry, traceSteps: any[]) {
+/** #228: fold `cachedPrefix` back into the FIRST user message, the way
+ *  `generateText` folds it into `prompt`. Providers without
+ *  `supportsPromptCacheControl` see exactly the single combined string they
+ *  saw before the agentic split, in the same legacy `<prompt>\n\n<prefix>`
+ *  order (C-3). Non-mutating: the agentic loop reuses one `messages` array
+ *  across turns, so writing through it would corrupt the transcript. */
+function foldCachedPrefixIntoMessages(messages: Message[], cachedPrefix: string): Message[] {
+  const i = messages.findIndex(m => m.role === 'user');
+  // No user message to attach to is a caller bug the Anthropic builder
+  // throws on; here there is nothing to fold, so pass through untouched.
+  if (i === -1) return messages;
+  const folded = messages.slice();
+  folded[i] = { ...folded[i], content: `${folded[i].content ?? ''}\n\n${cachedPrefix}` };
+  return folded;
+}
+
+// Exported for the same reason `makeGenerateText` is (#228): the agentic
+// runner-level flatten — providers without `supportsPromptCacheControl`
+// receive the prefix folded into the first user message and no
+// `cachedPrefix` field — has to be assertable without standing up runGen.
+export function makeGenerateWithTools(providerRegistry: ProviderRegistry, traceSteps: any[]) {
  return async function generateWithTools(opts: {
   model: string;
   messages: Message[];
@@ -396,6 +424,12 @@ function makeGenerateWithTools(providerRegistry: ProviderRegistry, traceSteps: a
   documents?: any[];
   modelOptions?: { disable_thinking?: boolean };
   fallbacks?: string[];
+  // #205 (DEC-004): mock-only, see GenerateWithToolsFn's comment. Never
+  // forwarded to `provider.generateWithTools` below.
+  jsonSchema?: any;
+  // #228: cacheable head of the first user message. Same gate + flatten as
+  // generateText — see foldCachedPrefixIntoMessages above.
+  cachedPrefix?: string;
 }): Promise<GenerateWithToolsResult & { modelUsed?: string }> {
   const documents = opts.documents ?? [];
 
@@ -422,8 +456,14 @@ function makeGenerateWithTools(providerRegistry: ProviderRegistry, traceSteps: a
   if (process.env.CAMBIUM_ALLOW_MOCK === '1') {
     const lastUser = [...opts.messages].reverse().find(m => m.role === 'user');
     const promptText = typeof lastUser?.content === 'string' ? lastUser.content : '';
+    // #228, same posture as the generateText mock (AUD-001): reconstruct the
+    // prompt the way a non-cache-capable provider sees it, so --mock keeps
+    // seeing the document the agentic split moved into `cachedPrefix`.
+    const mockPrompt = opts.cachedPrefix
+      ? `${promptText}\n\n${opts.cachedPrefix}`
+      : promptText;
     return {
-      message: { content: mockGenerate(promptText), tool_calls: [] },
+      message: { content: mockGenerate(mockPrompt, opts.jsonSchema), tool_calls: [] },
     };
   }
 
@@ -469,15 +509,27 @@ function makeGenerateWithTools(providerRegistry: ProviderRegistry, traceSteps: a
       });
     }
 
+    // #228 (DEC-006): the SAME gate generateText applies above — one policy
+    // for "can this provider mark a user-prompt cache breakpoint", not two.
+    // When it can't, the prefix is folded back into the first user message
+    // and the provider never sees a `cachedPrefix` field, so oMLX/Ollama
+    // request bodies are byte-identical to pre-#228 (C-3).
+    const rawPrefix = opts.cachedPrefix;
+    const passPrefix = rawPrefix && provider.supportsPromptCacheControl;
+    const messagesForCall = !rawPrefix || passPrefix
+      ? opts.messages
+      : foldCachedPrefixIntoMessages(opts.messages, rawPrefix);
+
     try {
       const result = await provider.generateWithTools({
         model: name,
-        messages: opts.messages,
+        messages: messagesForCall,
         tools: opts.tools,
         max_tokens: opts.max_tokens,
         temperature: opts.temperature,
         documents,
         modelOptions: { disable_thinking: disableThinking },
+        cachedPrefix: passPrefix ? rawPrefix : undefined,
       });
 
       // RED-393: inline tool-call markup parsing, lifted out of the per-provider
@@ -513,63 +565,12 @@ function makeGenerateWithTools(providerRegistry: ProviderRegistry, traceSteps: a
  };
 }
 
+// #205: the deterministic --mock text generator. Schema-derivation logic
+// (canned framework ids → default-if-it-fits → schema-derived) lives in
+// mock-output.ts, which is unit-tested in isolation; this stays a
+// one-line delegate so every call site above keeps calling `mockGenerate`.
 function mockGenerate(prompt: string, schema?: { $id?: string }): string {
-  // RED-215 phase 4: retro memory agents return MemoryWrites, not the
-  // analyst shape. Branch on the schema id so both primary gens and
-  // retro agents can run end-to-end under --mock. Any new mock-
-  // incompatible schema gets its own branch here.
-  //
-  // NOTE: MemoryWrites is a framework-internal return type for retro
-  // agents. A user-authored primary gen that uses `returns MemoryWrites`
-  // would also hit this branch under --mock and receive the canned
-  // write regardless of its input — don't use MemoryWrites as a primary
-  // output schema.
-  if (schema?.$id === 'MemoryWrites') {
-    // Emit one write against a conventional memory name. Primary gens
-    // that declare `memory :conversation` will receive it; others will
-    // have it dropped at apply-time with a traced "no matching decl"
-    // reason. Both paths are exercised by integration tests.
-    return JSON.stringify({
-      writes: [{ memory: 'conversation', content: 'mock retro agent note' }],
-    });
-  }
-  // RED-381 Cambium CI Review POC: framework-internal schemas with
-  // `additionalProperties: false` would otherwise reject the default
-  // mock payload at validation. Canned shape-valid responses keep the
-  // e2e test honest without a real LLM call.
-  if (schema?.$id === 'CambiumDiffAnalysis') {
-    return JSON.stringify({
-      summary: 'Mock Cambium diff analysis: changes appear to touch the DSL surface.',
-      touched_surfaces: ['ruby_dsl', 'docs'],
-      risk_categories: ['new_dsl_primitive'],
-      magnitude: 'small',
-      files_changed: 2,
-      key_excerpts: [],
-    });
-  }
-  if (schema?.$id === 'CambiumCiReview') {
-    return JSON.stringify({
-      summary: 'Mock review: changes look reasonable; verify the docs entry is in.',
-      concerns: [
-        {
-          severity: 'suggestion',
-          category: 'docs-drift',
-          message: 'New DSL primitive — confirm CLAUDE.md "Key concepts" and a P-doc entry both land.',
-        },
-      ],
-      overall_verdict: 'approve_with_suggestions',
-    });
-  }
-
-  const matches = [...prompt.matchAll(/(\d+(?:\.\d+)?)\s*ms\b/gi)].map(m => Number(m[1]));
-  const payload = {
-    summary: 'Mock analysis (model provider not available).',
-    metrics: {
-      latency_ms_samples: matches
-    },
-    key_facts: [] as any[]
-  };
-  return JSON.stringify(payload, null, 2);
+  return mockOutputText(prompt, schema);
 }
 
 function stripThinkingTokens(text: string): string {
@@ -891,12 +892,23 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   // the injected contracts module (`ir.returnSchemaId`). Inline wins when
   // present — the two are mutually exclusive (compile.rb emits one or the
   // other). The inline schema carries its own `$id` (stamped by compile.rb).
-  const schema = ir.returnSchema ?? contractsMod[ir.returnSchemaId];
+  // Own-property lookup only (#195 security gate F1): on a plain-object
+  // contracts module, `contractsMod['__proto__']` is `Object.prototype` —
+  // truthy, and AJV compiles it into a validator that accepts anything.
+  // A reserved name must read as "not found", on every path the module
+  // reaches this line by (Genfile-merged object, ESM namespace, fallback).
+  const schema =
+    ir.returnSchema ??
+    (typeof ir.returnSchemaId === 'string' &&
+    Object.prototype.hasOwnProperty.call(contractsMod, ir.returnSchemaId)
+      ? contractsMod[ir.returnSchemaId]
+      : undefined);
   if (!schema) {
     throw new Error(
       `Schema not found in injected schemas for id: ${ir.returnSchemaId}. ` +
       `Provide it via opts.schemas — app-mode CLI resolves from Genfile.toml ` +
-      `[types].contracts, or falls back to packages/cambium/src/contracts.ts.`,
+      `[types].contracts; packages/cambium/src/contracts.ts is used only ` +
+      `when no Genfile is found at all (A-002).`,
     );
   }
 
@@ -1159,6 +1171,49 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
       errorMessage: `Document extraction failed: ${e?.message ?? String(e)}`,
     };
   }
+
+  // ── Format-aware grounding text (#169) ───────────────────────────────
+  //
+  // `grounded_in ... format: :markdown | :json` (or a format inferred from
+  // the source path at compile time) buys the VERIFIER a second view of
+  // the document: the visible text of the Markdown, the decoded strings of
+  // the JSON. Without it, a model that correctly quotes `Revenue grew 12%
+  // in Q3` from `Revenue grew **12%** in Q3` is told it fabricated the
+  // quote, and the repair loop fires against a correct output.
+  //
+  // DEC-001: this text is deliberately NOT written into
+  // `groundingTextByKey`. That map feeds `getGroundingDocument`, which
+  // feeds prompt assembly (`buildCacheablePrefix`), every RED-175 semantic
+  // repair prompt, `enrich`, and compound review — putting stripped
+  // Markdown there would change what the MODEL sees (losing link URLs,
+  // code fences, table structure) and move the prompt-cache key for every
+  // gen that opts in. The derived view travels the verifier-only channel:
+  // the corrector context.
+  const groundingFormat: string | undefined = ir.policies?.grounding?.format;
+  const derivedGroundingText = groundingFormat
+    ? deriveGroundingText(groundingFormat, ir.context?.[ir.policies?.grounding?.source])
+    : undefined;
+  // A-004 (AUD-002): a FACTORY, not a shared object. Every verification
+  // site gets its own instance, because `runCorrectorPipeline` hands the
+  // context straight to `fn(current, context)` — workspace corrector code.
+  // One object shared across five sites let a corrector that treats its
+  // context as scratch space poison every later grounding check in the run,
+  // in either direction: writing `derivedDocument` launders a wholly
+  // fabricated citation to `ok: true` even on a gen with no `format:`, and
+  // blanking `document` fails a correct one. Calling per site also restores
+  // the pre-#169 read timing — `document` is read when it is used, like
+  // every other `getGroundingDocument` caller in this function.
+  const groundingVerifyContext = (): CorrectorContext => ({
+    document: getGroundingDocument(ir, groundingTextByKey),
+    ...(derivedGroundingText !== undefined ? { derivedDocument: derivedGroundingText } : {}),
+  });
+  // DEC-008: no new step type. The four grounding steps carry the format
+  // and whether a view was actually derived (invalid JSON derives nothing
+  // and is never a run failure). Absent entirely when no format is set, so
+  // existing traces are unchanged.
+  const groundingFormatMeta = groundingFormat
+    ? { format: groundingFormat, derived: derivedGroundingText !== undefined }
+    : {};
 
   // ── Grounded-in pre-flight check ─────────────────────────────────────
   //
@@ -1555,8 +1610,13 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
       // Don't repair after last attempt
       if (attempt >= repairPolicy.maxAttempts) break;
 
-      // Repair
-      const repair = await handleRepair(raw, errors, schema, ir, attempt + 1, generateText, extractJsonObject);
+      // Repair — RED-176: structural (shape-only) repair, so the workspace
+      // repair slot runs it when declared. Semantic sites below stay on the
+      // gen's model — their complaint is about meaning, and answering it needs
+      // the source in the prompt (RED-175).
+      const repair = await handleRepair(
+        raw, errors, schema, ir, attempt + 1, generateText, extractJsonObject, ir.repairModel,
+      );
       pushRepairStep(repair);
       // RED-174: same ceiling, same outcome next attempt — stop paying for it.
       if (repair.result.meta?.output_ceiling?.hit) {
@@ -1614,7 +1674,10 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
         }));
         const repair = await handleRepair(
           JSON.stringify(parsed, null, 2), reviewErrors, schema, ir,
-          maxRepairAttempts + 1, generateText, extractJsonObject,
+          maxRepairAttempts + 1, generateText, extractJsonObject, ir.model,
+          // RED-175: the review complaint is about the source; give repair the
+          // same task + document the checker saw.
+          { documents, groundingTextByKey, task: step.prompt },
         );
         pushRepairStep(repair);
 
@@ -1658,9 +1721,10 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
           trace.steps.push(extraV);
           if (attempt >= maxRepairAttempts) break;
 
+          // RED-176: structural again — consensus-pass shape failures.
           const extraRepair = await handleRepair(
             extraRaw, extraV.errors ?? [], schema, ir,
-            attempt + 1, generateText, extractJsonObject,
+            attempt + 1, generateText, extractJsonObject, ir.repairModel,
           );
           trace.steps.push({ ...extraRepair.result, id: `${passId}_repair_${attempt + 1}` });
           extraRaw = extraRepair.raw;
@@ -1687,7 +1751,10 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
           }));
           const repair = await handleRepair(
             JSON.stringify(consensus.agreed, null, 2), consensusErrors, schema, ir,
-            maxRepairAttempts + 1, generateText, extractJsonObject,
+            maxRepairAttempts + 1, generateText, extractJsonObject, ir.model,
+            // RED-175: two passes disagreed about a value — only the source can
+            // say which one is right.
+            { documents, groundingTextByKey, task: step.prompt },
           );
           pushRepairStep(repair);
 
@@ -1742,7 +1809,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
       // `parsed` and triggers a silent schema revalidate (only the
       // failure case is loud — matches pre-RED-298 observability).
       const correctResult = handleCorrect(
-        parsed, [correctorName], { document: getGroundingDocument(ir, groundingTextByKey) }, correctors,
+        parsed, [correctorName], groundingVerifyContext(), correctors,
       );
       trace.steps.push(correctResult);
 
@@ -1769,7 +1836,9 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
         }));
         const repair = await handleRepair(
           JSON.stringify(parsed, null, 2), repairErrors, schema, ir,
-          maxRepairAttempts + 1, generateText, extractJsonObject,
+          maxRepairAttempts + 1, generateText, extractJsonObject, ir.model,
+          // RED-175: same document handleCorrect just verified against.
+          { documents, groundingTextByKey, task: step.prompt },
         );
         pushRepairStep(repair);
 
@@ -1786,7 +1855,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
         // RED-298 correctness fix.
         parsed = repair.parsed;
         const rerun = handleCorrect(
-          parsed, [correctorName], { document: getGroundingDocument(ir, groundingTextByKey) }, correctors,
+          parsed, [correctorName], groundingVerifyContext(), correctors,
         );
         const stillErrors = (rerun.meta?.issues ?? [])
           .filter((i: any) => i.severity === 'error');
@@ -1850,7 +1919,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     // 5. Grounding: citation enforcement (auto-registered when grounded_in is declared)
     const grounding = ir.policies?.grounding;
     if (grounding?.require_citations) {
-      const citResult = handleCorrect(parsed, ['citations'], { document: getGroundingDocument(ir, groundingTextByKey) }, correctors);
+      const citResult = handleCorrect(parsed, ['citations'], groundingVerifyContext(), correctors);
       // RED-323 fix: handleCorrect now shallow-merges each corrector's
       // `meta` into its result, so `citationResult` is properly
       // available here (previously dropped, leaving `ok` defaulting
@@ -1871,6 +1940,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
           : !allIssues.some((i: any) => i.severity === 'error'),
         meta: {
           ...citResult.meta,
+          ...groundingFormatMeta,
           passed: citationResult?.passed?.length ?? 0,
           failed: citationResult?.failed?.length ?? 0,
           missing: citationResult?.missing?.length ?? 0,
@@ -1888,7 +1958,11 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
         }));
         const repair = await handleRepair(
           JSON.stringify(parsed, null, 2), repairErrors, schema, ir,
-          maxRepairAttempts + 1, generateText, extractJsonObject,
+          maxRepairAttempts + 1, generateText, extractJsonObject, ir.model,
+          // RED-175: the hole. Repair used to be told a quote is not in the
+          // source without being shown the source, so deleting the citation was
+          // the only legal move. Now it can restore a verbatim quote.
+          { documents, groundingTextByKey, task: step.prompt },
         );
         pushRepairStep(repair);
 
@@ -1898,22 +1972,41 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
             parsed = repair.parsed;
             trace.steps.push(revalidate);
             // RED-398: re-verify citations after repair, before accepting output.
-            const citRerun = handleCorrect(parsed, ['citations'], { document: getGroundingDocument(ir, groundingTextByKey) }, correctors);
+            // RED-175: the re-verify used to be satisfied by deletion — repair
+            // dropped the citations, nothing was left to check, and the run came
+            // back "grounded" with nothing grounded. Count the citations on both
+            // sides of the repair: fewer after means the "fix" was a deletion,
+            // and a deletion is not a pass.
+            const citationsBefore = citationResult?.totalChecked ?? 0;
+            const citRerun = handleCorrect(parsed, ['citations'], groundingVerifyContext(), correctors);
             const citRerunResult = citRerun.meta?.citationResult;
             const citStillErrors = (citRerun.meta?.issues ?? []).filter((i: any) => i.severity === 'error');
+            const citationsAfter = citRerunResult?.totalChecked ?? 0;
+            const citationsDeleted = citationsAfter < citationsBefore;
             trace.steps.push({
               ...citRerun,
               type: 'GroundingCheckAfterRepair',
-              ok: citRerunResult ? citRerunResult.allValid : citStillErrors.length === 0,
+              ok: citationsDeleted ? false
+                : (citRerunResult ? citRerunResult.allValid : citStillErrors.length === 0),
               meta: {
                 ...citRerun.meta,
+                ...groundingFormatMeta,
+                citations_before: citationsBefore,
+                citations_after: citationsAfter,
+                deleted_by_repair: citationsDeleted,
                 passed: citRerunResult?.passed?.length ?? 0,
                 failed: citRerunResult?.failed?.length ?? 0,
                 missing: citRerunResult?.missing?.length ?? 0,
-                totalChecked: citRerunResult?.totalChecked ?? 0,
+                totalChecked: citationsAfter,
                 details: citRerunResult?.failed ?? [],
               },
             });
+            // Fail closed: `require_citations` asked for provenance in the output,
+            // so shipping an output that lost it is not a successful run.
+            if (citationsDeleted) {
+              finalOk = false;
+              break;
+            }
           } else {
             trace.steps.push(revalidate);
             // Grounding repair failed — continue with original
@@ -1924,9 +2017,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
 
     // 5b. RED-392: Field-values verification (when grounded_in verify: :field_values)
     if (grounding?.verify === 'field_values') {
-      const fvContext: { document: string; fields?: string[] } = {
-        document: getGroundingDocument(ir, groundingTextByKey),
-      };
+      const fvContext: CorrectorContext = groundingVerifyContext();
       const gf = grounding as { fields?: string[] };
       if (Array.isArray(gf.fields) && gf.fields.length > 0) {
         fvContext.fields = gf.fields.map(String);
@@ -1943,6 +2034,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
           : !fvIssues.some((i: any) => i.severity === 'error'),
         meta: {
           ...fvResult.meta,
+          ...groundingFormatMeta,
           passed: fieldValuesResult?.passed?.length ?? 0,
           failed: fieldValuesResult?.failed?.length ?? 0,
           skipped: fieldValuesResult?.skipped?.length ?? 0,
@@ -1960,7 +2052,9 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
         }));
         const repair = await handleRepair(
           JSON.stringify(parsed, null, 2), repairErrors, schema, ir,
-          maxRepairAttempts + 1, generateText, extractJsonObject,
+          maxRepairAttempts + 1, generateText, extractJsonObject, ir.model,
+          // RED-175: same for value-level grounding.
+          { documents, groundingTextByKey, task: step.prompt },
         );
         pushRepairStep(repair);
 
@@ -1970,22 +2064,37 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
             parsed = repair.parsed;
             trace.steps.push(revalidate);
             // RED-398: re-verify field-values after repair, before accepting output.
+            // RED-175: same deletion guard as the citations path — a repaired
+            // output that carries fewer grounded values than the one we started
+            // from lost content instead of correcting it.
+            const valuesBefore = fieldValuesResult?.totalChecked ?? 0;
             const fvRerun = handleCorrect(parsed, ['field_values'], fvContext, correctors);
             const fvRerunResult = fvRerun.meta?.fieldValuesResult;
             const fvStillErrors = (fvRerun.meta?.issues ?? []).filter((i: any) => i.severity === 'error');
+            const valuesAfter = fvRerunResult?.totalChecked ?? 0;
+            const valuesDeleted = valuesAfter < valuesBefore;
             trace.steps.push({
               ...fvRerun,
               type: 'GroundingFieldValueCheckAfterRepair',
-              ok: fvRerunResult ? fvRerunResult.allValid : fvStillErrors.length === 0,
+              ok: valuesDeleted ? false
+                : (fvRerunResult ? fvRerunResult.allValid : fvStillErrors.length === 0),
               meta: {
                 ...fvRerun.meta,
+                ...groundingFormatMeta,
+                values_before: valuesBefore,
+                values_after: valuesAfter,
+                deleted_by_repair: valuesDeleted,
                 passed: fvRerunResult?.passed?.length ?? 0,
                 failed: fvRerunResult?.failed?.length ?? 0,
                 skipped: fvRerunResult?.skipped?.length ?? 0,
-                totalChecked: fvRerunResult?.totalChecked ?? 0,
+                totalChecked: valuesAfter,
                 details: fvRerunResult?.failed ?? [],
               },
             });
+            if (valuesDeleted) {
+              finalOk = false;
+              break;
+            }
           } else {
             trace.steps.push(revalidate);
           }
@@ -2258,8 +2367,18 @@ export interface RunGenFromIrOptions {
    *  (tools/actions/providers/log sinks). When omitted, runGenFromIr
    *  anchors on the gen's workspace (walked up from `ir.entry.source`)
    *  rather than `process.cwd()`. Pipeline sub-gen dispatch passes this
-   *  explicitly. */
+   *  explicitly. #195 DEC-005: when `<appRoot>/Genfile.toml` exists, this
+   *  also wins as the tier-1 source for contracts + `app/correctors/`
+   *  discovery (not just tools/actions/providers/log sinks) — the
+   *  operator contract for a shipped precompiled IR, whose own
+   *  `entry.source` is a build-machine path. */
   appRoot?: string;
+  /** #195 DEC-005: explicit engine-folder root (RED-287). When omitted,
+   *  falls back to the existing `resolveEngineDir(ir.entry.source)` /
+   *  cwd-fallback logic verbatim. Set by a caller anchoring a shipped
+   *  engine-mode IR on its own artifact location rather than
+   *  `entry.source`. */
+  engineDir?: string;
   /** Override the trace-output path. Defaults to `<runsDir>/<runId>/trace.json`. */
   traceOut?: string;
   /** Override the output-output path. Defaults to `<runsDir>/<runId>/output.json`. */
@@ -2330,12 +2449,17 @@ export async function runGenFromIr(opts: RunGenFromIrOptions): Promise<RunGenFro
   // an ancestor." Source-anchored detection still wins when the path
   // exists — the test in engine_mode_e2e (run-from-anywhere) keeps
   // working because the absolute path is reachable in-process.
+  // #195 DEC-005: an explicit `opts.engineDir` wins outright — a caller
+  // anchoring a shipped engine-mode IR on its own artifact location
+  // (rather than the build-machine `entry.source`) states the engine
+  // folder directly instead of relying on the source-then-cwd fallback
+  // below (unchanged, verbatim, when `opts.engineDir` is not set).
   const sourceFromIr = irInternal.entry?.source;
   const engineFromSource = resolveEngineDir(sourceFromIr);
   const engineFromCwd = !engineFromSource && sourceFromIr && !existsSync(sourceFromIr)
     ? findEngineDirFromCwd(cwd)
     : null;
-  const engineDir = engineFromSource ?? engineFromCwd;
+  const engineDir = opts.engineDir ?? engineFromSource ?? engineFromCwd;
 
   // RED-330: now that engineDir is known, compute the runDir + trace
   // path and emit. Eagerly mkdir so the tail-side reader sees the dir
@@ -2372,9 +2496,43 @@ export async function runGenFromIr(opts: RunGenFromIrOptions): Promise<RunGenFro
   // where contracts loaded from the gen's workspace but plugins loaded from
   // cwd — the recurring Docker/CI/run-from-anywhere bug class. See the
   // "App-root resolution is single-sourced" invariant in CLAUDE.md.
-  const genfileDirFromSource = findGenfileDir(irInternal.entry?.source);
+  //
+  // #195 DEC-005: an explicit `opts.appRoot` that names a real workspace
+  // (a `Genfile.toml` actually lives there) now wins as tier 1 outright —
+  // closing the seam RED-393 left half-open, where `appRoot` anchored
+  // tool/action/provider/log-sink discovery but contracts + correctors
+  // still walked up from `entry.source`. This matters for a shipped
+  // precompiled IR: `entry.source` is a build-machine path that may not
+  // exist (or may exist but point at an unrelated tree) on the machine
+  // running it, while the artifact's own location — passed as `appRoot`
+  // by the caller — is always the right anchor. Tiers 2 and 3 below are
+  // untouched. A bare `opts.appRoot` with no Genfile there (pipeline
+  // sub-gen dispatch, which passes the pipeline's own workspace) falls
+  // through to the source-anchored walk-up exactly as before.
+  const genfileDirFromSource =
+    (opts.appRoot && existsSync(join(opts.appRoot, GENFILE_NAME)) ? opts.appRoot : null) ??
+    findGenfileDir(irInternal.entry?.source);
   const genfileDir = genfileDirFromSource ?? cwd;
   const genfile = resolveGenfileContracts(genfileDir);
+  // A-002/A-003 (DEC-008, amended): three-tier order, source-anchored first,
+  // cwd only as a last resort before the monorepo path —
+  //   1. The gen's OWN workspace (found by walking up from `ir.entry.source`)
+  //      decides, when it exists: contracts if it declares `[types]`, `{}`
+  //      if it doesn't (a `[types]`-less Genfile is app mode with no
+  //      contracts — RED-419's inline-schema gens never needed one — not
+  //      "no Genfile"; see #205 A-002's ERR_MODULE_NOT_FOUND fix).
+  //   2. Else (no Genfile anywhere above the gen's source — engine mode
+  //      handled above, or a host-compiled IR whose source is unreachable,
+  //      RED-220), fall back to cwd's OWN declared contracts, if any —
+  //      unchanged pre-A-002 behavior. A-003 fixed A-002's over-reach here:
+  //      treating "a Genfile merely sits at cwd" as tier-1 "found" broke
+  //      nine tests that spawn the CLI from the monorepo root against a
+  //      gen living in an unrelated tmpdir — cwd being the monorepo's own
+  //      `[workspace]` Genfile (no `[types]`, by design; the in-tree app's
+  //      contracts live at the hardcoded path below) is not that gen's
+  //      workspace and must not turn its contracts into `{}`.
+  //   3. Else, the monorepo cwd fallback (dev-time convenience for a stray
+  //      gen run from the repo root) — unchanged.
   let appCorrectors: Record<string, CorrectorFn> | undefined;
   if (engineDir) {
     const schemasFile = join(engineDir, 'schemas.ts');
@@ -2385,12 +2543,22 @@ export async function runGenFromIr(opts: RunGenFromIrOptions): Promise<RunGenFro
       );
     }
     contractsMod = await import(pathToFileURL(schemasFile).href);
-  } else if (genfile) {
-    contractsMod = await loadContractsFromGenfile(genfile);
+  } else if (genfileDirFromSource) {
+    contractsMod = genfile ? await loadContractsFromGenfile(genfile) : {};
     // RED-275: app-mode correctors discovered under <genfileDir>/app/correctors/.
     // RED-299: pass them via runGen's `correctors` option rather than
     // mutating a module-global. Engine-mode correctors are discovered
-    // inside runGen via the engineDir scan (RED-287 phase 3).
+    // inside runGen via the engineDir scan (RED-287 phase 3). A-002:
+    // discovered either way the gen's own Genfile was found — `[types]`-less
+    // workspaces get RED-275 discovery too, not just ones with contracts.
+    const app = await loadAppCorrectors(genfile?.genfileDir ?? genfileDirFromSource);
+    if (Object.keys(app.correctors).length > 0) {
+      appCorrectors = app.correctors;
+    }
+  } else if (genfile) {
+    // Pre-A-002 behavior, restored verbatim (A-003): the gen has no Genfile
+    // of its own, but cwd declares `[types]` — trust it.
+    contractsMod = await loadContractsFromGenfile(genfile);
     const app = await loadAppCorrectors(genfile.genfileDir);
     if (Object.keys(app.correctors).length > 0) {
       appCorrectors = app.correctors;
@@ -2399,7 +2567,14 @@ export async function runGenFromIr(opts: RunGenFromIrOptions): Promise<RunGenFro
     // pathToFileURL is not strictly required on POSIX (`import()` of a
     // bare absolute path works) but is required on Windows, where a
     // bare `C:\...` path is not a valid ESM specifier. Matches the
-    // genfile-path loader in `genfile.ts`.
+    // genfile-path loader in `genfile.ts`. The true no-Genfile-anywhere
+    // case (no Genfile above the gen's source, and cwd's Genfile — if any
+    // — declares no `[types]` either): the monorepo's own dev-time
+    // fallback. A stray gen file run from outside any workspace, against
+    // an app root whose Genfile has no `[types]`, still lands here and
+    // fails with ERR_MODULE_NOT_FOUND if `packages/cambium/src/contracts.ts`
+    // doesn't exist under cwd — that layout has no realistic user
+    // (A-003, deliberately not widened further).
     const fallback = pathToFileURL(join(cwd, 'packages/cambium/src/contracts.ts')).href;
     contractsMod = await import(fallback);
   }

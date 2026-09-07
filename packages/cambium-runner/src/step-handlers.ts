@@ -2,7 +2,7 @@ import type { ValidateFunction } from 'ajv';
 import { ToolRegistry } from './tools/registry.js';
 import { testOverrideHandlers } from './tools/index.js';
 import { runCorrectorPipeline } from './correctors/index.js';
-import type { CorrectorFn } from './correctors/types.js';
+import type { CorrectorContext, CorrectorFn } from './correctors/types.js';
 import type { CorrectorResult } from './correctors/types.js';
 import { schemaPromptBlock } from './schema-describe.js';
 import { parseInlineToolCalls, stripInlineToolCalls } from './inline-tool-calls.js';
@@ -71,41 +71,51 @@ export const DEFAULT_MAX_TOKENS = 1200;
  * @param ir       The gen IR, for the applied ceiling.
  * @param parseFailed Whether JSON extraction already failed. The usage
  *                 heuristic is gated on this; the reported signal is not.
+ * @param declared  Whether the ceiling in `ir` was declared by anyone. Pass it
+ *                 when the ceiling arrives in a stand-in `ir` — RED-176 repair
+ *                 passes `{ model: { ...repairModel, max_tokens } }`, so the
+ *                 number in force may have been declared by the gen while a
+ *                 smaller one was declared for repair.
  */
 export function detectOutputCeiling(
   result: { stopReason?: string; usage?: { completion_tokens?: number } } | undefined,
   ir: any,
   parseFailed: boolean,
+  declared?: boolean,
 ): CeilingCheck | null {
-  const { ceiling, declared } = appliedCeiling(ir);
+  const { ceiling, declared: applied } = appliedCeiling(ir);
+  const isDeclared = declared ?? applied;
   const completionTokens = result?.usage?.completion_tokens;
 
   if (result?.stopReason === 'length') {
-    return { hit: true, source: 'reported', ceiling, declared, completionTokens };
+    return { hit: true, source: 'reported', ceiling, declared: isDeclared, completionTokens };
   }
   // Only infer once something has already gone wrong, and only when the
   // provider stayed silent — a provider that said 'stop' is believed.
   if (parseFailed && result?.stopReason === undefined &&
       typeof completionTokens === 'number' && completionTokens >= ceiling) {
-    return { hit: true, source: 'inferred', ceiling, declared, completionTokens };
+    return { hit: true, source: 'inferred', ceiling, declared: isDeclared, completionTokens };
   }
   return null;
 }
 
 /** Operator-facing message. Names the ceiling AND where it came from — the
  *  fix is almost always "raise max_tokens", and a user who never declared one
- *  has no reason to know 1200 exists. */
-export function ceilingMessage(c: CeilingCheck, modelUsed: string): string {
+ *  has no reason to know 1200 exists. `owner` names whose declaration it was,
+ *  so a repair that died on its own ceiling doesn't tell the operator to raise
+ *  a limit on the gen (RED-176). */
+export function ceilingMessage(c: CeilingCheck, modelUsed: string, owner = 'gen'): string {
+  const label = owner === 'gen' ? 'gen' : 'repair slot';
   const origin = c.declared
-    ? `the gen's declared \`max_tokens\``
-    : `the default \`max_tokens\` (no value declared on the gen)`;
+    ? `the ${label}'s declared \`max_tokens\``
+    : `the default \`max_tokens\` (no value declared on the ${label})`;
   const how = c.source === 'reported'
     ? `${modelUsed} reported it stopped at the limit`
     : `the completion used ${c.completionTokens} tokens, at or above the limit`;
   return (
     `Output ceiling reached: ${how}. The response was cut off mid-output, ` +
     `so it is a fragment, not malformed JSON. Limit is ${c.ceiling} tokens, from ${origin}. ` +
-    `Raise \`max_tokens\` on the gen (or narrow the \`returns\` schema) and re-run.`
+    `Raise \`max_tokens\` on the ${label} (or narrow the \`returns\` schema) and re-run.`
   );
 }
 
@@ -120,11 +130,25 @@ export function ceilingMessage(c: CeilingCheck, modelUsed: string): string {
 //     bindings, hand-rolled IR with extra context fields)
 // Non-string values are JSON-pretty-printed; the model sees structured
 // data clearly instead of `[object Object]`.
+//
+// #182 (DEC-012): a key named by `exclude_from_prefix` is rendered into
+// `excludedParts` instead of `parts`. Same section text, same label rules,
+// same skip rules — the ONLY difference is which array it lands in, so the
+// two can never drift. The dispatch site splices `excludedParts` onto the
+// uncached tail of the user prompt, which keeps the key fully model-visible
+// while stopping it from splitting the prefix's cache key.
+//
+// `_` keeps its exact meaning (framework-internal: hidden AND excluded) and
+// is skipped before the split is even considered — that is what makes #182
+// additive. `exclude_from_prefix :_foo` is a compile error, so the two
+// conventions never overlap in a compiled IR.
 
 function appendNonPrimaryContextSections(
   parts: string[],
+  excludedParts: string[],
   context: Record<string, any>,
   groundingSource: string | undefined,
+  exclude: ReadonlySet<string>,
 ): void {
   const primaryKey = groundingSource ?? 'document';
   for (const key of Object.keys(context)) {
@@ -137,7 +161,7 @@ function appendNonPrimaryContextSections(
     const label = key.endsWith('_enriched')
       ? key.replace(/_enriched$/, '').toUpperCase() + '_ANALYSIS'
       : key.toUpperCase();
-    parts.push('', `${label}:`, value);
+    (exclude.has(key) ? excludedParts : parts).push('', `${label}:`, value);
   }
 }
 
@@ -189,33 +213,70 @@ export type GenerateTextFn = (opts: {
  *  small/ungrounded gens. */
 export const MIN_CACHE_PREFIX_CHARS = 4096;
 
+/** #182: the "exclude nothing" set. Module-level and frozen-by-convention so
+ *  the second assembly pass allocates nothing. */
+const EMPTY_EXCLUDE_SET: ReadonlySet<string> = new Set<string>();
+
 export type ExtractJsonFn = (text: string) => any;
 
 // ── Shared prompt assemblers ───────────────────────────────────────────
 //
 // The system block and the cacheable user-prompt prefix are a pure
 // function of (ir, schema, extracted docs) — no per-call instruction
-// (`step.prompt`) bleeds in. handleGenerate and the pipeline's auto-prewarm
-// path both build their prefix through these helpers, so the two can never
-// drift — byte-identity is the whole precondition for a cache hit.
+// (`step.prompt`) bleeds in. handleGenerate, handleAgenticGenerate and the
+// pipeline's auto-prewarm path all build their prompts through these
+// helpers, so they can never drift — byte-identity is the whole
+// precondition for a cache hit.
+//
+// #228 (DEC-001): the agentic loop used to hand-roll its own system block,
+// which is exactly the drift this comment claimed was impossible. It is a
+// parameter now, not a second assembler — the variants must stay visible
+// side by side or the next prompt edit re-opens the gap.
 
-export function buildGenSystem(ir: any, schema: any): string {
+/** `opts.agentic` selects the multi-turn tool-use wording. Default (absent)
+ *  is byte-identical to the single-shot `handleGenerate` system block — a
+ *  whitespace change here silently invalidates every warm cache entry a
+ *  deployed consumer holds (C-1). */
+export function buildGenSystem(ir: any, schema: any, opts?: { agentic?: boolean }): string {
+  const agentic = opts?.agentic === true;
   const constraints = ir.policies?.constraints ?? {};
+  // "agent" vs "analyst" only reaches the prompt when the gen declares no
+  // `system` of its own, which every real gen does.
+  const role = agentic ? 'agent' : 'analyst';
   const basePrompt = ir.system
-    ?? (constraints.tone?.to ? `You are a ${constraints.tone.to} analyst.` : 'You are an analyst.');
+    ?? (constraints.tone?.to ? `You are a ${constraints.tone.to} ${role}.` : `You are an ${role}.`);
 
   const grounding = ir.policies?.grounding;
+  // Agentic output is the LAST turn's message, not the whole response —
+  // the rules say "Final output" so an intermediate tool-calling turn
+  // isn't read as a violation.
+  const outputNoun = agentic ? 'Final output' : 'Output';
 
   const systemParts = [
     basePrompt,
     '',
     schemaPromptBlock(schema),
     '',
-    'OUTPUT RULES:',
-    '- Output MUST be JSON only. No markdown. No code fences. No reasoning.',
-    '- Output must start with "{" and end with "}".',
-    '- If unsure, leave fields empty but valid.',
   ];
+
+  if (agentic) {
+    systemParts.push(
+      'You have access to tools. Call them as needed to complete the task.',
+      'When you are done, respond with the final JSON output matching the schema above.',
+    );
+  }
+
+  systemParts.push(
+    'OUTPUT RULES:',
+    `- ${outputNoun} MUST be JSON only. No markdown. No code fences. No reasoning.`,
+    `- ${outputNoun} must start with "{" and end with "}".`,
+  );
+
+  // Single-shot only: an agentic gen that leaves a field empty can still go
+  // call a tool instead, so the escape hatch is counterproductive there.
+  if (!agentic) {
+    systemParts.push('- If unsure, leave fields empty but valid.');
+  }
 
   if (grounding?.require_citations) {
     systemParts.push(
@@ -223,7 +284,9 @@ export function buildGenSystem(ir: any, schema: any): string {
       'GROUNDING RULES:',
       '- Every item in arrays with a citations field MUST include citations.',
       '- Each citation MUST include a quote field with EXACT verbatim text from the document.',
-      '- Do not paraphrase or fabricate quotes. Copy text exactly as it appears.',
+      agentic
+        ? '- Do not paraphrase or fabricate quotes.'
+        : '- Do not paraphrase or fabricate quotes. Copy text exactly as it appears.',
     );
   }
 
@@ -231,54 +294,189 @@ export function buildGenSystem(ir: any, schema: any): string {
 }
 
 /** The shared (potentially-cacheable) portion of the user prompt: DOCUMENT
- *  body + non-primary context sections + OUTPUT_JSON_TEMPLATE, plus the two
- *  gates the dispatch site uses to decide whether to split it into a cached
- *  block. Only `docInput.groundingTextByKey` is consulted; `documents`
- *  travels to the provider separately. */
+ *  body + non-primary context sections + (optionally) OUTPUT_JSON_TEMPLATE,
+ *  plus the gates the dispatch site uses to decide whether to split it into
+ *  a cached block. Only `docInput.groundingTextByKey` is consulted;
+ *  `documents` travels to the provider separately.
+ *
+ *  Two flags, one assembler, one policy — never a second function (DEC-001).
+ *  Both default to the single-shot behavior, so an existing caller (or one
+ *  passing `{}`) is unaffected.
+ *
+ *  `opts.requireGrounding` (default `true`) is the eligibility gate. #228
+ *  (DEC-002): the agentic dispatch passes `false` — every agentic gen in
+ *  the tree is ungrounded, so a grounded-only gate would fix nothing for
+ *  the shape #228 was filed about, and on the agentic path the prefix is
+ *  re-sent on EVERY turn, which is what makes the cache write pay for
+ *  itself regardless of grounding. The single-shot path keeps the grounded
+ *  gate: there, a large but per-call-varying prefix would pay ~1.25x for a
+ *  cache write nothing ever reads (OQ-002).
+ *
+ *  `opts.includeOutputTemplate` (default `true`) emits the
+ *  OUTPUT_JSON_TEMPLATE tail. #228 (DEC-008): the agentic dispatch passes
+ *  `false` on SCOPE grounds — its hand-rolled prompt never carried the
+ *  template, and #228 is a cost bug, so it adds no prompt CONTENT.
+ *  Converging the two prompts is a fine idea; it just needs to be its own
+ *  reviewed change. Precisely (AUD-002): on providers that cannot mark a
+ *  breakpoint the agentic prompt is byte-identical to pre-#228; on
+ *  Anthropic above the cache floor the same text is LAID OUT differently
+ *  — the instruction moves after the prefix and the `\n\n` separator is
+ *  dropped, since the cached region extends backward from the marker.
+ *  That is the layout the single-shot path has used since 0.8.1. Cache identity is unaffected either way: the
+ *  template is schema-derived and stable per gen, so it changes the prefix
+ *  bytes but not their stability, which is the only property a cache hit
+ *  depends on. */
 export function buildCacheablePrefix(
   ir: any,
   schema: any,
   docInput: { documents: DocumentBlock[]; groundingTextByKey: Record<string, string> },
-): { cacheablePrefix: string; grounded: boolean; useCachedPrefix: boolean } {
+  opts?: { requireGrounding?: boolean; includeOutputTemplate?: boolean },
+): {
+  cacheablePrefix: string;
+  excludedTail: string;
+  grounded: boolean;
+  useCachedPrefix: boolean;
+  /** DEC-017: the cached-prefix decision, made observable. DEC-018:
+   *  `judged_chars`, not `chars` — it is the length the floor gate JUDGED
+   *  (exclusion applied), which under DEC-016 is deliberately not the length
+   *  that shipped when caching is off. The name carries that; a doc line
+   *  does not travel with the JSON. `excluded_chars` is how many bytes the
+   *  declaration removed from it. Lands on the `Generate` step's trace meta,
+   *  which is COMPATIBILITY surface 4 — hence renaming before it ships. */
+  cachePrefix: { judged_chars: number; used: boolean; excluded_chars: number };
+  /** DEC-017: true when the declaration is *the reason* caching is off — the
+   *  prefix cleared the floor without the exclusion and misses it with.
+   *  Intent and outcome are inverted; the dispatch site warns. */
+  exclusionCostCaching: boolean;
+} {
   const doc = getGroundingDocument(ir, docInput.groundingTextByKey);
-  const schemaKeys = Object.keys(schema.properties ?? {});
-
-  // Build a JSON template from schema properties.
-  const jsonTemplate: Record<string, any> = {};
-  for (const key of schemaKeys) {
-    const prop = schema.properties[key];
-    if (prop.type === 'string') jsonTemplate[key] = '';
-    else if (prop.type === 'array') jsonTemplate[key] = [];
-    else if (prop.type === 'object') jsonTemplate[key] = {};
-    else jsonTemplate[key] = null;
-  }
-
-  const sharedParts: string[] = [
-    'DOCUMENT:',
-    String(doc ?? ''),
-  ];
-
-  // Include additional context fields (enrich primitive + Pipeline
-  // bind() injections). RED-382: every non-framework key gets a labeled
-  // prompt section.
   const groundingSource = ir.policies?.grounding?.source;
-  appendNonPrimaryContextSections(sharedParts, ir.context ?? {}, groundingSource);
 
-  sharedParts.push(
-    '',
-    'OUTPUT_JSON_TEMPLATE (fill this; keep keys the same; no extra keys):',
-    JSON.stringify(jsonTemplate),
+  // #182: `exclude_from_prefix :page_id`. Filtered to strings rather than
+  // trusted, because an IR can also arrive hand-built or precompiled (#195)
+  // — a malformed entry must degrade to "not excluded" (the key stays in
+  // the prefix, i.e. today's behavior), never throw inside prompt assembly.
+  const exclude = new Set<string>(
+    Array.isArray(ir.excludeFromPrefix)
+      ? ir.excludeFromPrefix.filter((k: unknown): k is string => typeof k === 'string')
+      : [],
   );
 
-  const cacheablePrefix = sharedParts.join('\n');
+  /** One assembly pass, parameterized by the exclusion set. Called twice —
+   *  and only ever twice — for a gen that actually declares an exclusion
+   *  (DEC-016 needs the unexcluded prefix as a fallback, DEC-017 needs its
+   *  length as a baseline). A gen that declares nothing calls it once and
+   *  pays exactly what it paid before #182. */
+  const assemble = (excludeSet: ReadonlySet<string>): { prefix: string; tail: string } => {
+    const sharedParts: string[] = [
+      'DOCUMENT:',
+      String(doc ?? ''),
+    ];
+    const excludedParts: string[] = [];
+
+    // Include additional context fields (enrich primitive + Pipeline
+    // bind() injections). RED-382: every non-framework key gets a labeled
+    // prompt section.
+    appendNonPrimaryContextSections(
+      sharedParts,
+      excludedParts,
+      ir.context ?? {},
+      groundingSource,
+      excludeSet,
+    );
+
+    // Same defaulting shape as `requireGrounding`: a caller passing `{}` —
+    // or no opts at all — gets today's single-shot behavior.
+    if (opts?.includeOutputTemplate !== false) {
+      // Build a JSON template from schema properties.
+      const jsonTemplate: Record<string, any> = {};
+      for (const key of Object.keys(schema.properties ?? {})) {
+        const prop = schema.properties[key];
+        if (prop.type === 'string') jsonTemplate[key] = '';
+        else if (prop.type === 'array') jsonTemplate[key] = [];
+        else if (prop.type === 'object') jsonTemplate[key] = {};
+        else jsonTemplate[key] = null;
+      }
+      sharedParts.push(
+        '',
+        'OUTPUT_JSON_TEMPLATE (fill this; keep keys the same; no extra keys):',
+        JSON.stringify(jsonTemplate),
+      );
+    }
+
+    // #182: the excluded sections, ready to splice onto `step.prompt`. Each
+    // section is pushed with a leading `''` (the blank line that separates it
+    // from the previous one), so drop the first separator here and let the
+    // dispatch site own the join to the instruction. `''` when nothing was
+    // excluded — which is every pre-#182 gen, and is what makes the dispatch
+    // sites byte-identical.
+    return {
+      prefix: sharedParts.join('\n'),
+      tail: excludedParts.length > 0 ? excludedParts.slice(1).join('\n') : '',
+    };
+  };
+
+  const applied = assemble(exclude);
+  // Skipped entirely when nothing is excluded, so the common path is a
+  // single assembly and `excluded_chars` is exactly 0.
+  const unexcluded = exclude.size > 0 ? assemble(EMPTY_EXCLUDE_SET) : applied;
 
   // Opt into the cached-prefix path only when (1) grounding is declared —
   // without it the "shared payload" framing is misleading — and (2) the
   // prefix is large enough to clear Anthropic's cache floor with margin.
+  // Callers that re-send the prefix every turn waive (1); see the
+  // `requireGrounding` note above.
+  //
+  // #182 (DEC-016): the gate judges the EXCLUSION-APPLIED prefix, always.
+  // One decision, made once — deciding on the unexcluded prefix and then
+  // applying the exclusion could flip the answer the exclusion depends on.
   const grounded = !!ir.policies?.grounding;
-  const useCachedPrefix = grounded && cacheablePrefix.length >= MIN_CACHE_PREFIX_CHARS;
+  const eligible = opts?.requireGrounding === false ? true : grounded;
+  const useCachedPrefix = eligible && applied.prefix.length >= MIN_CACHE_PREFIX_CHARS;
 
-  return { cacheablePrefix, grounded, useCachedPrefix };
+  // #182 (DEC-016) — the exclusion applies ONLY when the cached-prefix path
+  // is actually taken.
+  //
+  // DEC-012 justified the tail with "the provider orders [prefix][userText]
+  // and a cache region extends backward, so the tail is outside it". That is
+  // true of the CACHE-AWARE path only. `legacyPrompt` is
+  // `${promptText}\n\n${cacheablePrefix}`, so on the non-cached path the tail
+  // lands BEFORE the prefix — inserting the excluded sections between the
+  // instruction and `DOCUMENT:`, for zero caching benefit. And that path is
+  // not an edge case: `supportsPromptCacheControl` is set only by
+  // `anthropicCompatible`, so oMLX and Ollama — the documented defaults —
+  // always take it, as does Anthropic below the floor. With RED-421
+  // fallbacks one gen could present two section orders in a single run
+  // depending on which provider answered.
+  //
+  // So below the floor the exclusion is simply not applied: the caller gets
+  // the full unexcluded prefix and an empty tail, byte-identical to pre-#182
+  // — the layout every existing gen was tuned against. Two layouts in the
+  // world instead of three, and the primitive is a true no-op exactly where
+  // it can buy nothing. All four callers inherit this from the return value.
+  const shipped = useCachedPrefix ? applied : unexcluded;
+  const excludedChars = unexcluded.prefix.length - applied.prefix.length;
+
+  return {
+    cacheablePrefix: shipped.prefix,
+    excludedTail: shipped.tail,
+    grounded,
+    useCachedPrefix,
+    cachePrefix: {
+      judged_chars: applied.prefix.length,
+      used: useCachedPrefix,
+      excluded_chars: excludedChars,
+    },
+    // DEC-017: the declaration is the reason caching is off only if the
+    // prefix would have cleared the floor without it. `eligible` is part of
+    // the test — an ungrounded single-shot gen was never going to cache, so
+    // the exclusion is not what cost it anything.
+    exclusionCostCaching:
+      excludedChars > 0 &&
+      eligible &&
+      unexcluded.prefix.length >= MIN_CACHE_PREFIX_CHARS &&
+      applied.prefix.length < MIN_CACHE_PREFIX_CHARS,
+  };
 }
 
 export async function handleGenerate(
@@ -297,17 +495,65 @@ export async function handleGenerate(
   const { documents, groundingTextByKey } = docInput ?? await extractDocuments(ir);
 
   const system = buildGenSystem(ir, schema);
-  const { cacheablePrefix, useCachedPrefix } = buildCacheablePrefix(ir, schema, {
-    documents,
-    groundingTextByKey,
-  });
+  const { cacheablePrefix, excludedTail, useCachedPrefix, cachePrefix, exclusionCostCaching } =
+    buildCacheablePrefix(ir, schema, {
+      documents,
+      groundingTextByKey,
+    });
+
+  // #182 (DEC-017): excluding a large key can drop the prefix below the cache
+  // floor and turn caching OFF — the exact inverse of what the author asked
+  // for. The decision reaches the trace either way (`meta.cache_prefix`);
+  // this line fires only for the inverted case, where the prefix cleared the
+  // floor WITHOUT the exclusion and misses it with. Not a gate: the trade-off
+  // is the author's to make, the defect was that it was invisible.
+  if (exclusionCostCaching) {
+    process.stderr.write(
+      `[cambium] exclude_from_prefix turned prompt caching OFF for this gen: the prefix is ` +
+        `${cachePrefix.judged_chars} chars with the exclusion applied ` +
+        `(floor ${MIN_CACHE_PREFIX_CHARS}), ` +
+        `${cachePrefix.judged_chars + cachePrefix.excluded_chars} without it. ` +
+        `Drop the declaration or shrink the excluded keys to keep caching.\n`,
+    );
+  }
+
+  // AUD-005 / AUD-R2-001: normalize ONCE, here, not at the sinks. `main`
+  // built the prompt with `[step.prompt, …].join('\n')`, and Array.join
+  // coerces null/undefined to ''; a template literal stringifies them, so a
+  // step with no `prompt` — `generate(nil)`, or a hand-built / precompiled
+  // .ir.json (#195) that omits the field — would put the literal text
+  // "null" on the first line. Both dispatch branches below read
+  // `promptText`: the round-1 fix touched only `legacyPrompt`, which the
+  // cached branch never uses, so a grounded gen above the cache floor still
+  // emitted "null" — the same gen's prompt depended on document size.
+  // Fixing the two downstream sinks in runner.ts instead would be wrong:
+  // they are shared with the agentic path and with library callers of
+  // `makeGenerateText`, and would leave this handler free to emit `null`
+  // into a field typed `prompt: string`.
+  // See PLAN § C-1 exception — the ONLY inputs whose bytes move are
+  // null/undefined.
+  //
+  // #182 (DEC-012): `exclude_from_prefix` sections ride the uncached tail.
+  // The provider orders `[prefix][userText]` and the shared user-prefix cache
+  // region extends BACKWARD from its marker, so anything appended here is
+  // outside THAT region — no new provider mechanics. Only reachable when the
+  // cached path is live: below the floor `excludedTail` is `''` by
+  // construction (DEC-016).
+  //
+  // `\n\n` is the separator `legacyPrompt` uses. AUD-182-003: joined by
+  // filtering rather than a ternary, so an absent instruction does not leave
+  // the prompt starting with a blank line. Byte-identical to the ternary for
+  // every other input — empty tail yields `instruction`, both present yields
+  // the same `\n\n` join.
+  const instruction = step.prompt ?? '';
+  const promptText = [instruction, excludedTail].filter(Boolean).join('\n\n');
 
   // Legacy single-string prompt — byte-identical to the pre-split layout.
   // The cache-aware path reorders to prefix-first inside the provider;
   // this fallback ordering is what every non-Anthropic (or cache-disabled
   // Anthropic) call sees, so a grounded gen running against a non-cache
   // provider is unchanged.
-  const legacyPrompt = `${step.prompt}\n\n${cacheablePrefix}`;
+  const legacyPrompt = `${promptText}\n\n${cacheablePrefix}`;
 
   const outMax = Number(ir.model.max_tokens ?? 1200);
   const started = Date.now();
@@ -315,7 +561,7 @@ export async function handleGenerate(
   const genResult = await generateText({
     model: ir.model.id,
     system,
-    prompt: useCachedPrefix ? step.prompt : legacyPrompt,
+    prompt: useCachedPrefix ? promptText : legacyPrompt,
     max_tokens: outMax,
     temperature: ir.model.temperature,
     effort: ir.effort,
@@ -360,6 +606,13 @@ export async function handleGenerate(
         model_used: modelUsed,
         raw_preview: raw.slice(0, 400),
         usage: genResult.usage,
+        // #182 (DEC-017/DEC-018): the cached-prefix decision, made
+        // observable. `judged_chars` is the length the floor gate judged
+        // (exclusion applied) — NOT necessarily what shipped, which is why
+        // the name says so; `excluded_chars` is how many bytes
+        // `exclude_from_prefix` removed from it, 0 for every gen that
+        // declares none.
+        cache_prefix: cachePrefix,
         ...(ceiling ? { output_ceiling: ceiling } : {}),
       },
     },
@@ -446,6 +699,18 @@ export async function handleRepair(
   attempt: number,
   generateText: GenerateTextFn,
   extractJson: ExtractJsonFn,
+  /** RED-176: model spec for this repair pass — `ir.repairModel` at the two
+   *  structural sites, `ir.model` (the default) everywhere else. The ceiling
+   *  is read off the same object, so the trace and the operator-facing error
+   *  name the model that actually ran. */
+  repairModel: any = ir.model,
+  /** RED-175: the material the complaint is about — the gen's `{ documents,
+   *  groundingTextByKey }` plus the task text, passed at the five semantic
+   *  sites (`Review`, `Consensus`, `Corrector`, `Grounding`, field-values
+   *  `Grounding`). Absent at the two structural sites (schema shape,
+   *  consensus-pass shape), which stay on the lean prompt and produce
+   *  byte-identical requests to pre-RED-175. */
+  source?: { documents: DocumentBlock[]; groundingTextByKey: Record<string, string>; task?: string },
 ): Promise<{ raw: string; parsed: any; result: StepResult }> {
   const schemaKeys = Object.keys(schema.properties ?? {});
 
@@ -473,51 +738,168 @@ export async function handleRepair(
     };
   }
 
-  const repairSystem = [
-    'You are repairing JSON to satisfy a schema.',
-    '',
-    schemaPromptBlock(schema),
-    '',
-    'OUTPUT RULES:',
-    '- Output MUST be JSON only. No markdown. No code fences. No reasoning.',
-    '- Output must start with "{" and end with "}".',
-    '- Edit ONLY the fields necessary to fix the validation errors.',
-    '- Do NOT introduce new factual content. If information is missing, leave the field empty.',
-  ].join('\n');
-
   const formattedErrors = formatValidationErrors(errors);
 
-  const repairPrompt = [
-    'ORIGINAL_OUTPUT (may be invalid):',
-    raw,
-    '',
-    'VALIDATION_ERRORS:',
-    formattedErrors.join('\n'),
-    '',
-    'OUTPUT_JSON_TEMPLATE (return this shape; keep keys the same; no extra keys):',
-    JSON.stringify(jsonTemplate),
-    '',
-    'Return repaired JSON only.',
-  ].join('\n');
+  // RED-175: five of the seven repair sites are *semantic* — the complaint is
+  // about a quote or a value that lives in the source document. Hand those the
+  // document, and build their prompt through the SAME assemblers handleGenerate
+  // uses (`buildGenSystem` / `buildCacheablePrefix`): byte-identical system +
+  // byte-identical cached prefix means the repair rides the gen's prompt-cache
+  // entry instead of re-reading the document on every attempt. Re-deriving the
+  // prefix here would move the cache key, which is the trap RED-381 names.
+  // The two structural sites keep the lean, context-free prompt.
+  //
+  // #232 — the cache-riding claim above holds for a SINGLE-SHOT gen. For
+  // `mode :agentic` it does not, and cannot: repair dispatches through
+  // `generateText`, which sends no tools, while the agentic Generate went
+  // through `generateWithTools`. Anthropic builds cache prefixes `tools` →
+  // `system` → `messages`, each level on top of the last, so a tools-less call
+  // differs from that Generate at the FIRST level of the hierarchy — the same
+  // argument #228's DEC-005 used to skip agentic branches in `prewarmFanOut`.
+  // The entry is unreachable whatever the system block says.
+  //
+  // Hence the deliberate choice below: the NON-agentic variant, for every gen.
+  // Threading the mode in (the shape #232 proposed) buys no cache hit and
+  // costs two things — it would tell a call with no tools wired up that it
+  // "has access to tools", and `includeOutputTemplate: false` would strip the
+  // block that the REPAIR RULES line below names by hand, leaving the rule
+  // pointing at nothing. Pinned in `repair-agentic-variant.test.ts`.
+  //
+  // #182 (DEC-014): this is one of `buildCacheablePrefix`'s FOUR callers —
+  // the other three being `handleGenerate`, `handleAgenticGenerate` and
+  // `prewarmFanOut`, which discards `excludedTail` on purpose (discarding it
+  // IS the fan-out collapse). Repair takes it for the same reason the two
+  // dispatch sites do: without it, a gen that declares `exclude_from_prefix`
+  // would have those sections in neither the prefix nor the tail on the
+  // repair path — repair seeing less than Generate did is precisely the
+  // failure RED-175 exists to prevent.
+  //
+  // It is free: the excluded sections sit outside the SHARED USER-PREFIX
+  // cache region — the one keyed on `cachedPrefix`, which is the key this
+  // comment protects — so appending them to an already-uncached tail cannot
+  // move it. (AUD-182-004: "outside the cached region" full stop would be
+  // false on the agentic path, where Anthropic's top-level automatic
+  // breakpoint covers the first user message from turn 2 onward. Different
+  // region, not this one.) Asserted, not assumed — see
+  // exclude-from-prefix.test.ts § the repair path.
+  let repairSystem: string;
+  let repairPrompt: string;
+  let cacheablePrefix = '';
+  let useCachedPrefix = false;
 
-  const outMax = Number(ir.model.max_tokens ?? 1200);
+  if (source) {
+    // #232: non-agentic variant on purpose, agentic gens included. See above.
+    repairSystem = buildGenSystem(ir, schema);
+    const prefix = buildCacheablePrefix(ir, schema, {
+      documents: source.documents,
+      groundingTextByKey: source.groundingTextByKey,
+    });
+    const { excludedTail } = prefix;
+    cacheablePrefix = prefix.cacheablePrefix;
+    useCachedPrefix = prefix.useCachedPrefix;
+
+    const tail = [
+      'TASK (the instruction that produced ORIGINAL_OUTPUT):',
+      source.task ?? '',
+      // #182: `TASK` IS the instruction the dispatch sites splice the
+      // excluded sections onto, so they go in the same place relative to it
+      // here — right after, before the repair-specific blocks. Splatting an
+      // empty array when nothing is excluded keeps a non-declaring gen's
+      // repair prompt byte-identical.
+      ...(excludedTail ? ['', excludedTail] : []),
+      '',
+      'ORIGINAL_OUTPUT (already produced; may be invalid):',
+      raw,
+      '',
+      'VALIDATION_ERRORS:',
+      formattedErrors.join('\n'),
+      '',
+      'REPAIR RULES:',
+      '- Output MUST be JSON only. No markdown. No code fences. No reasoning.',
+      '- Output must start with "{" and end with "}".',
+      '- Edit ONLY the fields named in VALIDATION_ERRORS.',
+      '- Fix every cited quote to text that appears VERBATIM in DOCUMENT above —',
+      '  copy it exactly, including punctuation.',
+      '- Never delete a citation or a grounded value; correct it instead.',
+      '- Keep every key from OUTPUT_JSON_TEMPLATE. Add none.',
+      '',
+      'Return repaired JSON only.',
+    ];
+    repairPrompt = (useCachedPrefix
+      ? tail
+      : [cacheablePrefix, '', ...tail]
+    ).join('\n');
+  } else {
+    repairSystem = [
+      'You are repairing JSON to satisfy a schema.',
+      '',
+      schemaPromptBlock(schema),
+      '',
+      'OUTPUT RULES:',
+      '- Output MUST be JSON only. No markdown. No code fences. No reasoning.',
+      '- Output must start with "{" and end with "}".',
+      '- Edit ONLY the fields necessary to fix the validation errors.',
+      '- Do NOT introduce new factual content. If information is missing, leave the field empty.',
+    ].join('\n');
+
+    repairPrompt = [
+      'ORIGINAL_OUTPUT (may be invalid):',
+      raw,
+      '',
+      'VALIDATION_ERRORS:',
+      formattedErrors.join('\n'),
+      '',
+      'OUTPUT_JSON_TEMPLATE (return this shape; keep keys the same; no extra keys):',
+      JSON.stringify(jsonTemplate),
+      '',
+      'Return repaired JSON only.',
+    ].join('\n');
+  }
+
+  const genCeil = appliedCeiling(ir);
+  // RED-176: repair re-emits the whole document, so its ceiling is the LARGER of
+  // the slot's own `max_tokens` and the gen's — a cap smaller than generate had
+  // turns one recoverable schema failure into a hard `output_ceiling` failure,
+  // which is the trap RED-174's notes warn about. No repair slot → gen's ceiling.
+  const outMax = repairModel === ir.model
+    ? genCeil.ceiling
+    : Math.max(genCeil.ceiling, Number(repairModel.max_tokens ?? DEFAULT_MAX_TOKENS));
+  // Attribute the number to whoever set it — with the floor in force the limit
+  // binding repair is often the gen's, even though a repair model ran.
+  const ceilingOwner = outMax > genCeil.ceiling ? 'repair slot' : 'gen';
+  const ceilingDeclared = ceilingOwner === 'repair slot'
+    ? !!repairModel?.max_tokens
+    : genCeil.declared;
   const started = Date.now();
 
   const genResult = await generateText({
-    model: ir.model.id,
+    model: repairModel.id,
     system: repairSystem,
     prompt: repairPrompt,
     max_tokens: outMax,
-    temperature: ir.model.temperature,
-    effort: ir.effort,
+    temperature: repairModel.temperature,
+    // RED-176: `effort` and the fallback chain were chosen for the gen's
+    // model. Forwarding `effort` to a non-Anthropic repair model is the
+    // silent no-op the issue calls out (only anthropicCompatible reads it),
+    // and a frontier fallback would send a janitorial pass to the expensive
+    // tier. No repair slot → unchanged bytes.
+    ...(repairModel === ir.model
+      ? { effort: ir.effort, fallbacks: ir.model.fallbacks }
+      : {}),
     jsonSchema: schema,
-    modelOptions: ir.model.options,
-    // RED-421: repair is also a generation attempt — walk fallbacks fresh.
-    fallbacks: ir.model.fallbacks,
+    modelOptions: repairModel.options,
+    // RED-175: only the semantic sites carry the source. Structural requests
+    // stay byte-identical (no `documents`, no `cachedPrefix` keys at all).
+    ...(source
+      ? {
+          documents: source.documents,
+          ...(useCachedPrefix ? { cachedPrefix: cacheablePrefix } : {}),
+        }
+      : {}),
   });
 
   const newRaw = genResult.text;
-  const repairModelUsed: string = (genResult as any).modelUsed ?? ir.model.id;
+  const repairModelUsed: string = (genResult as any).modelUsed ?? repairModel.id;
   let parsed: any = undefined;
   try {
     parsed = extractJson(newRaw);
@@ -525,10 +907,16 @@ export async function handleRepair(
     // will be caught by validation
   }
 
-  // RED-174: repair reads the same `ir.model.max_tokens`, so a repair that
-  // hits the ceiling will hit it again on every remaining attempt. Mark it
-  // so the caller stops the loop instead of paying for the rest.
-  const ceiling = detectOutputCeiling(genResult, ir, parsed === undefined);
+  // RED-174 + RED-176: the ceiling is the one applied to the model running this
+  // pass — the gen's when there is no repair slot, else the larger of the gen's
+  // and the slot's. A repair that hits its ceiling hits it again on every
+  // remaining attempt, so mark it and let the caller stop paying for it.
+  const ceiling = detectOutputCeiling(
+    genResult,
+    { model: { ...repairModel, max_tokens: outMax } },
+    parsed === undefined,
+    ceilingDeclared,
+  );
 
   return {
     raw: newRaw,
@@ -537,10 +925,28 @@ export async function handleRepair(
       type: 'Repair',
       ms: Date.now() - started,
       ok: !ceiling && parsed !== undefined,
-      errors: ceiling ? [{ message: ceilingMessage(ceiling, repairModelUsed) }] : undefined,
+      errors: ceiling
+        ? [{ message: ceilingMessage(ceiling, repairModelUsed, ceilingOwner) }]
+        : undefined,
       meta: {
         attempt,
         model_used: repairModelUsed,
+        max_tokens: outMax,
+        // RED-175: makes "what did repair actually see" legible without diffing
+        // the prompt by hand. Two numbers, because a semantic pass can carry
+        // its source as either — and `source_chars` alone cannot tell them
+        // apart. `getGroundingDocument` returns '' for a native document
+        // envelope (`coerceDocumentValue` refuses base64_pdf / base64_image),
+        // so an Anthropic-native PDF repair reported `source_chars: 0` — the
+        // exact value that means "context-free structural pass" — while
+        // actually carrying a 40-page filing. The structural discriminator is
+        // both being 0; `source_doc_bytes` is the cost signal on the native
+        // path, `source_chars` on the extracted-text path.
+        source_chars: source ? getGroundingDocument(ir, source.groundingTextByKey).length : 0,
+        source_docs: source ? source.documents.length : 0,
+        source_doc_bytes: source
+          ? source.documents.reduce((n, d) => n + (d.decoded_bytes ?? 0), 0)
+          : 0,
         raw_preview: newRaw.slice(0, 400),
         usage: genResult.usage,
         ...(ceiling ? { output_ceiling: ceiling } : {}),
@@ -558,7 +964,7 @@ export async function handleRepair(
 export function handleCorrect(
   data: any,
   correctorNames: string[],
-  context: { document?: string },
+  context: CorrectorContext,
   correctors: Record<string, CorrectorFn>,
 ): StepResult {
   const started = Date.now();
@@ -758,6 +1164,19 @@ export type GenerateWithToolsFn = (opts: {
   modelOptions?: { disable_thinking?: boolean };
   /** RED-421: ordered fallback model ids. See GenerateTextFn.fallbacks. */
   fallbacks?: string[];
+  /** #205 (DEC-004): the step's output schema, for the `--mock` path only —
+   *  under mock the agentic loop's single turn of text IS the final output,
+   *  so it needs the same schema-derived mock as generateText. NEVER
+   *  forwarded to a real provider (the dispatch site below doesn't pass it
+   *  through to `provider.generateWithTools`). */
+  jsonSchema?: any;
+  /** #228: the shared, cacheable head of the FIRST user message (document +
+   *  context sections + output template). Same semantics as
+   *  `GenerateTextFn.cachedPrefix`: providers that can't emit a user-prompt
+   *  cache breakpoint never see it — the runner folds it back into the
+   *  first user message upstream, using the same
+   *  `supportsPromptCacheControl` gate generateText uses. */
+  cachedPrefix?: string;
 }) => Promise<{ message: { content: string | null; tool_calls?: ToolCallMsg[] }; usage?: TokenUsage }>;
 
 export async function handleAgenticGenerate(
@@ -777,48 +1196,49 @@ export async function handleAgenticGenerate(
 ): Promise<{ raw: string; parsed: any; result: StepResult; traceSteps: StepResult[] }> {
   const { documents, groundingTextByKey } = docInput ?? await extractDocuments(ir);
 
-  const doc = getGroundingDocument(ir, groundingTextByKey);
-  const constraints = ir.policies?.constraints ?? {};
-  const grounding = ir.policies?.grounding;
-  const schemaKeys = Object.keys(schema.properties ?? {});
+  // #228 (DEC-001/DEC-002): both prompt halves come from the shared
+  // assemblers now. The DOCUMENT body, the RED-382 context sections and the
+  // output template are the bytes that repeat on every turn of the loop, so
+  // they are the cacheable prefix; `step.prompt` is the uncached tail.
+  const system = buildGenSystem(ir, schema, { agentic: true });
+  const { cacheablePrefix, excludedTail, useCachedPrefix } = buildCacheablePrefix(
+    ir,
+    schema,
+    { documents, groundingTextByKey },
+    {
+      // Agentic re-sends the prefix every turn — size alone justifies the
+      // cache write, and every agentic gen in the tree is ungrounded.
+      requireGrounding: false,
+      // DEC-008: the hand-rolled agentic prompt never carried the output
+      // template. #228 is a cost bug and adds no prompt CONTENT — on
+      // Anthropic above the cache floor the same text is laid out
+      // differently (AUD-002); see the docblock on buildCacheablePrefix.
+      includeOutputTemplate: false,
+    },
+  );
 
-  const basePrompt = ir.system
-    ?? (constraints.tone?.to ? `You are a ${constraints.tone.to} agent.` : 'You are an agent.');
+  // AUD-005 / AUD-R2-001: normalize once, same as handleGenerate — both
+  // branches below read `promptText`. #182: and the excluded sections are
+  // spliced on the same way (AUD-182-003 filter-join included), for the same
+  // reason. See the notes there.
+  const instruction = step.prompt ?? '';
+  const promptText = [instruction, excludedTail].filter(Boolean).join('\n\n');
 
-  const systemParts = [
-    basePrompt,
-    '',
-    schemaPromptBlock(schema),
-    '',
-    'You have access to tools. Call them as needed to complete the task.',
-    'When you are done, respond with the final JSON output matching the schema above.',
-    'OUTPUT RULES:',
-    '- Final output MUST be JSON only. No markdown. No code fences. No reasoning.',
-    '- Final output must start with "{" and end with "}".',
-  ];
-
-  if (grounding?.require_citations) {
-    systemParts.push(
-      '',
-      'GROUNDING RULES:',
-      '- Every item in arrays with a citations field MUST include citations.',
-      '- Each citation MUST include a quote field with EXACT verbatim text from the document.',
-      '- Do not paraphrase or fabricate quotes.',
-    );
-  }
-
-  // Build context prompt parts. See handleGenerate for the rationale —
-  // RED-382 made this iterate all context keys, not only `*_enriched`.
-  const contextParts = [step.prompt, '', 'DOCUMENT:', String(doc ?? '')];
-  appendNonPrimaryContextSections(contextParts, ir.context ?? {}, grounding?.source);
+  // Legacy single-string layout, byte-for-byte what the runner folds back
+  // for providers that can't mark a breakpoint. Used directly when the
+  // prefix is under the cache floor.
+  const legacyPrompt = `${promptText}\n\n${cacheablePrefix}`;
 
   const messages: Message[] = [
-    { role: 'system', content: systemParts.join('\n') },
-    { role: 'user', content: contextParts.join('\n') },
+    { role: 'system', content: system },
+    { role: 'user', content: useCachedPrefix ? promptText : legacyPrompt },
   ];
 
   const traceSteps: StepResult[] = [];
   const started = Date.now();
+  // RED-184: memory of tool calls already made this run, keyed by
+  // exact-duplicate signature (fnName + args). See the dispatch site below.
+  const seenToolCalls = new Map<string, { tool: string; result: any }>();
   let totalToolCalls = 0;
   let finalRaw = '';
   let finalParsed: any = undefined;
@@ -860,6 +1280,11 @@ export async function handleAgenticGenerate(
       modelOptions: ir.model.options,
       // RED-421: fallbacks for agentic turns (each turn walks fresh).
       fallbacks: ir.model.fallbacks,
+      // #205 (DEC-004): mock-only — see the type comment on GenerateWithToolsFn.
+      jsonSchema: schema,
+      // #228: identical to the generateText line — the runner folds it back
+      // into the first user message for providers that can't mark it.
+      cachedPrefix: useCachedPrefix ? cacheablePrefix : undefined,
     });
 
     const msg = response.message;
@@ -900,25 +1325,76 @@ export async function handleAgenticGenerate(
 
         log(`  → ${fnName}(${JSON.stringify(fnArgs).slice(0, 100)})`);
 
+        // RED-184: exact-duplicate guard. The loop had no memory of prior
+        // calls, so a model that got an unsatisfying result could re-issue the
+        // same call verbatim forever — observed burning 39 turns and 87k
+        // transcript tokens (then a hard 400 from the provider's context
+        // limit) re-running one web_search. Skip the re-dispatch, hand back a
+        // synthetic turn that says so, but still count the call: this is a
+        // faster trigger for the max_tool_calls backstop, not a replacement —
+        // an unlimited free retry would loop forever without tripping forceFinal.
+        // ASSUMPTION (reads the tool's output as inert data): the reply hands
+        // back what the FIRST call returned, so it must not claim freshness —
+        // web_search/execute_code/read_file may answer differently now. Say
+        // "the result you got then", never "the result is unchanged": a lie in
+        // the transcript gets quoted straight into the final answer.
+        // Exact match only. Stale-read ceiling: read_file after a write returns
+        // the pre-write bytes. Fuzzy match for reworded near-duplicates is the
+        // follow-up if this undershoots.
+        // Only SUCCESSFUL dispatches are memoized (see the `catch` below). A
+        // throw is a fact about that attempt, not about the call: caching it
+        // would turn the guard into a permanent block on the retry-after-a-
+        // transient-failure path every agentic loop depends on, and would file
+        // the replay in the trace as `ok: true` when the real call was `ok:
+        // false`. A tool that fails deterministically still re-dispatches, but
+        // it is bounded by maxToolCalls exactly as it was before RED-184.
+        const signature = `${fnName}\u0000${JSON.stringify(fnArgs)}`;
+        const prior = seenToolCalls.get(signature);
+
         let toolResult: any;
-        try {
-          const tcResult = await handleToolCall(fnName, fnArgs.operation ?? fnName, fnArgs, toolRegistry, toolsAllowed, env);
-          toolResult = tcResult.output;
-          toolResults.push(tcResult);
-          const preview = JSON.stringify(toolResult).slice(0, 120);
-          log(`  ← ${preview}${preview.length >= 120 ? '...' : ''}`);
-        } catch (e: any) {
-          toolResult = { error: e.message };
-          log(`  ✗ ${e.message}`);
+        // `!== undefined`, not truthiness: today the value is always a
+        // {tool, result} wrapper, but a truthy test breaks the moment anyone
+        // stores a bare falsy result (0, "", null) and the loop starts
+        // re-dispatching the very call this guard exists to kill.
+        if (prior !== undefined) {
+          env.budget?.addToolCall(fnName);
+          const echo = JSON.stringify(prior.result) ?? 'null';
+          const fits = echo.length <= 2000;
+          toolResult = {
+            duplicate: true,
+            note: `You already called ${prior.tool} with these exact arguments earlier in this run — what follows is the result you got THEN, not a fresh call. Do NOT repeat it: try a different query/tool, or produce your final JSON output now.`,
+            previous_result: fits ? echo : `${echo.slice(0, 2000)}...(truncated)`,
+          };
           toolResults.push({
             type: 'ToolCall',
-            ok: false,
-            errors: [{ message: e.message }],
-            meta: { tool: fnName, input: fnArgs },
+            ok: true,
+            output: toolResult,
+            meta: { tool: fnName, input: fnArgs, duplicate: true },
           });
-          // Budget violations are terminal for the loop — the limit won't
-          // change no matter how many times the model retries.
-          if (e.budgetViolation) budgetExhausted = true;
+          log(`  ↻ ${fnName} duplicate call skipped (already made this run)`);
+        } else {
+          try {
+            const tcResult = await handleToolCall(fnName, fnArgs.operation ?? fnName, fnArgs, toolRegistry, toolsAllowed, env);
+            toolResult = tcResult.output;
+            toolResults.push(tcResult);
+            const preview = JSON.stringify(toolResult).slice(0, 120);
+            log(`  ← ${preview}${preview.length >= 120 ? '...' : ''}`);
+            // Inside the try, after the push: only a call that actually
+            // returned is remembered. See the note above the signature.
+            seenToolCalls.set(signature, { tool: fnName, result: toolResult });
+          } catch (e: any) {
+            toolResult = { error: e.message };
+            log(`  ✗ ${e.message}`);
+            toolResults.push({
+              type: 'ToolCall',
+              ok: false,
+              errors: [{ message: e.message }],
+              meta: { tool: fnName, input: fnArgs },
+            });
+            // Budget violations are terminal for the loop — the limit won't
+            // change no matter how many times the model retries.
+            if (e.budgetViolation) budgetExhausted = true;
+          }
         }
 
         // Append tool result to message history

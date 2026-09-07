@@ -1,0 +1,14 @@
+{
+  "summary": "mock summary",
+  "highlights": [
+    {
+      "title": "mock title",
+      "detail": "mock detail",
+      "citations": [
+        {
+          "quote": "mock quote"
+        }
+      ]
+    }
+  ]
+}

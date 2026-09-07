@@ -92,6 +92,35 @@ export type {
 export { parseBind, isLoopback } from './serve/bind.js';
 export type { BindTarget, ParseBindOptions } from './serve/bind.js';
 
+// #195: shared IR-artifact reader. `cambium serve --precompiled`/`--ir-dir`
+// and `cambium run --ir` both load compiler output straight off disk (no
+// Ruby spawn) through this validator — the version gate, the structural
+// checks, and the DEC-001 closed-IR rule (no pipeline / `enrich` / retro
+// memory-write site) live in one place instead of being re-derived at
+// each call site.
+// Promised here: the four entry points `cli/cambium.mjs` calls across the
+// package boundary, plus the error class and the two limits a caller needs
+// to interpret a throw.
+export {
+  needsContracts,
+  injectContextInput,
+  IrArtifactError,
+  SUPPORTED_IR_VERSIONS,
+  MAX_IR_ARTIFACT_BYTES,
+  readIrArtifactFile,
+  resolveArtifactAnchors,
+} from './ir-artifact.js';
+export type { ParsedIrArtifact, ArtifactAnchors } from './ir-artifact.js';
+// #195 DEC-005 / A-001: `cambium run --ir` anchors a shipped artifact's
+// discovery on the artifact's own location through `resolveArtifactAnchors`
+// — the one promised statement of that rule. Everything it composes stays
+// package-private: the walk-up helpers (`findGenfileDir`,
+// `findEngineDirFromCwd`, `resolveGenfileContracts`) and the validator's own
+// internals (`parseIrArtifact`, `assertGenIr`, `runtimeCompileSites`), which
+// `readIrArtifactFile` already runs on the caller's behalf and which nothing
+// outside this package invokes. Per COMPATIBILITY.md §5 every named export
+// here is frozen for good; six internals are not a contract worth freezing.
+
 // RED-313 `cambium inspect`: local read-only trace viewer. `runInspect` starts
 // the HTTP server; `projectTrace` / `resolveRunsDir` are exposed for hosts
 // (and tests) that want the pure projection or runs-dir resolution directly.

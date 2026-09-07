@@ -386,6 +386,24 @@ end
     expectClass: 'ArgumentError',
     expectMessage: 'grounded_in :document verify: must be nil or one of :field_values, got :bad_strategy',
   },
+  {
+    name: 'grounded_in: bad format',
+    dsl: `
+class TestGen < GenModel
+  model "omlx:some-model"
+  system "inline"
+  grounded_in :document, format: :yaml
+  returns do
+    field :result, String
+  end
+  def analyze(x)
+    generate "x"
+  end
+end
+`.trim(),
+    expectClass: 'ArgumentError',
+    expectMessage: 'grounded_in :document format: must be nil or one of :markdown, :json, :text, got :yaml',
+  },
 
   // ── memory ────────────────────────────────────────────────────────────────
   {

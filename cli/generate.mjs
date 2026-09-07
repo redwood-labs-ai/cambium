@@ -37,6 +37,33 @@ export function validateName(name, kind = 'name') {
   }
 }
 
+// DEC-158-007 (issue #158, AUD-158-01), ported to engine mode by #206: a
+// hand-authored schemas file can export `<pascalName>` via idioms a
+// single-pattern check (`export const <Name>`) never sees — e.g.
+// `const X = …; export { X }`. A false "not present" doesn't fail closed,
+// it fails OPEN: the caller's append runs anyway and inserts a second,
+// colliding `const`/`$id` declaration that breaks the TS build. Skipping
+// is the fail-safe direction — a false "exists" costs the user one export
+// added by hand; a false "absent" corrupts their file — so treat the name
+// as already-present (skip) when ANY of these match: a literal
+// `export const <Name>`, an `export { … }` list naming it anywhere, or a
+// top-level const/let/var/class/function/type/interface/enum declaration.
+// Shared by both the engine-mode (`schemas.ts`) and app-mode
+// (`src/contracts.ts`) branches of generateSchema so they can't drift
+// apart again.
+function schemaNameAlreadyPresent(fileContents, pascalName) {
+  // Escape at the boundary (RED-206, AUD-206-05): pascalName is interpolated
+  // into three regex literals below. No-op for every currently-legal name
+  // (validateName's /^[A-Za-z][A-Za-z0-9_]*$/ never produces a metacharacter)
+  // but the helper shouldn't rely on that precondition silently.
+  const n = pascalName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return (
+    new RegExp(`^\\s*export\\s+const\\s+${n}\\b`, 'm').test(fileContents) ||
+    new RegExp(`export\\s*\\{[^}]*\\b${n}\\b[^}]*\\}`).test(fileContents) ||
+    new RegExp(`^\\s*(?:const|let|var|class|function|type|interface|enum)\\s+${n}\\b`, 'm').test(fileContents)
+  );
+}
+
 function writeFile(path, content) {
   if (existsSync(path)) {
     console.error(`  exists: ${path} (skipped)`);
@@ -126,6 +153,43 @@ function hasInTreeRunnerSource(ctx) {
 }
 
 /**
+ * How a scaffolded test spawns the CLI, correct for this workspace.
+ *
+ * In-tree (this repo) that is the entrypoint file. Anywhere else the CLI
+ * is the `@redwood-labs/cambium` dependency, and the generated test
+ * resolves it through Node's module resolution — NEVER a bare
+ * `npx cambium`. The unscoped `cambium` on the npm registry is an
+ * unrelated third-party package, and `npm exec` assumes `--yes` when
+ * stdin is not a TTY or CI is detected (npm-exec docs), so a workspace
+ * whose dependency isn't installed yet would have vitest download and
+ * execute a stranger's code. Module resolution walks up node_modules
+ * from the test file (hoisted monorepo layouts included) and fails with
+ * a plain "Cannot find module" when the dependency is missing.
+ *
+ * Returns { imports, note, expr } for the template: `imports` is extra
+ * import lines (empty in-tree, so in-tree output stays byte-identical),
+ * `note` is the trailing comment text, `expr` the `CAMBIUM` array.
+ * @param {object} ctx Scaffold context (needs appPkgRoot).
+ */
+function scaffoldedCliInvocation(ctx) {
+  if (hasInTreeRunnerSource(ctx)) {
+    return {
+      imports: '',
+      note: 'In-tree Cambium repo: run the CLI entrypoint directly.',
+      expr: `['node', join(REPO_ROOT, 'cli/cambium.mjs')]`,
+    };
+  }
+  return {
+    imports: `import { createRequire } from 'node:module'\n`,
+    note: 'Cambium is a dependency here:\n' +
+      '// resolve the CLI through Node module resolution, never a bare `npx cambium`.\n' +
+      '// The unscoped `cambium` on the registry is an unrelated package, and npx\n' +
+      '// installs it silently when stdin is not a TTY (vitest, CI).',
+    expr: `[process.execPath, createRequire(import.meta.url).resolve('@redwood-labs/cambium/cli/cambium.mjs')]`,
+  };
+}
+
+/**
  * Import specifier for a runner module, correct for this workspace.
  * @param {object} ctx Scaffold context (needs appPkgRoot).
  * @param {string} deepRelative e.g. '../../../cambium-runner/src/golden.js'
@@ -208,11 +272,12 @@ class ${pascal} < GenModel
 
   returns ${schemaName}
 
-  # Optional: add tools, correctors, constraints, grounding
+  # Optional: add tools, correctors, constraints, grounding, cache tuning
   # uses :web_search, :calculator
   # corrects :math
   # constrain :budget, max_tool_calls: 4
   # grounded_in :document, require_citations: true
+  # exclude_from_prefix :page_id   # keep a per-call key out of the prompt-cache prefix
 
   def analyze(input)
     generate "TODO: describe what this gen does" do
@@ -371,11 +436,12 @@ class ${pascal} < GenModel
     field :key_points, [String]
   end
 
-  # Optional: add tools, correctors, constraints, grounding
+  # Optional: add tools, correctors, constraints, grounding, cache tuning
   # uses :web_search, :calculator
   # corrects :math
   # constrain :budget, max_tool_calls: 4
   # grounded_in :document, require_citations: true
+  # exclude_from_prefix :page_id   # keep a per-call key out of the prompt-cache prefix
 
   def analyze(document)
     generate "analyze this document" do
@@ -398,14 +464,10 @@ You are a ${pascal.replace(/([A-Z])/g, ' $1').trim().toLowerCase()}. You extract
   const goldenImport = runnerImport(ctx, '../../cambium-runner/src/golden.js');
 
   // RED-159: `cli/cambium.mjs` exists only in the Cambium repo. Anywhere
-  // else the CLI is a dependency, reached through npx / node_modules/.bin.
-  const inTree = hasInTreeRunnerSource(ctx);
-  const cliInvocation = inTree
-    ? `['node', join(REPO_ROOT, 'cli/cambium.mjs')]`
-    : `['npx', 'cambium']`;
-  const cliInvocationNote = inTree
-    ? 'In-tree Cambium repo: run the CLI entrypoint directly.'
-    : 'Cambium is a dependency here, so go through npx.';
+  // else the CLI is the `@redwood-labs/cambium` dependency — see
+  // scaffoldedCliInvocation for why the generated test resolves it
+  // through Node module resolution and never a bare `npx cambium`.
+  const cli = scaffoldedCliInvocation(ctx);
 
   writeFile(join(PKG, 'tests', `${snake}.test.ts`), `\
 /**
@@ -433,10 +495,10 @@ import { readFileSync, existsSync, rmSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { goldenTest, normalizeStrings } from '${goldenImport}'
-
+${cli.imports}
 const REPO_ROOT = process.cwd()
-// How to invoke the CLI from this workspace. ${cliInvocationNote}
-const CAMBIUM: string[] = ${cliInvocation}
+// How to invoke the CLI from this workspace. ${cli.note}
+const CAMBIUM: string[] = ${cli.expr}
 const GEN = '${PKG}/app/gens/${snake}.cmb.rb'
 // TODO: replace with your real fixture path
 const FIXTURE = '${PKG}/examples/fixtures/<fixture>.txt'
@@ -657,7 +719,7 @@ export const ${pascal} = Type.Object(
       writeFile(schemasPath, `import { Type } from '@sinclair/typebox';\n${exportBlock}`);
     } else {
       const existing = readFileSync(schemasPath, 'utf8');
-      const alreadyPresent = new RegExp(`^\\s*export\\s+const\\s+${pascal}\\b`, 'm').test(existing);
+      const alreadyPresent = schemaNameAlreadyPresent(existing, pascal);
       if (alreadyPresent) {
         console.log(`  exists: ${pascal} is already exported from ${schemasPath} (skipped)`);
       } else {
@@ -673,15 +735,42 @@ export const ${pascal} = Type.Object(
 
   const PKG = ctx.appPkgRoot;
   console.log(`\nGenerating schema: ${pascal}\n`);
-  console.log(`  Add the following to ${PKG}/src/contracts.ts:\n`);
-  console.log(`export const ${pascal} = Type.Object(
+
+  // App-mode: `src/contracts.ts` is the Genfile's declared schema source
+  // (the same file `returns <Schema>` and pipeline `input :x, schema:`
+  // resolve against). Same append/skip/overwrite-protection idiom as the
+  // engine-mode branch above — create with the TypeBox import when the
+  // file doesn't exist yet, append (skip if already exported) when it
+  // does — so this is a real scaffold, not print-only instructions.
+  const contractsPath = join(PKG, 'src/contracts.ts');
+  const exportBlock = `
+export const ${pascal} = Type.Object(
   {
     // TODO: define fields
     summary: Type.String(),
   },
   { additionalProperties: false, $id: '${pascal}' }
-)\n`);
-  console.log(`Then use in your agent: returns ${pascal}`);
+)
+`;
+
+  if (!existsSync(contractsPath)) {
+    writeFile(contractsPath, `import { Type } from '@sinclair/typebox'\n${exportBlock}`);
+  } else {
+    const existing = readFileSync(contractsPath, 'utf8');
+    // DEC-158-007 (issue #158, AUD-158-01): fail-closed "already present"
+    // detection — see schemaNameAlreadyPresent's doc comment for the full
+    // reasoning (shared with the engine-mode branch above, #206).
+    const alreadyPresent = schemaNameAlreadyPresent(existing, pascal);
+    if (alreadyPresent) {
+      console.log(`  exists: ${pascal} is already exported from ${contractsPath} (skipped)`);
+    } else {
+      const needsNewline = existing.length > 0 && !existing.endsWith('\n');
+      appendFileSync(contractsPath, `${needsNewline ? '\n' : ''}${exportBlock}`);
+      console.log(`  appended: ${pascal} → ${contractsPath}`);
+    }
+  }
+
+  console.log(`\nThen use in your agent: returns ${pascal}`);
 }
 
 function generateSystem(name, ctx) {
@@ -1085,15 +1174,23 @@ function generateConfig(name, ctx) {
 #
 # Names must match /^[a-z][a-z0-9_]*$/. Values must be literal
 # provider-prefixed ids (contain ':').
+#
+# 'repair' (RED-176) is the one name a gen cannot reference — it is a
+# slot, not an alias. Declare it once and every structural repair in the
+# workspace runs on it instead of the gen's model. 'effort' and
+# 'fallbacks' are rejected at compile time; 'max_tokens' and 'temperature'
+# belong to the repair model, not to the gen.
 
 default   "omlx:Qwen3.5-27B-4bit"
 # fast      "omlx:gemma-4-31b-it-8bit"
 # embedding "omlx:bge-small-en"
+# repair    "omlx:gemma-4-31b-it-8bit", max_tokens: 900
 `);
 
     console.log(`\nNext steps:`);
     console.log(`  1. Edit ${dest} to add aliases your gens can reference via :symbol.`);
     console.log(`  2. Use in a gen: model :default`);
+    console.log(`  3. Optional: add a repair slot to run repair passes on a cheaper model`);
     return;
   }
 
@@ -1153,6 +1250,15 @@ function generatePipeline(name, ctx) {
   }
 
   const PKG = ctx.appPkgRoot;
+
+  // DEC-158-006: `input :document, schema:` is a required kwarg
+  // (ruby/cambium/pipeline.rb#input) — scaffold the schema through the
+  // existing generateSchema path (same append/skip/overwrite-protection
+  // idiom) before writing the pipeline file, so a fresh `cambium new
+  // pipeline` compiles out of the box instead of failing with "Unknown
+  // schema" until the user hand-adds it.
+  generateSchema(schemaName, ctx);
+
   writeFile(join(PKG, 'app/pipelines', `${snake}.pipeline.rb`), `\
 # ${pascal} — multi-gen orchestration pipeline (RED-374).
 #
@@ -1220,16 +1326,40 @@ class ${pascal} < Pipeline
 end
 `);
 
+  // DEC-158-005: shape-aware CLI invocation, shared with the agent test
+  // template above (RED-159 — `cli/cambium.mjs` exists only in the
+  // Cambium repo; anywhere else the CLI is the `@redwood-labs/cambium`
+  // dependency, resolved through Node module resolution — see
+  // scaffoldedCliInvocation), names adapted for the pipeline.
+  const cli = scaffoldedCliInvocation(ctx);
+
   writeFile(join(PKG, 'tests', `${snake}.pipeline.test.ts`), `\
 import { describe, it, expect } from 'vitest'
-import { execSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
+import { readFileSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+${cli.imports}
+const REPO_ROOT = process.cwd()
+// How to invoke the CLI from this workspace. ${cli.note}
+const CAMBIUM: string[] = ${cli.expr}
 
 describe('${pascal} pipeline', () => {
   it('compiles to a valid Pipeline IR', () => {
-    const ir = JSON.parse(execSync(
-      'ruby ruby/cambium/compile.rb ${PKG}/app/pipelines/${snake}.pipeline.rb --method run',
-      { encoding: 'utf8' },
-    ))
+    // Compile via the CLI rather than spawning ruby against a
+    // \`ruby/cambium/compile.rb\` path: only the Cambium repo itself has
+    // that directory. The CLI resolves the compiler relative to its own
+    // install (RED-274), so this works in any workspace.
+    const irOut = join(tmpdir(), \`${snake}-\${process.pid}.ir.json\`)
+    const [bin, ...pre] = CAMBIUM
+    const result = spawnSync(
+      bin,
+      [...pre, 'compile', '${PKG}/app/pipelines/${snake}.pipeline.rb', '--method', 'run', '-o', irOut],
+      { encoding: 'utf8', cwd: REPO_ROOT },
+    )
+    expect(result.status, \`Compile failed:\\n\${result.stderr}\`).toBe(0)
+    const ir = JSON.parse(readFileSync(irOut, 'utf8'))
+    try { rmSync(irOut, { force: true }) } catch {}
     expect(ir.kind).toBe('Pipeline')
     expect(ir.entry.class).toBe('${pascal}')
     expect(ir.entry.method).toBe('run')
@@ -1241,7 +1371,7 @@ describe('${pascal} pipeline', () => {
   // edit the TOML in-place (TOML rewrites without a real parser are a
   // footgun); print the line for the user to paste in.
   console.log(`\nNext steps:`);
-  console.log(`  1. Define ${schemaName} in ${PKG}/src/contracts.ts`);
+  console.log(`  1. Fill in the TODO fields of ${schemaName} in ${PKG}/src/contracts.ts`);
   console.log(`  2. Replace TODORenameMe with a real GenModel class (cambium new agent <Name>)`);
   console.log(`  3. Optionally add to ${PKG}/Genfile.toml under [exports.pipelines]:`);
   console.log(`         ${pascal} = "app/pipelines/${snake}.pipeline.rb"`);

@@ -1,4 +1,4 @@
-import type { CorrectorFn, CorrectorResult, CorrectorIssue } from './types.js';
+import type { CorrectorFn, CorrectorResult, CorrectorIssue, MatchedVia } from './types.js';
 
 /**
  * RED-392: Field-values corrector. Verifies that leaf values in the
@@ -16,7 +16,8 @@ import type { CorrectorFn, CorrectorResult, CorrectorIssue } from './types.js';
  * it flags issues but does not auto-fix. The repair loop handles re-generation.
  */
 export type FieldValuesResult = {
-  passed: Array<{ path: string; value: any }>;
+  // #169: which haystack the value was found in — see CitationResult.
+  passed: Array<{ path: string; value: any; matched_via?: MatchedVia }>;
   failed: Array<{ path: string; value: any; reason: string }>;
   skipped: Array<{ path: string; reason: string }>;
   totalChecked: number;
@@ -27,6 +28,7 @@ export const fieldValues: CorrectorFn = (data, context): CorrectorResult => {
   const issues: CorrectorIssue[] = [];
   const output = structuredClone(data);
   const document = context.document ?? '';
+  const derivedDocument = context.derivedDocument;
 
   const fieldResult: FieldValuesResult = {
     passed: [],
@@ -36,7 +38,7 @@ export const fieldValues: CorrectorFn = (data, context): CorrectorResult => {
     allValid: true,
   };
 
-  walkAndCheck(output, '', document, issues, fieldResult, context.fields);
+  walkAndCheck(output, '', document, derivedDocument, issues, fieldResult, context.fields);
 
   return {
     corrected: false,
@@ -50,6 +52,7 @@ function walkAndCheck(
   obj: any,
   basePath: string,
   document: string,
+  derivedDocument: string | undefined,
   issues: CorrectorIssue[],
   fieldResult: FieldValuesResult,
   fields?: string[],
@@ -58,14 +61,14 @@ function walkAndCheck(
 
   // Skip non-objects (primitives at the root)
   if (typeof obj !== 'object') {
-    checkLeafValue('', obj, document, issues, fieldResult);
+    checkLeafValue('', obj, document, derivedDocument, issues, fieldResult);
     return;
   }
 
   // Arrays: check each element
   if (Array.isArray(obj)) {
     for (let i = 0; i < obj.length; i++) {
-      walkAndCheck(obj[i], `${basePath}[${i}]`, document, issues, fieldResult);
+      walkAndCheck(obj[i], `${basePath}[${i}]`, document, derivedDocument, issues, fieldResult);
     }
     return;
   }
@@ -95,10 +98,10 @@ function walkAndCheck(
 
     // Recurse into nested objects/arrays
     if (value != null && typeof value === 'object') {
-      walkAndCheck(value, path, document, issues, fieldResult);
+      walkAndCheck(value, path, document, derivedDocument, issues, fieldResult);
     } else {
       // Leaf value — verify it
-      checkLeafValue(path, value, document, issues, fieldResult);
+      checkLeafValue(path, value, document, derivedDocument, issues, fieldResult);
     }
   }
 }
@@ -107,6 +110,7 @@ function checkLeafValue(
   path: string,
   value: any,
   document: string,
+  derivedDocument: string | undefined,
   issues: CorrectorIssue[],
   fieldResult: FieldValuesResult,
 ): void {
@@ -136,8 +140,9 @@ function checkLeafValue(
 
   fieldResult.totalChecked++;
 
-  if (valueExistsInDocument(valueStr, document)) {
-    fieldResult.passed.push({ path, value });
+  const matchedVia = findValueMatch(valueStr, document, derivedDocument);
+  if (matchedVia) {
+    fieldResult.passed.push({ path, value, matched_via: matchedVia });
   } else {
     fieldResult.failed.push({
       path,
@@ -154,6 +159,20 @@ function checkLeafValue(
       original: value,
     });
   }
+}
+
+/**
+ * #169: any-of over the two haystacks, raw first — same contract as the
+ * citations corrector's `findQuoteMatch`.
+ */
+function findValueMatch(
+  value: string,
+  document: string,
+  derivedDocument: string | undefined,
+): MatchedVia | null {
+  if (valueExistsInDocument(value, document)) return 'document';
+  if (derivedDocument !== undefined && valueExistsInDocument(value, derivedDocument)) return 'derived';
+  return null;
 }
 
 /**

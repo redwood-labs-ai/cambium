@@ -9,7 +9,8 @@
 // Keep this script dependency-free (plain node) so `npm run build`
 // doesn't need to install anything transitive.
 
-import { readdirSync, statSync, mkdirSync, copyFileSync } from 'node:fs';
+import { readdirSync, statSync, mkdirSync, copyFileSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { dirname, join, relative, sep, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -55,3 +56,42 @@ walk(SRC, (path) => {
 });
 
 console.error(`copy-assets: copied ${copied} asset file(s) from src/ to dist/`);
+
+// Build provenance stamp, read by cli/runner-freshness.mjs.
+//
+// The mtime comparison there detects a stale dist on its own; this file
+// exists to EXPLAIN one — "dist/ was built from main@f75d1ac" is the line
+// that distinguishes "I forgot to rebuild" from "I'm running another
+// branch's code", which is the case that actually wastes an hour.
+//
+// Every field is best-effort: a tarball build, a git-less container, or a
+// detached worktree just yields nulls and the guard omits the line.
+function git(args) {
+  try {
+    const r = spawnSync('git', args, { cwd: HERE, encoding: 'utf8' });
+    if (r.status !== 0) return null;
+    return (r.stdout || '').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+const head = git(['rev-parse', '--short', 'HEAD']);
+// `git status --porcelain` prints nothing on a clean tree, so a successful
+// empty result and a failed call both come back '' / null respectively —
+// distinguish them once rather than shelling out twice.
+const porcelain = head === null ? null : git(['status', '--porcelain']);
+writeFileSync(
+  join(DEST, 'build-info.json'),
+  JSON.stringify(
+    {
+      builtAt: new Date().toISOString(),
+      branch: branch === 'HEAD' ? null : branch, // detached HEAD
+      head,
+      dirty: porcelain === null ? null : porcelain !== '',
+    },
+    null,
+    2,
+  ) + '\n',
+);

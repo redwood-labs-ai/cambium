@@ -18,6 +18,7 @@ import { writeFileSync, readFileSync, mkdtempSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
+import { loadRunner } from './runner-freshness.mjs';
 
 const CLI_DIR = dirname(fileURLToPath(import.meta.url));
 const RUBY_COMPILE_SCRIPT = resolve(CLI_DIR, '..', 'ruby', 'cambium', 'compile.rb');
@@ -103,7 +104,7 @@ export async function runReplay(args) {
     else usage(`Unknown flag: ${a}`);
   }
 
-  const runner = await import('@redwood-labs/cambium-runner');
+  const runner = await loadRunner();
   const { resolveReplay } = runner;
 
   let resolved;

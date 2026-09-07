@@ -4,9 +4,13 @@
 reviewable *before* the promise becomes binding. The promise below **takes effect
 at Cambium 1.0.** Until then Cambium is pre-release: any 0.x release may still
 break the surfaces named here, and each break lands loud, with a `CHANGELOG.md`
-migration entry. One has landed so far — `output_ceiling`, a twelfth
-`error.kind`, in 0.10 (§ 3). The pre-1.0 window is the *only* window for a break
-like that; after 1.0 it is a `/v2` boundary.
+migration entry. Three have landed so far — `output_ceiling`, a twelfth
+`error.kind`, in 0.10 (§ 3); the meaning of `GroundingCheckAfterRepair.ok`, widened to cover "the
+repair deleted the citations", in the 0.11 window (§ 4); and `cambium run <pipeline>` with an omitted
+`--arg`, which used to run on a substituted `'{}'` and now refuses (§ 6 — a flag's meaning), also in the
+0.11 window — an invocation that used to produce an IR now produces none, so `runs/<id>/ir.json` no
+longer records the substitute either. The pre-1.0 window
+is the *only* window for a break like that; after 1.0 it is a `/v2` boundary.
 
 Cambium adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
 This document defines *what a version number promises* — which surfaces the major
@@ -68,6 +72,16 @@ The 0.9 renames (`write_memory_via` → `writes_memory_via`, `prewarm_cache` →
 such renames. They land in 0.9 precisely so they do **not** have to happen after
 1.0.
 
+**Additions in `[Unreleased]`.** `exclude_from_prefix` (#182) — a new top-level
+`GenModel` keyword naming context keys that must not contribute to the cacheable
+prompt prefix. Purely additive on this surface: no keyword renamed, no kwarg's
+meaning changed, and no accepted value set narrowed. Its IR counterpart
+(`excludeFromPrefix`) takes the absent-when-unset shape §2 prefers, so a gen that
+does not use it compiles byte-identically and no prompt-cache prefix moves. Not a
+break; recorded here because §1 is the surface an author checks before upgrading
+a `.cmb.rb`, and in `CHANGELOG.md` because that is how anyone finds out at all
+(DEC-010).
+
 ### 2. IR JSON shape (and the opaque TypeScript type)
 
 The IR has **two distinct contractual surfaces**, and only one is promised.
@@ -82,7 +96,8 @@ inspectable plan. Adding an IR field is additive (the same philosophy as Rails'
 - **Additive:** new top-level or nested fields; a new operator kind; a new optional
   key on an operator. A key that is *absent when unset* (so pre-existing IR stays
   byte-identical) is the preferred additive shape — see `model.fallbacks`,
-  `returnSchema`, and the `prewarm` operator key for worked examples.
+  `returnSchema`, `excludeFromPrefix`, and the `prewarm` operator key for worked
+  examples.
 - **Breaking (MAJOR):** removing a field, renaming a field, or changing the meaning
   or type of an existing field.
 
@@ -148,9 +163,15 @@ the caller requested is a cooperative result, not a failure. The enum stays at 1
 Every run emits a `trace.json` whose steps carry a framework-owned `type`. The
 vocabulary is closed and additive: a step type, once shipped, keeps its shape.
 
-- **Additive:** new step types (a new primitive or operator ships with its own).
-- **Breaking (MAJOR):** removing a step type or changing an existing type's payload
-  shape.
+- **Additive:** new step types (a new primitive or operator ships with its own); new `meta` keys on an
+  existing step type (`Repair.meta.source_chars` / `source_docs` / `source_doc_bytes`, and
+  `GroundingCheckAfterRepair.meta.citations_before` / `citations_after` / `deleted_by_repair`, are worked
+  examples — RED-175).
+- **Breaking (MAJOR):** removing a step type, changing an existing type's payload shape, or changing what
+  an existing type's `ok` means. The 0.11 window moved the last one on purpose: `GroundingCheckAfterRepair`
+  and `GroundingFieldValueCheckAfterRepair` used to report `ok: true` for an output whose citations had been
+  deleted by the repair; they now report `ok: false` (`deleted_by_repair: true`) and the run fails. After 1.0
+  that same move is a `/v2` boundary — which is why it was taken now, while the promise is not yet binding.
 - **Defined in:** every type is enumerated in
   [`C - Trace (observability)`](docs/GenDSL%20Docs/C%20-%20Trace%20%28observability%29.md).
   A new step type requires both the runner change and a `C - Trace` row — the same
@@ -173,6 +194,10 @@ exported types.
   key required, or changing an existing function's signature or return shape.
 - **Not promised:** anything *not* re-exported from `index.ts`. Deep imports into
   the package's internal modules are unsupported and may change in any release.
+- **Widened meanings** — a capability flag on this surface whose contract grows to
+  cover a second dispatch path adds and removes nothing, so it is neither additive
+  nor breaking by the rules above. Those are recorded in the **Behavior register**
+  below; read it before upgrading a custom provider.
 
 ### 6. CLI surface
 
@@ -252,6 +277,34 @@ release so authors have a migration window. The following are deprecated in 0.9 
 
 After 1.0, any *new* deprecation follows the same cycle: it may be *marked*
 deprecated in a MINOR release but is only *removed* in the next MAJOR.
+
+---
+
+## Behavior register
+
+Changes with **no removed surface and no signature change** — so neither
+additive nor breaking by the rules above — that nonetheless **widen what an
+existing surface means**. A conforming implementation written against the old
+meaning keeps type-checking and keeps running; it just does less than it used
+to. That silent-underperformance failure mode is why these are written down.
+
+A widening is usually *carried* by an additive change (a new optional field the
+older implementation ignores), so an entry here normally names its additive
+partner rather than standing alone.
+
+**A register entry is additional to a `CHANGELOG.md` entry, never instead of
+one** (DEC-010). The CHANGELOG is how anyone finds out a change happened at
+all; this register is the durable lookup for someone auditing a specific
+surface before upgrading. Recording a widening only here would route it around
+the "breaks land loud" discipline in § Status above — which is exactly the
+failure that text exists to prevent.
+
+| Release | Surface | Widened meaning | What an out-of-tree implementation must do |
+|---------|---------|-----------------|--------------------------------------------|
+| `[Unreleased]` (#228) | `CambiumProvider.supportsPromptCacheControl` (provider-author contract, surface 5) | Previously it gated forwarding of `GenerateTextOpts.cachedPrefix` only — the documented wording was method-specific. It now **also** gates `GenerateWithToolsOpts.cachedPrefix`, so a provider that sets the flag receives `cachedPrefix` on the agentic (`generateWithTools`) path as well. Carried by the additive field `GenerateWithToolsOpts.cachedPrefix` (`providers/types.ts`, re-exported from `index.ts`) — permitted under surface 5, and the mechanism by which the flag's meaning widened. | Consume `cachedPrefix` in **both** `generateText` and `generateWithTools`. A provider that sets the flag and handles it only in `generateText` will **silently drop the prefix** — the entire document and context payload — on every agentic run: no error, no trace signal, just a model answering without the material it was supposed to read. No in-tree provider is affected (`anthropicCompatible` handles both; `openaiCompatible` leaves the flag false, so the runner folds the prefix into the first user message upstream and the provider sees one string, unchanged). |
+
+Entries stay in this register for one major line after the release that
+introduced them.
 
 ---
 

@@ -1,0 +1,184 @@
+{
+  "generate_palette": {
+    "version": "0.2",
+    "entry": {
+      "class": "ThemePalette",
+      "method": "generate_palette",
+      "source": "packages/cambium/app/gens/theme_palette.cmb.rb"
+    },
+    "model": {
+      "id": "omlx:orinth-1.0-35b@q8_0",
+      "temperature": 0.2,
+      "max_tokens": 1200
+    },
+    "repairModel": {
+      "id": "omlx:nvidia/nemotron-3-nano-4b",
+      "max_tokens": 16000,
+      "temperature": 0
+    },
+    "system": "You are a desktop theme designer. You turn a deterministic swatch\nextraction from a wallpaper into a complete, valid Quattro `colors.toml`\ntheme (spec §8.2) — a 26-key semantic design system, not a raw palette.\n\n## What you receive\n\nA JSON document shaped like:\n\n```json\n{\n  \"source\": \"wallpaper.png\",\n  \"k\": 16,\n  \"swatches\": [\n    { \"hex\": \"#1a1b26\", \"share\": 0.183, \"luma\": 0.010, \"hue\": 235.7, \"sat\": 0.191 },\n    { \"hex\": \"#7aa2f7\", \"share\": 0.061, \"luma\": 0.343, \"hue\": 220.9, \"sat\": 0.886 }\n  ]\n}\n```\n\n16 swatches, sorted by `share` descending. Treat them as **ground\ntruth** — do not invent colors that aren't derived from them. Each\nswatch gives you:\n\n- `hex` — the extracted color, `#rrggbb`.\n- `share` — how much of the wallpaper this color covers (its dominance).\n- `luma` — WCAG relative luminance, 0 (black) to 1 (white). This is the\n  darkness axis: use it to decide `mode` and to order backgrounds\n  (darkest → lightest) and foregrounds.\n- `hue` — HSL hue in degrees, 0–360. Use this to assign the chromatic\n  roles (red/orange/yellow/green/cyan/blue/magenta/brown) — including\n  the hard boundary calls (orange vs. brown: brown is a dark,\n  low-saturation orange, not a separate hue family; red vs. magenta;\n  cyan vs. blue).\n- `sat` — HSL saturation, 0–1. Low-saturation swatches near a chromatic\n  hue are the muted/brown end of that family; high-saturation swatches\n  are the vivid `bright_*` end.\n\n## What you produce\n\nEvery one of the 26 keys in the schema, every value a `#rrggbb` hex\ncolor, and `mode` set to `dark` or `light`. There is no `bright_orange`\nor `bright_brown` in the schema — do not add them.\n\n## How to assign roles\n\n1. **Decide `mode` from the dominant swatches' luma.** The highest-share\n   swatches set the character of the desktop; if they're low-luma, this\n   is a dark theme, and vice versa.\n2. **Assign the four backgrounds and four foregrounds from luma order.**\n   `background` / `dark_background` / `darker_background` /\n   `lighter_background` should span a tonal ramp anchored on the\n   dominant low-saturation, extreme-luma swatches (the darkest and\n   palest colors in the extraction). Foregrounds are the ramp's\n   opposite end. `bright_foreground` is the highest-contrast option\n   against `background`.\n3. **Assign the 8 chromatic roles (red, yellow, orange, green, cyan,\n   blue, magenta, brown) by hue**, using saturated, mid-luma swatches\n   where available. `brown` is the desaturated/dark member of the\n   orange family, not its own hue band.\n4. **Assign the 6 `bright_*` variants** as higher-saturation,\n   higher-luma versions of their base color family.\n5. **When a role has no close match among the 16 swatches**, derive it\n   by adjusting the *lightness* of the nearest extracted anchor in that\n   hue family (do not invent an unrelated hue) — you are filling a gap\n   in the design system, not guessing a fresh color.\n6. **`accent` / `selection`** should be the most saturated, highest-share\n   chromatic swatch — the color the desktop should feel like.\n   **`muted`** should be a low-saturation swatch close to the background\n   ramp; it is allowed to sit at low contrast against `background` by\n   design.\n\nOutput only the 26 fields. Every color is a hex string; nothing else.",
+    "mode": null,
+    "policies": {
+      "tools_allowed": [],
+      "correctors": [
+        {
+          "name": "hex_normalize",
+          "max_attempts": 1
+        },
+        {
+          "name": "contrast_floor",
+          "max_attempts": 1
+        }
+      ],
+      "constraints": {},
+      "grounding": null,
+      "security": null,
+      "budget": {
+        "per_run": {
+          "max_tokens": 2000
+        }
+      },
+      "memory": [],
+      "memory_pools": {},
+      "memory_write_via": null,
+      "log": [],
+      "log_profiles": [],
+      "schedules": []
+    },
+    "reads_trace_of": null,
+    "returnSchema": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "dark",
+            "light"
+          ]
+        },
+        "accent": {
+          "type": "string"
+        },
+        "selection": {
+          "type": "string"
+        },
+        "muted": {
+          "type": "string"
+        },
+        "background": {
+          "type": "string"
+        },
+        "dark_background": {
+          "type": "string"
+        },
+        "darker_background": {
+          "type": "string"
+        },
+        "lighter_background": {
+          "type": "string"
+        },
+        "foreground": {
+          "type": "string"
+        },
+        "dark_foreground": {
+          "type": "string"
+        },
+        "light_foreground": {
+          "type": "string"
+        },
+        "bright_foreground": {
+          "type": "string"
+        },
+        "red": {
+          "type": "string"
+        },
+        "yellow": {
+          "type": "string"
+        },
+        "orange": {
+          "type": "string"
+        },
+        "green": {
+          "type": "string"
+        },
+        "cyan": {
+          "type": "string"
+        },
+        "blue": {
+          "type": "string"
+        },
+        "magenta": {
+          "type": "string"
+        },
+        "brown": {
+          "type": "string"
+        },
+        "bright_red": {
+          "type": "string"
+        },
+        "bright_yellow": {
+          "type": "string"
+        },
+        "bright_green": {
+          "type": "string"
+        },
+        "bright_cyan": {
+          "type": "string"
+        },
+        "bright_blue": {
+          "type": "string"
+        },
+        "bright_magenta": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "accent",
+        "selection",
+        "muted",
+        "background",
+        "dark_background",
+        "darker_background",
+        "lighter_background",
+        "foreground",
+        "dark_foreground",
+        "light_foreground",
+        "bright_foreground",
+        "red",
+        "yellow",
+        "orange",
+        "green",
+        "cyan",
+        "blue",
+        "magenta",
+        "brown",
+        "bright_red",
+        "bright_yellow",
+        "bright_green",
+        "bright_cyan",
+        "bright_blue",
+        "bright_magenta"
+      ],
+      "additionalProperties": false,
+      "$id": "ThemePaletteOutput"
+    },
+    "context": {
+      "document": ""
+    },
+    "enrichments": [],
+    "signals": [],
+    "triggers": [],
+    "steps": [
+      {
+        "id": "generate_1",
+        "type": "Generate",
+        "prompt": "assign extracted swatches to the Quattro theme role schema",
+        "with": {
+          "context": ""
+        },
+        "returns": null
+      }
+    ]
+  }
+}

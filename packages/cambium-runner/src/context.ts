@@ -30,6 +30,18 @@
 //   2. ir.context[source]          (RED-276 grounding source key)
 //   3. ir.context.document         (legacy fallback)
 //   4. empty string
+//
+// #169 (DEC-001): format-derived text — the plain-text view of a Markdown
+// or JSON source that `grounded_in ... format:` produces — is deliberately
+// NOT in `groundingTextByKey` and must not be "unified" into it later.
+// This map is not verifier-only: it feeds prompt assembly, every RED-175
+// semantic repair prompt, `enrich`, and compound review, all through this
+// function. A PDF belongs here because the extracted text is the ONLY text
+// there is; for a text source the raw string already is the text, and
+// substituting a stripped view would silently change what the model sees
+// and move the prompt-cache key. The derived view travels a verifier-only
+// channel instead: `CorrectorContext.derivedDocument` (see
+// `grounding-text.ts` and the wiring in `runner.ts`).
 
 type IR = any;
 

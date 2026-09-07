@@ -93,10 +93,13 @@ export function detectWorkspaceShape(startDir) {
 }
 
 /**
- * Expand a `[workspace] members` list into the member package directories
- * that actually hold a `Genfile.toml`. Mirrors the glob walk `cambium lint`
- * already does, which is why a drifted workspace linted clean while the
- * hardcoded `packages/cambium/` sat unlinted (RED-159).
+ * Resolve a `[workspace] members` list against the filesystem, keeping
+ * enough information for a caller to tell discovery ("which dirs make up
+ * the workspace") from validation ("did every declared member resolve to
+ * a real package") apart. `expandMembers` (below) is the discovery view;
+ * `cambium lint` (RED-217 / DEC-011) is the validation view — a literal
+ * member that has no `Genfile.toml` is a reportable defect there, while a
+ * glob sweeping over a non-package directory is not.
  *
  * `members` comes from a user-authored file, so each pattern is guarded
  * before it is joined: no absolute paths, no `..` segments, and the
@@ -104,39 +107,95 @@ export function detectWorkspaceShape(startDir) {
  *
  * @param {string} workspaceRoot
  * @param {unknown} members Raw `workspace.members` value.
- * @returns {string[]} Absolute member dirs, sorted, each containing a Genfile.
+ * @returns {{
+ *   accepted: string[],
+ *   missingGenfile: Array<{ dir: string, pattern: string, fromGlob: boolean }>,
+ *   rejected: Array<{ pattern: string, reason: string }>,
+ * }} `accepted` — absolute member dirs, each containing a Genfile.
+ *    `missingGenfile` — dirs that passed the path guards and exist, but
+ *    have no Genfile.toml; `fromGlob` says whether the pattern that
+ *    produced them was a literal path or a glob.
+ *    `rejected` — patterns refused by the guards (not a string, absolute,
+ *    `..`, escaped the workspace after resolve, or a glob whose parent
+ *    directory couldn't be scanned — AUD-217-08).
  */
-function expandMembers(workspaceRoot, members) {
+export function resolveMembers(workspaceRoot, members) {
   const patterns = Array.isArray(members) ? members : members == null ? [] : [members];
-  const found = [];
+  const accepted = [];
+  const missingGenfile = [];
+  const rejected = [];
 
-  const accept = (abs) => {
+  const classify = (abs, pattern, fromGlob) => {
     const rel = relative(workspaceRoot, abs);
-    if (rel.startsWith('..') || isAbsolute(rel)) return; // escaped the workspace
-    if (existsSync(join(abs, 'Genfile.toml'))) found.push(abs);
+    if (rel.startsWith('..') || isAbsolute(rel)) {
+      rejected.push({ pattern, reason: 'escaped the workspace' });
+      return;
+    }
+    if (existsSync(join(abs, 'Genfile.toml'))) accepted.push(abs);
+    else missingGenfile.push({ dir: abs, pattern, fromGlob });
   };
 
   for (const pattern of patterns) {
-    if (typeof pattern !== 'string') continue;
-    if (isAbsolute(pattern) || pattern.split(/[\\/]/).includes('..')) continue;
+    if (typeof pattern !== 'string') {
+      rejected.push({ pattern, reason: 'not a string' });
+      continue;
+    }
+    if (isAbsolute(pattern) || pattern.split(/[\\/]/).includes('..')) {
+      rejected.push({ pattern, reason: 'absolute path or `..` segment' });
+      continue;
+    }
 
     if (pattern.includes('*')) {
       // Only the trailing `packages/*` form is meaningful here; anything
-      // deeper is treated as its literal parent directory.
-      const parent = join(workspaceRoot, pattern.replace(/\*.*$/, ''));
+      // deeper is treated as its literal parent directory. Strip a
+      // trailing slash along with the `*` (not just `\*.*$`): `join()`
+      // preserves it, and `existsSync`/`readdirSync` on a path with a
+      // trailing slash whose target is a regular file report ENOTDIR at
+      // the `existsSync` step (POSIX trailing-slash-implies-directory
+      // semantics) — silently absorbed by the boolean check below before
+      // the readdirSync catch two lines down ever runs (AUD-217-08).
+      const parent = join(workspaceRoot, pattern.replace(/\/?\*.*$/, ''));
       if (!existsSync(parent)) continue;
       let entries;
       try {
         entries = readdirSync(parent).sort();
-      } catch {
+      } catch (e) {
+        // Discovery (resolveAppPkgRoot via expandMembers, below) can
+        // shrug this off — a glob parent it cannot scan has no member to
+        // offer, full stop. Validation (lint, via resolveMembers) cannot:
+        // a parent we couldn't read is not evidence that it held no
+        // packages (AUD-217-08).
+        rejected.push({
+          pattern,
+          reason: `could not read ${relative(workspaceRoot, parent) || '.'}: ${e?.code ?? e?.message}`,
+        });
         continue;
       }
-      for (const entry of entries) accept(join(parent, entry));
+      for (const entry of entries) classify(join(parent, entry), pattern, true);
     } else {
-      accept(join(workspaceRoot, pattern));
+      classify(join(workspaceRoot, pattern), pattern, false);
     }
   }
-  return found;
+  return { accepted, missingGenfile, rejected };
+}
+
+/**
+ * Expand a `[workspace] members` list into the member package directories
+ * that actually hold a `Genfile.toml`. Mirrors the glob walk `cambium lint`
+ * already does, which is why a drifted workspace linted clean while the
+ * hardcoded `packages/cambium/` sat unlinted (RED-159).
+ *
+ * Discovery-only view over `resolveMembers` — a dir with no Genfile is
+ * silently absent here by design (see `resolveAppPkgRoot`, which wants
+ * exactly that). Callers that need to report a missing member as a defect
+ * (validation, not discovery) want `resolveMembers` directly.
+ *
+ * @param {string} workspaceRoot
+ * @param {unknown} members Raw `workspace.members` value.
+ * @returns {string[]} Absolute member dirs, each containing a Genfile.
+ */
+export function expandMembers(workspaceRoot, members) {
+  return resolveMembers(workspaceRoot, members).accepted;
 }
 
 /** `kinds` from a member package's Genfile, or `[]` if unreadable. */

@@ -57,3 +57,22 @@ describe('resolveBucketPath (RED-215 phase 3)', () => {
       .toThrow(/no keyed_by/);
   });
 });
+
+describe('resolveBucketPath — segment guard (#195 security gate F2)', () => {
+  it('refuses a decl name that could escape runs/memory/', () => {
+    const decl: MemoryDecl = { name: '../../../../escaped/pwned', scope: 'global', strategy: 'log' };
+    expect(() => resolveBucketPath(decl, ctx())).toThrow(/memory decl name=.*must match/);
+  });
+
+  it('refuses a decl scope that could escape runs/memory/', () => {
+    const decl: MemoryDecl = { name: 'ok', scope: '../up', strategy: 'log' };
+    expect(() => resolveBucketPath(decl, ctx())).toThrow(/scope=.*must match/);
+  });
+
+  it('every existing scope spelling still resolves (session, global, pool names, underscores)', () => {
+    for (const scope of ['session', 'global', 'support_team', 'pool-2']) {
+      const decl: MemoryDecl = { name: 'n_1', scope, strategy: 'log', ...(scope !== 'session' && scope !== 'global' ? { keyed_by: 'k' } : {}) };
+      expect(() => resolveBucketPath(decl, ctx({ keys: { k: 'v' } }))).not.toThrow();
+    }
+  });
+});

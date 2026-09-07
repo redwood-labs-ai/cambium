@@ -162,4 +162,57 @@ describe('field-values corrector', () => {
     // Empty array → no filter applied
     expect(fv.passed.length).toBe(2);
   });
+
+  // ── #169: any-of over document + derivedDocument ────────────────────
+  describe('derivedDocument (#169)', () => {
+    // A compact JSON source: the escaped value is what the model read as
+    // `Restarted twice. Still "flapping".`
+    const rawJson = '{"vendor":"Acme Corp","note":"Restarted twice.\\nStill \\"flapping\\"."}';
+    const derivedJson = '{\n  "vendor": "Acme Corp",\n  "note": "Restarted twice.\nStill "flapping"."\n}';
+
+    it('passes via the derived view when the raw document misses', () => {
+      const output = { note: 'Restarted twice.\nStill "flapping".' };
+      expect(fieldValues(output, { document: rawJson }).meta?.fieldValuesResult.allValid).toBe(false);
+
+      const result = fieldValues(output, { document: rawJson, derivedDocument: derivedJson });
+      const fv = result.meta?.fieldValuesResult;
+      expect(fv.allValid).toBe(true);
+      expect(fv.passed[0].matched_via).toBe('derived');
+      expect(result.issues.filter(i => i.severity === 'error')).toHaveLength(0);
+    });
+
+    it('reports document when the raw text hits, even though derived would too', () => {
+      const result = fieldValues(
+        { vendor: 'Acme Corp' },
+        { document: rawJson, derivedDocument: derivedJson },
+      );
+      expect(result.meta?.fieldValuesResult.passed[0].matched_via).toBe('document');
+    });
+
+    it('still fails a value that is in neither haystack', () => {
+      const result = fieldValues(
+        { vendor: 'Globex Industries' },
+        { document: rawJson, derivedDocument: derivedJson },
+      );
+      const fv = result.meta?.fieldValuesResult;
+      expect(fv.allValid).toBe(false);
+      expect(fv.failed[0].reason).toBe('value not found in grounding document');
+    });
+
+    it('reports document when derivedDocument is absent (unchanged behavior)', () => {
+      const result = fieldValues({ vendor: 'Acme Corp' }, { document: doc });
+      expect(result.meta?.fieldValuesResult.passed[0].matched_via).toBe('document');
+    });
+
+    it('checks nested leaves against the derived view too', () => {
+      const result = fieldValues(
+        { incident: { note: 'Restarted twice.\nStill "flapping".' } },
+        { document: rawJson, derivedDocument: derivedJson },
+      );
+      const fv = result.meta?.fieldValuesResult;
+      expect(fv.totalChecked).toBe(1);
+      expect(fv.passed[0].path).toBe('incident.note');
+      expect(fv.passed[0].matched_via).toBe('derived');
+    });
+  });
 });

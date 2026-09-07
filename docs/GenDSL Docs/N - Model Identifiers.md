@@ -69,7 +69,7 @@ The in-repo example is `packages/cambium/app/providers/gateway.ts` — a no-SDK 
 - Secrets resolve from env via the `auth` callback — never bake a key into the file.
 - The base URL is operator-controlled (same trust boundary as `CAMBIUM_OMLX_BASEURL`); run it through `validateProviderBaseUrl` for the SSRF guard.
 - Set `supportsDocuments` honestly — `false` makes the runtime fail fast on a native-document gen instead of stringifying a base64 blob into the prompt.
-- Set `supportsPromptCacheControl` honestly — `true` tells the runner to forward `GenerateTextOpts.cachedPrefix` to the provider as a separate cached block; `false`/absent makes the runner flatten `cachedPrefix` into `prompt` before dispatch so the provider always sees a single string. The `anthropicCompatible` factory sets it from `config.cache !== false`.
+- Set `supportsPromptCacheControl` honestly — `true` tells the runner to forward **both** `GenerateTextOpts.cachedPrefix` *and* `GenerateWithToolsOpts.cachedPrefix` to the provider as a separate cached block; `false`/absent makes the runner flatten `cachedPrefix` into `prompt` (single-turn) or into the first user message (agentic) before dispatch, so the provider always sees a single string. The `anthropicCompatible` factory sets it from `config.cache !== false`. **The agentic half of that contract is new as of this release (#228, DEC-009).** A custom provider that sets the flag and consumes `cachedPrefix` in `generateText` but not in `generateWithTools` will silently drop the prefix — the whole document — on agentic runs: no error, no trace signal. If you set this flag, consume `cachedPrefix` in *both* methods. See `COMPATIBILITY.md` § Behavior register.
 
 ### Bedrock (consumer recipe, not shipped)
 
@@ -124,12 +124,40 @@ the case where a truncated fragment happens to parse.
 
 ## Anthropic prompt caching (RED-321)
 
-`buildAnthropicMessagesRequest` automatically applies `cache_control: {type: 'ephemeral'}` to up to four blocks — Anthropic's per-request breakpoint ceiling:
+`buildAnthropicMessagesRequest` automatically applies `cache_control: {type: 'ephemeral'}`. Anthropic's ceiling is **four breakpoints per request**, and a fifth is an HTTP 400 — so the allocation differs between the single-turn path and the agentic loop.
+
+### Single-turn (`generateText`)
+
+`generateText` sends no tools, so at most three markers are ever in play here:
 
 1. The top-level `system` block (always, when a system prompt exists).
-2. The last entry in `tools[]` (which caches the whole tools array up through it).
-3. The last native-document block (RED-323), when document input is present — caches the whole document stack up through it.
-4. The shared user-prompt prefix — DOCUMENT + non-primary context sections + OUTPUT_JSON_TEMPLATE — for gens that declare `grounded_in`, when the shared payload is ≥ `MIN_CACHE_PREFIX_CHARS` (~4 KB). This fires automatically for grounded fan-out gens: the prefix is byte-identical across candidates, so branch 1 writes the cache (`cache_creation_input_tokens`) and branches 2..N read it (`cache_read_input_tokens`). The split happens only on the single-turn `generateText` path; the agentic loop is unchanged. Blocks 2 and 4 never co-occur on one request (separate code paths), so four is a ceiling, not a typical count. **Ordering note (0.8.1):** when this breakpoint fires, the Anthropic user message is reordered to document/prefix-first, instruction-last — required by Anthropic's caching contract; gens below the floor and all non-Anthropic providers are unaffected.
+2. The last native-document block (RED-323), when document input is present — caches the whole document stack up through it.
+3. The shared user-prompt prefix — DOCUMENT + non-primary context sections + OUTPUT_JSON_TEMPLATE — for gens that declare `grounded_in`, when the shared payload is ≥ `MIN_CACHE_PREFIX_CHARS` (~4 KB). This fires automatically for grounded fan-out gens: the prefix is byte-identical across candidates, so branch 1 writes the cache (`cache_creation_input_tokens`) and branches 2..N read it (`cache_read_input_tokens`). **Ordering note (0.8.1):** when this breakpoint fires, the Anthropic user message is reordered to document/prefix-first, instruction-last — required by Anthropic's caching contract; gens below the floor and all non-Anthropic providers are unaffected.
+
+The `grounded_in` requirement is deliberate here and only here: a large but *per-call-varying* prefix would pay a cache write (~1.25× base input) that nothing ever reads. Widening this gate to size-only is an open question (#228 OQ-002), sequenced behind #182.
+
+### Agentic (`mode :agentic`, #228)
+
+Before #228 an agentic turn carried only breakpoints 1 and 2 and **none inside the messages array**, so the whole transcript — shared document included — was re-billed uncached on every turn and cost grew quadratically with turn count. The allocation is now exactly four, and the fourth is Anthropic's *automatic* breakpoint:
+
+| slot | holder |
+|---|---|
+| 1 | `system` (explicit) |
+| 2 | `tools[last]` (explicit) |
+| 3 | the shared user-prompt prefix (explicit) |
+| 4 | **automatic** — a top-level `cache_control` field, a sibling of `model`/`system`/`messages` |
+
+The automatic breakpoint is applied by the API to the last cacheable block and advanced forward as the conversation grows, so the frozen tail of each completed turn is cached with no marker bookkeeping on Cambium's side — and with no risk of a hand-placed marker falling out of Anthropic's 20-block lookback window on a long loop.
+
+Three consequences worth knowing:
+
+- **The prefix is eligible on size alone here**, with no `grounded_in` requirement, because an agentic prefix is re-sent on *every* turn — the cache write pays for itself from turn 2 onward, regardless of grounding. An agentic gen that terminates on turn 1 (the model answers without calling a tool, which is common under `--mock` and for easy questions) pays the write without a read, at ~1.25× base input for the prefix.
+
+  **Retention note.** Size-only eligibility widens what is *retained*, not what is *sent*. Before #228 only a gen declaring `grounded_in` ever had its document + context prefix marked `cache_control` and therefore held in Anthropic's prompt cache for the TTL; now any agentic gen whose prefix clears `MIN_CACHE_PREFIX_CHARS` (~4 KB) is. The bytes were always transmitted either way — `grounded_in` never gated transmission, only caching. So an agentic gen whose prefix carries sensitive context or tool output now has that content resident in the provider's cache store for the TTL, where before it was re-billed uncached every turn but not retained. Grounded single-shot gens have accepted the same trade-off since 0.8.1; this is a new instance of an existing posture, and there is no per-gen no-cache control on either path. Worth knowing when deciding what to put in an agentic gen's context.
+- **Ordering note (#228), mirroring the single-turn one above.** When the prefix marker fires, the Anthropic user message is reordered to prefix-first, instruction-last — required by the caching contract, since a cached region extends *backward* from its marker. Two consequences for prompt text an agentic gen author should know: the per-call instruction moves from the **head** of the user message to its **tail**, and the `\n\n` that separated instruction from document is **dropped**, so the document body abuts the instruction directly (measured on a 6 KB fixture: 6,069 → 6,067 chars). This is the layout the single-turn path has used since 0.8.1. Gens below the cache floor, and every non-Anthropic provider, keep the legacy `<instruction>\n\n<document>` ordering unchanged.
+- **The last-document marker is suppressed** whenever the prefix marker fires on this path. It is redundant (documents are ordered before the prefix inside the same user message and a cache region extends *backward* from its marker, so they already sit inside the prefix's region), and keeping it would make five markers and 400 the request. On the single-turn path the document marker is unchanged.
+
+Anthropic builds cache prefixes in the order `tools` → `system` → `messages`, each level on top of the last. That is why a fan-out **does not prewarm an agentic branch** (#228, DEC-005): prewarm fires through `generateText`, which sends no tools, so a warm-up diverges from the real agentic call at the first level of the hierarchy and writes an entry the branch could never read.
 
 Cache stats surface through the usual usage channel and are carried in the trace:
 
@@ -310,6 +338,7 @@ Define workspace-wide aliases in `packages/cambium/app/config/models.rb`:
 default   "omlx:Qwen3.5-27B-4bit"
 fast      "omlx:gemma-4-31b-it-8bit"
 embedding "omlx:bge-small-en"
+repair    "omlx:gemma-4-31b-it-8bit", max_tokens: 900   # ← RED-176: a slot, not an alias
 ```
 
 Then reference them by symbol in any gen or memory slot:
@@ -329,10 +358,26 @@ memory :facts, strategy: :semantic, top_k: 5, embed: :embedding  # also resolves
 - An undefined alias raises `CompileError` listing the available names and pointing at the config file.
 - Aliases names MUST match `/\A[a-z][a-z0-9_]*\z/` (same safety regex as policy-pack and memory-pool names).
 - The IR never carries symbols — the runner only sees resolved literal strings. This keeps the runtime layer blissfully unaware of the alias mechanism. Don't add runtime alias resolution — it would split the source of truth across two layers and break the "IR is truth" stance. If you need runtime model selection (env override, A/B), do it at IR-post-processing or add a separate mechanism; don't reuse aliases.
+- `repair` is the one name in `models.rb` a gen cannot reference. `model :repair` is a compile error ("unknown model alias") because `repair` is not an alias — it is a slot the compiler bakes into every IR as `repairModel` (RED-176, see below).
 
 **Why aliases:** before RED-237 every gen hard-coded its model string, and switching models across a fleet of gens was find-and-replace. Memory pools compounded the pain by repeating the embed model. Aliases collapse that to a single edit per workspace.
 
 **Coordinates with RED-238:** semantic query source overrides — orthogonal to alias resolution but touches the same memory decl surface.
+
+### The `repair` slot (RED-176)
+
+`default` / `fast` / `embedding` are referenceable; `repair` is not. Declaring it swaps the model that runs the repair loop (author-facing spec: [[P - repair (model slot)]]):
+
+```ruby
+repair "omlx:nvidia/nemotron-3-nano-4b", max_tokens: 900, temperature: 0
+repair :fast                       # also legal — resolved against the aliases above
+```
+
+- **One source, workspace-wide.** No per-gen `repair:` override, per the RED-214/RED-239 "one source per slot" rule. (`constrain :compound, model:` remains per-gen — that asymmetry is deliberate and recorded in [[C - Repair Loop]].)
+- **Structural repair only.** The runner consults `repairModel` at the schema-validation and consensus-pass-validation sites, plus the `enrich` sub-gen's own repair loop. Semantic sites — review, consensus disagreement, corrector feedback, grounding citations and field-values — run on `model`, because their complaint is about meaning and repair is handed the source document to reason about (RED-175). See [[C - Repair Loop]] § What repair sees, per failure class.
+- **`effort` and `fallbacks` are refused at parse time**, not silently dropped: `ModelAliasesBuilder::REPAIR_KWARGS` is a closed list (`max_tokens`, `temperature`), so `repair "x", effort: "low"` is a `CompileError` naming the offending kwarg.
+- **Absent → byte-identical.** A workspace with no `repair` line compiles to exactly the IR it did before this primitive existed (the key is omitted, not null — same rule as `model.fallbacks` and `effort`).
+- **Profiles.** A `repair` declared inside the active profile shadows the global one, same as aliases; declared only in a non-active profile, it is invisible and the global wins.
 
 ## Profile-driven model selection (RED-326)
 
@@ -350,6 +395,7 @@ profile :dev do
   default   "omlx:Qwen3.5-27B-4bit"
   fast      "omlx:gemma-4-31b-it-8bit"
   embedding "omlx:bge-small-en"
+  repair    "omlx:gemma-4-31b-it-8bit", max_tokens: 900   # RED-176: shadows a global repair
 end
 
 profile :prod do

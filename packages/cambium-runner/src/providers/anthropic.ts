@@ -14,7 +14,13 @@
  *      tool_use_id, content}]`, not `{role:'tool', tool_call_id, content}`.
  *   4. Prompt caching — opt-in per-block via `cache_control: {type:'ephemeral'}`.
  *      We enable it by default on the system block and the last tool (which
- *      caches the whole tools array up to that point).
+ *      caches the whole tools array up to that point). Anthropic allows four
+ *      breakpoints total. #228 pins the agentic (tools-path) allocation at
+ *      exactly four: system + tools[last] + the user-prompt prefix + the
+ *      AUTOMATIC breakpoint, which is a top-level `cache_control` field the
+ *      API advances through the transcript on its own. A fifth explicit
+ *      marker is an HTTP 400, so the redundant last-document marker is
+ *      suppressed on that path — see `suppressDocumentMarker` below.
  *
  * Token usage is `{input_tokens, output_tokens}` plus optional
  * `cache_creation_input_tokens` / `cache_read_input_tokens`. We map the core
@@ -153,6 +159,32 @@ export function buildAnthropicMessagesRequest(
   }
   const systemText = systemParts.join('\n\n');
 
+  // #228: `tools` is only ever set by `generateWithTools` — the agentic
+  // dispatch. `generateText` leaves it undefined, including on the forced
+  // final turn where the agentic loop passes an EMPTY array (still the
+  // tools path, still the same allocation). Everything gated on this flag
+  // therefore cannot move a single byte of a `generateText` body (C-1).
+  const toolsPath = opts.tools !== undefined;
+
+  // Hoisted out of the message loop below: the document-block builder needs
+  // to know whether a prefix marker is coming before it decides on its own.
+  const cacheUserPrefix = opts.cacheUserPrefix;
+  const userPrefixEligible =
+    useCache && !!cacheUserPrefix && cacheUserPrefix.length >= MIN_USER_CACHE_CHARS;
+
+  // DEC-003 + DEC-004 (#228). Anthropic allows FOUR cache breakpoints, and
+  // the automatic (top-level) one consumes a slot: a request that already
+  // carries four explicit block-level markers is answered with HTTP 400.
+  // The agentic allocation is therefore exactly
+  //   system + tools[last] + user-prefix + automatic = 4
+  // and the document marker has to go. It is redundant anyway: blocks are
+  // ordered documents-then-prefix inside the same first user message and a
+  // cache region extends BACKWARD from its marker, so the documents already
+  // sit inside the prefix marker's region. Suppressed only when the prefix
+  // marker is actually emitted, and only on the tools path — `generateText`
+  // keeps marking documents, unchanged.
+  const suppressDocumentMarker = toolsPath && userPrefixEligible;
+
   // RED-323: document blocks go on the FIRST user-role message in the
   // ORIGINAL conversation (before tool_result turns translated into
   // role:'user'). Tracked with a flag so only the initial prompt carries
@@ -173,8 +205,10 @@ export function buildAnthropicMessagesRequest(
         },
       };
       // cache_control on the last document caches the whole document
-      // block stack up through it — one-shot cache for all docs.
-      if (useCache && i === documents.length - 1) {
+      // block stack up through it — one-shot cache for all docs. Dropped
+      // when a later prefix marker already covers them; see
+      // `suppressDocumentMarker`.
+      if (useCache && i === documents.length - 1 && !suppressDocumentMarker) {
         base.cache_control = { type: 'ephemeral' };
       }
       return base;
@@ -237,9 +271,6 @@ export function buildAnthropicMessagesRequest(
     // same reason — they belong to the original prompt, not later
     // tool_result turns).
     const userText = m.content ?? '';
-    const cacheUserPrefix = opts.cacheUserPrefix;
-    const userPrefixEligible =
-      useCache && !!cacheUserPrefix && cacheUserPrefix.length >= MIN_USER_CACHE_CHARS;
     if (
       m.role === 'user' &&
       !documentsConsumed &&
@@ -337,6 +368,17 @@ export function buildAnthropicMessagesRequest(
 
   if (translatedTools) {
     body.tools = translatedTools;
+  }
+
+  // DEC-004 (#228): the automatic cache breakpoint. Anthropic applies it to
+  // the last cacheable block and moves it forward itself as the transcript
+  // grows, so each agentic turn's frozen tail is cached without any marker
+  // bookkeeping here — and without the risk of a hand-placed marker falling
+  // out of the 20-block lookback window on a long loop. Tools path only:
+  // this field must never appear on a `generateText` body (C-1), and it is
+  // pointless there anyway (nothing accumulates between calls).
+  if (useCache && toolsPath) {
+    body.cache_control = { type: 'ephemeral' };
   }
 
   return body;

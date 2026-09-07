@@ -9,6 +9,11 @@
     "model": {
       "id": "omlx:stub"
     },
+    "repairModel": {
+      "id": "omlx:nvidia/nemotron-3-nano-4b",
+      "max_tokens": 16000,
+      "temperature": 0
+    },
     "system": "inline system prompt",
     "mode": null,
     "policies": {

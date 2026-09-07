@@ -1289,7 +1289,9 @@ function compileGenIr(genFile: string, method: string, compileRb: string): any {
 const PREWARM_MAX_TOKENS = 16;
 
 interface PrewarmSummary {
-  /** Distinct (model tier × prefix) groups warmed. */
+  /** Distinct (model tier × prefix) groups found. With `skipped` set this is
+   *  how many groups the eligible branches split into — all of them singletons,
+   *  so none of them got warmed. */
   groups: number;
   /** Warm-ups that completed without throwing. */
   fired: number;
@@ -1298,6 +1300,10 @@ interface PrewarmSummary {
   /** Tokens the warm-up calls actually spent (folded into the fan-out's
    *  rollup so a budget-capped pipeline's trace reflects true cost). */
   tokens: number;
+  /** Set when the whole prewarm was skipped. `no-shared-prefix`: every
+   *  cacheable branch is its own (tier × prefix) group, so a warm-up would
+   *  write a cache only one branch ever reads — pure cost (RED-183). */
+  skipped?: 'no-shared-prefix';
 }
 
 /** Whether a fan-out should prewarm its cache. Off when opted out, under
@@ -1317,7 +1323,8 @@ export function fanOutPrewarmEligible(
  * branches share a grounded cacheable prefix, dispatching them in one tick
  * makes them race cold — each writes its own copy of the shared prefix.
  * This fires one tiny warm-up per distinct (model tier × prefix) so the
- * branches read the prefix from cache instead.
+ * branches read the prefix from cache instead — and skips the whole thing
+ * when no two branches share a prefix, since there is then no race to win.
  *
  * Byte-identity is the whole point: the warm-up builds `(system,
  * cacheablePrefix)` through the SAME helpers handleGenerate uses, on the
@@ -1345,6 +1352,10 @@ export async function prewarmFanOut(
     documents: any[];
   }
   const groups = new Map<string, Group>();
+  // Branches that reached the group-building step — i.e. are cacheable.
+  // Duplicates count, so `eligible - groups.size` is how many branches would
+  // benefit from a warm-up; 0 means every group is a singleton.
+  let eligible = 0;
 
   for (const branch of branches) {
     // Any throw while building a branch's prefix (malformed memo IR, a
@@ -1355,6 +1366,18 @@ export async function prewarmFanOut(
       const method = branch.method ?? 'analyze';
       const subIr = precompiled.get(`${branch.agent}::${method}`);
       if (!subIr) continue; // compile failed → excluded (runBranch surfaces it)
+
+      // #228 (DEC-005): an agentic sub-gen can never read this warm-up.
+      // Prewarm fires through `generateText`, which sends NO tools, and
+      // Anthropic builds cache prefixes `tools` → `system` → `messages`,
+      // each level on top of the last — so a tools-less warm-up diverges
+      // from the real agentic call at the very first level of the
+      // hierarchy. The entry it writes is unreadable by definition, which
+      // makes the warm-up pure cost. Excluded like any other non-cacheable
+      // branch: BEFORE `eligible++`, so it is never counted as evidence of
+      // a shared prefix (the RED-183 invariant). Teaching prewarm to send
+      // the tools array is the follow-up, not this ticket.
+      if (subIr.mode === 'agentic') continue;
 
       const schema = subIr.returnSchema ?? ctx.contractsMod[subIr.returnSchemaId];
       if (!schema) continue;
@@ -1369,6 +1392,7 @@ export async function prewarmFanOut(
       const system = buildGenSystem(mergedIr, schema);
       const { cacheablePrefix, useCachedPrefix } = buildCacheablePrefix(mergedIr, schema, docInput);
       if (!useCachedPrefix) continue; // ungrounded or below the cache floor
+      eligible++;
 
       // Anthropic's cache is per-model, and a differing system/prefix within
       // a tier is a different cache entry — so the key is model + a hash of
@@ -1393,6 +1417,23 @@ export async function prewarmFanOut(
   }
 
   if (groups.size === 0) return { groups: 0, fired: 0, failed: 0, tokens: 0 };
+
+  // Every cacheable branch split into its own group ⇒ there is no shared
+  // prefix to race on, and a warm-up would just cost a full-price cache write
+  // that exactly one branch reads, one tick later. Skip and say so — the
+  // 200-branch reviewer sweep in RED-183 was paying for 200 of these. Counted
+  // on `eligible`, not `branches.length`: branches excluded above are not
+  // evidence of sharing, and `>= branches.length` misses the mixed case
+  // (5 branches, 3 excluded, 2 distinct groups → still nothing to warm).
+  // Ceiling: a MIXED fan-out still warms its singleton groups — one wasted
+  // call per unshared branch. Dropping them needs a member count on the key;
+  // add it when a real sweep mixes shared and unshared prefixes.
+  if (groups.size >= eligible) {
+    process.stderr.write(
+      `[cambium] prewarm skipped: ${groups.size} groups / ${eligible} cacheable branches — no shared cacheable prefix to warm\n`,
+    );
+    return { groups: groups.size, fired: 0, failed: 0, tokens: 0, skipped: 'no-shared-prefix' };
+  }
 
   const results = await Promise.allSettled(
     [...groups.values()].map((g) =>
@@ -1471,7 +1512,8 @@ async function runFanOut(
   // compile each distinct (agent, method) sub-IR once up front and memoize
   // it so runBranch reuses it instead of recompiling; a per-branch compile
   // failure is left out of the memo, and runBranch surfaces it on its own
-  // path unchanged.
+  // path unchanged. The memo is kept even when prewarmFanOut finds nothing
+  // shared and skips: runBranch still reuses it (RED-183).
   let precompiled: Map<string, any> | undefined;
   let prewarmSummary: PrewarmSummary | undefined;
   if (fanOutPrewarmEligible(op, concurrency, branches.length, ctx.mock)) {
@@ -1862,20 +1904,55 @@ function parsePipelineInputs(
   // Multi-slot: rawArg MUST be a JSON object with keys matching the
   // declared slots. Phase B.1 supports this minimally — anything more
   // ergonomic (per-slot CLI flags, etc.) is a CLI follow-up.
+  let parsed: any;
   try {
-    const parsed = JSON.parse(rawArg);
+    parsed = JSON.parse(rawArg);
     if (typeof parsed !== 'object' || Array.isArray(parsed) || parsed === null) {
       throw new Error('Multi-input pipelines require JSON-object --arg.');
     }
-    const out: Record<string, any> = {};
-    for (const slot of slotNames) out[slot] = parsed[slot];
-    return out;
   } catch (e: any) {
     throw new Error(
       `Pipeline declares ${slotNames.length} input slots (${slotNames.join(', ')}) — ` +
         `--arg must be a JSON object mapping slot names to values. ${e.message ?? ''}`,
     );
   }
+
+  // #226: every declared slot is mandatory by construction — `input(name,
+  // schema:)` (ruby/cambium/pipeline.rb) takes no `optional:` and no
+  // `default:`. A slot missing from a parseable object used to bind
+  // `undefined` silently, which is the same all-or-partially-unbound end
+  // state the non-object branch above exists to prevent, reached by a path
+  // that happens to satisfy the type check. Fail closed, and name the slots
+  // that are actually missing rather than re-listing every declared one.
+  //
+  // Own-property only, for the reason #195's `returnSchemaId` lookup is:
+  // `NAME_RE` (/\A[a-z][a-z0-9_]*\z/) permits `constructor`, so a plain
+  // `parsed[slot]` read on `input :constructor` would bind
+  // Object.prototype's function instead of reporting the slot missing —
+  // fail-open, through a legal declaration. `hasOwnProperty` closes both
+  // holes with one check.
+  //
+  // A slot supplied as `null` is present, not missing: the caller said
+  // something, and saying what is wrong with it is the schema's job.
+  const out: Record<string, any> = {};
+  const missing: string[] = [];
+  for (const slot of slotNames) {
+    if (!Object.prototype.hasOwnProperty.call(parsed, slot)) {
+      missing.push(slot);
+      continue;
+    }
+    out[slot] = parsed[slot];
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `Pipeline input object is missing ${missing.length} of ${slotNames.length} ` +
+        `declared input slot(s): ${missing.join(', ')}. ` +
+        `Declared: ${slotNames.join(', ')}. ` +
+        `Every \`input\` is mandatory — the DSL has no \`optional:\` or \`default:\`, ` +
+        `so supply every slot in the --arg object.`,
+    );
+  }
+  return out;
 }
 
 // ── Sub-gen file resolution ───────────────────────────────────────────

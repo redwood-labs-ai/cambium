@@ -14,6 +14,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync, mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readRunDir as sharedReadRunDir, tryReadRunDir, cleanupRunDir } from './helpers/run-dir.js';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -191,20 +192,18 @@ describe('RED-381 Phase B.1: sequential pipeline runs end-to-end (mock)', () => 
     // Without --trace / --out overrides, artifacts land in the
     // workspace's default runs/ tree.
     const result = runPipelineCli(SAMPLE_PIPELINE, 'review', FIXTURE);
-    expect(result.status).toBe(0);
-
-    // The stderr emit names the run dir; extract it.
-    const m = result.stderr.match(/dir=(\S+)/);
-    expect(m).toBeTruthy();
-    const runDir = m![1];
-    expect(existsSync(join(runDir, 'ir.json'))).toBe(true);
-    expect(existsSync(join(runDir, 'trace.json'))).toBe(true);
-    expect(existsSync(join(runDir, 'output.json'))).toBe(true);
-
-    // Best-effort cleanup of the auto-generated run dir.
+    // Resolve the run dir from the stderr emit BEFORE asserting, so the
+    // finally below is reachable when an assertion fails (#224).
+    const runDir = tryReadRunDir(result.stderr);
     try {
-      rmSync(runDir, { recursive: true, force: true });
-    } catch {}
+      expect(result.status).toBe(0);
+      expect(runDir).toBeTruthy();
+      expect(existsSync(join(runDir!, 'ir.json'))).toBe(true);
+      expect(existsSync(join(runDir!, 'trace.json'))).toBe(true);
+      expect(existsSync(join(runDir!, 'output.json'))).toBe(true);
+    } finally {
+      cleanupRunDir(runDir);
+    }
   });
 });
 
@@ -264,22 +263,23 @@ class P < Pipeline
 end
 `.trim());
     const result = runPipelineCli(pipePath, 'run', join(REPO_ROOT, FIXTURE));
-    expect(result.status).not.toBe(0);
-    // Pull the run dir off stderr and inspect the trace.
-    const m = result.stderr.match(/dir=(\S+)/);
-    expect(m).toBeTruthy();
-    const trace = JSON.parse(readFileSync(join(m![1], 'trace.json'), 'utf8'));
-    expect(trace.ok).toBe(false);
-    expect(trace.operators).toHaveLength(1);
-    const op = trace.operators[0];
-    expect(op.type).toBe('PipelineBudgetExceeded');
-    expect(op.id).toBe('s1');
-    expect(op.metric).toBe('tokens');
-    expect(op.cap).toBe(100);
-    expect(op.used).toBe(0);
-    expect(op.projected).toBe(1200);
-
-    try { rmSync(m![1], { recursive: true, force: true }) } catch {}
+    const runDir = tryReadRunDir(result.stderr);
+    try {
+      expect(result.status).not.toBe(0);
+      expect(runDir).toBeTruthy();
+      const trace = JSON.parse(readFileSync(join(runDir!, 'trace.json'), 'utf8'));
+      expect(trace.ok).toBe(false);
+      expect(trace.operators).toHaveLength(1);
+      const op = trace.operators[0];
+      expect(op.type).toBe('PipelineBudgetExceeded');
+      expect(op.id).toBe('s1');
+      expect(op.metric).toBe('tokens');
+      expect(op.cap).toBe(100);
+      expect(op.used).toBe(0);
+      expect(op.projected).toBe(1200);
+    } finally {
+      cleanupRunDir(runDir);
+    }
   })
 
   it('uses the conservative default projection when sub-gen omits max_tokens', () => {
@@ -340,12 +340,16 @@ end
         `Expected success, got status=${result.status}\nstderr: ${result.stderr}`,
       );
     }
-    const m = result.stderr.match(/dir=(\S+)/);
-    const trace = JSON.parse(readFileSync(join(m![1], 'trace.json'), 'utf8'));
-    expect(trace.ok).toBe(true);
-    expect(trace.meta.budget_cap_tokens).toBe(10_000);
-    expect(trace.meta.operators_executed).toBe(3);
-    try { rmSync(m![1], { recursive: true, force: true }) } catch {}
+    const runDir = tryReadRunDir(result.stderr);
+    try {
+      expect(runDir).toBeTruthy();
+      const trace = JSON.parse(readFileSync(join(runDir!, 'trace.json'), 'utf8'));
+      expect(trace.ok).toBe(true);
+      expect(trace.meta.budget_cap_tokens).toBe(10_000);
+      expect(trace.meta.operators_executed).toBe(3);
+    } finally {
+      cleanupRunDir(runDir);
+    }
   })
 
   it('omitting the budget block leaves no cap (unlimited)', () => {
@@ -359,11 +363,15 @@ class P < Pipeline
 end
 `.trim());
     const result = runPipelineCli(pipePath, 'run', join(REPO_ROOT, FIXTURE));
-    expect(result.status).toBe(0);
-    const m = result.stderr.match(/dir=(\S+)/);
-    const trace = JSON.parse(readFileSync(join(m![1], 'trace.json'), 'utf8'));
-    expect(trace.meta.budget_cap_tokens).toBeUndefined();
-    try { rmSync(m![1], { recursive: true, force: true }) } catch {}
+    const runDir = tryReadRunDir(result.stderr);
+    try {
+      expect(result.status).toBe(0);
+      expect(runDir).toBeTruthy();
+      const trace = JSON.parse(readFileSync(join(runDir!, 'trace.json'), 'utf8'));
+      expect(trace.meta.budget_cap_tokens).toBeUndefined();
+    } finally {
+      cleanupRunDir(runDir);
+    }
   })
 });
 
@@ -448,14 +456,18 @@ class P < Pipeline
 end
 `.trim());
     const result = runPipelineCli(pipePath, 'run', join(REPO_ROOT, FIXTURE));
-    expect(result.status).toBe(0);
-    const m = result.stderr.match(/dir=(\S+)/);
-    const ir = JSON.parse(readFileSync(join(m![1], 'ir.json'), 'utf8'));
-    expect(ir.output).toEqual({
-      kind: 'compose',
-      fields: [{ name: 'summary', from: { step: 's1', field: 'summary' } }],
-    });
-    try { rmSync(m![1], { recursive: true, force: true }) } catch {}
+    const runDir = tryReadRunDir(result.stderr);
+    try {
+      expect(result.status).toBe(0);
+      expect(runDir).toBeTruthy();
+      const ir = JSON.parse(readFileSync(join(runDir!, 'ir.json'), 'utf8'));
+      expect(ir.output).toEqual({
+        kind: 'compose',
+        fields: [{ name: 'summary', from: { step: 's1', field: 'summary' } }],
+      });
+    } finally {
+      cleanupRunDir(runDir);
+    }
   });
 });
 
@@ -473,9 +485,16 @@ describe('RED-381 Phase C: fan_out parallel branch dispatch', () => {
     mkdirSync(join(scratch, 'src'), { recursive: true });
     mkdirSync(join(scratch, 'app', 'pipelines'), { recursive: true });
     mkdirSync(join(scratch, 'app', 'gens'), { recursive: true });
+    // A-001a (#205): a plain-object export, appended to the real
+    // contracts.ts text, that AJV can never satisfy — `{ not: {} }` rejects
+    // every value, so a fail agent declaring `returns NeverValid` fails
+    // Validate under `--mock` no matter how good the mock generator gets.
+    // Replaces the old trick of reusing an unrelated schema (`ToolScaffoldResult`)
+    // and relying on the mock's inability to guess its shape.
     writeFileSync(
       join(scratch, 'src', 'contracts.ts'),
-      readFileSync(join(REPO_ROOT, 'packages/cambium/src/contracts.ts'), 'utf8'),
+      readFileSync(join(REPO_ROOT, 'packages/cambium/src/contracts.ts'), 'utf8')
+        + "\nexport const NeverValid = { $id: 'NeverValid', type: 'object', properties: { summary: { not: {} } }, required: ['summary'], additionalProperties: false } as const;\n",
     );
     const pipePath = join(scratch, 'app', 'pipelines', 'p.pipeline.rb');
     writeFileSync(pipePath, pipelineBody);
@@ -490,11 +509,12 @@ describe('RED-381 Phase C: fan_out parallel branch dispatch', () => {
   }
 
   function readRunTrace(stderr: string): any {
-    const m = stderr.match(/dir=(\S+)/);
-    expect(m).toBeTruthy();
-    const trace = JSON.parse(readFileSync(join(m![1], 'trace.json'), 'utf8'));
-    try { rmSync(m![1], { recursive: true, force: true }); } catch {}
-    return trace;
+    const runDir = sharedReadRunDir(stderr);
+    try {
+      return JSON.parse(readFileSync(join(runDir, 'trace.json'), 'utf8'));
+    } finally {
+      cleanupRunDir(runDir);
+    }
   }
 
   it('runs all branches and emits a PipelineFanOut trace step', () => {
@@ -561,18 +581,18 @@ end
 
   it('on_branch_failure :continue tolerates partial failures (with at_least threshold)', () => {
     // Synthesize a "fail" agent that returns invalid output to force a
-    // branch failure. Mock always returns AnalysisReport-shaped JSON,
-    // so a gen with a different `returns` schema will produce output
-    // that fails AJV validation → branch ok=false.
+    // branch failure. `NeverValid` (A-001a, #205) is unsatisfiable by
+    // construction — `{ not: {} }` rejects every value — so this branch
+    // fails AJV validation no matter what the mock generator produces.
     const failAgentBody = `
 class FailReviewer < GenModel
   model "omlx:stub"
   system "inline"
-  returns ToolScaffoldResult
+  returns NeverValid
   def review(input)
     generate "go" do
       with context: input
-      returns ToolScaffoldResult
+      returns NeverValid
     end
   end
 end
@@ -605,15 +625,17 @@ end
   });
 
   it('require :all (default) fails the fan_out on any branch failure', () => {
+    // Same unsatisfiable-schema trick as the case above (A-001a, #205): the
+    // failure is injected by `NeverValid`, not by the mock's shape.
     const failAgentBody = `
 class FailReviewer < GenModel
   model "omlx:stub"
   system "inline"
-  returns ToolScaffoldResult
+  returns NeverValid
   def review(input)
     generate "go" do
       with context: input
-      returns ToolScaffoldResult
+      returns NeverValid
     end
   end
 end
@@ -808,10 +830,14 @@ end
       throw new Error(`Expected success; got ${good.status}\nstderr: ${good.stderr}`);
     }
     // Trace should carry the fired_by annotation.
-    const m = good.stderr.match(/dir=(\S+)/);
-    const trace = JSON.parse(readFileSync(join(m![1], 'trace.json'), 'utf8'));
-    expect(trace.fired_by).toBe('schedule:p.run.daily');
-    try { rmSync(m![1], { recursive: true, force: true }); } catch {}
+    const runDir = tryReadRunDir(good.stderr);
+    try {
+      expect(runDir).toBeTruthy();
+      const trace = JSON.parse(readFileSync(join(runDir!, 'trace.json'), 'utf8'));
+      expect(trace.fired_by).toBe('schedule:p.run.daily');
+    } finally {
+      cleanupRunDir(runDir);
+    }
   });
 
   it('--fired-by on a pipeline without schedules is a clear error', () => {
@@ -881,11 +907,10 @@ describe('RED-381 Phase F.2: log integration on pipelines', () => {
   }
 
   function readTrace(stderr: string): { trace: any; runDir: string } {
-    const m = stderr.match(/dir=(\S+)/);
-    expect(m).toBeTruthy();
+    const runDir = sharedReadRunDir(stderr);
     return {
-      trace: JSON.parse(readFileSync(join(m![1], 'trace.json'), 'utf8')),
-      runDir: m![1],
+      trace: JSON.parse(readFileSync(join(runDir, 'trace.json'), 'utf8')),
+      runDir,
     };
   }
 
@@ -977,11 +1002,7 @@ describe('RED-381 Phase E: pipeline-shared :pipeline_run memory scope', () => {
     return pipePath;
   }
 
-  function readRunDir(stderr: string): string {
-    const m = stderr.match(/dir=(\S+)/);
-    expect(m).toBeTruthy();
-    return m![1];
-  }
+  const readRunDir = sharedReadRunDir;
 
   // --- Ruby compile-error guard ---
 
@@ -1298,9 +1319,16 @@ describe('RED-381 Phase D: branch_on conditional routing', () => {
     mkdirSync(join(scratch, 'src'), { recursive: true });
     mkdirSync(join(scratch, 'app', 'pipelines'), { recursive: true });
     mkdirSync(join(scratch, 'app', 'gens'), { recursive: true });
+    // A-001a (#205): a plain-object export, appended to the real
+    // contracts.ts text, that AJV can never satisfy — `{ not: {} }` rejects
+    // every value, so a fail agent declaring `returns NeverValid` fails
+    // Validate under `--mock` no matter how good the mock generator gets.
+    // Replaces the old trick of reusing an unrelated schema (`ToolScaffoldResult`)
+    // and relying on the mock's inability to guess its shape.
     writeFileSync(
       join(scratch, 'src', 'contracts.ts'),
-      readFileSync(join(REPO_ROOT, 'packages/cambium/src/contracts.ts'), 'utf8'),
+      readFileSync(join(REPO_ROOT, 'packages/cambium/src/contracts.ts'), 'utf8')
+        + "\nexport const NeverValid = { $id: 'NeverValid', type: 'object', properties: { summary: { not: {} } }, required: ['summary'], additionalProperties: false } as const;\n",
     );
     const pipePath = join(scratch, 'app', 'pipelines', 'p.pipeline.rb');
     writeFileSync(pipePath, pipelineBody);
@@ -1315,11 +1343,12 @@ describe('RED-381 Phase D: branch_on conditional routing', () => {
   }
 
   function readRunTrace(stderr: string): any {
-    const m = stderr.match(/dir=(\S+)/);
-    expect(m).toBeTruthy();
-    const trace = JSON.parse(readFileSync(join(m![1], 'trace.json'), 'utf8'));
-    try { rmSync(m![1], { recursive: true, force: true }); } catch {}
-    return trace;
+    const runDir = sharedReadRunDir(stderr);
+    try {
+      return JSON.parse(readFileSync(join(runDir, 'trace.json'), 'utf8'));
+    } finally {
+      cleanupRunDir(runDir);
+    }
   }
 
   it('emits a PipelineBranchOn trace step and fires the default block when no match clause matches', () => {
@@ -1442,15 +1471,18 @@ end
   });
 
   it('a failed step inside a branch_on body fails the whole pipeline', () => {
+    // Unsatisfiable-schema failure injection (A-001a, #205): `NeverValid`'s
+    // `{ not: {} }` rejects every value, so this step fails Validate no
+    // matter what the mock generator produces.
     const failAgentBody = `
 class FailAgent < GenModel
   model "omlx:stub"
   system "inline"
-  returns ToolScaffoldResult
+  returns NeverValid
   def analyze(input)
     generate "go" do
       with context: input
-      returns ToolScaffoldResult
+      returns NeverValid
     end
   end
 end

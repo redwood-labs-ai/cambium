@@ -130,6 +130,38 @@ describe('grounded_in verify: :field_values — runner step 5b (RED-392)', () =>
     expect(after.meta.failed).toBe(0);
   });
 
+  // RED-175: the same guard as the citations path, on grounded values. The mock
+  // repair re-emits a smaller object than the candidate it was handed, so the
+  // re-verify has to call that a deletion — "nothing failed" is not the report
+  // an operator wants when half the answer is gone.
+  it('fails the run when the repair deletes grounded values (RED-175)', async () => {
+    process.env.CAMBIUM_ALLOW_MOCK = '1';
+    const ir = baseIR();
+    // Doc carries every grounded leaf on both sides, so nothing fails: the only
+    // signal that the repair destroyed content is the before/after count.
+    ir.context.document = 'The vendor is Acme and the total is 12345 dollars. Mock analysis (model provider not available).';
+    const result = await runGen({
+      ir,
+      schemas: { Extract: PermissiveSchema },
+      mock: true,
+      // "999" is ungrounded → repair fires on a 4-leaf candidate.
+      resumeCandidate: { vendor: 'Acme', total: 999, note: 'Acme', note2: '12345 dollars' },
+      parentRunId: 'run_src',
+    });
+
+    const after = result.trace.steps.find(
+      (s: any) => s.type === 'GroundingFieldValueCheckAfterRepair',
+    ) as any;
+    expect(after).toBeDefined();
+    expect(after.meta.values_before).toBe(4);
+    expect(after.meta.values_after).toBe(1);
+    expect(after.meta.deleted_by_repair).toBe(true);
+    expect(after.meta.failed).toBe(0);      // the old vacuous-clean shape
+    expect(after.ok).toBe(false);
+    expect(result.ok).toBe(false);
+    expect((result.trace as any).final.ok).toBe(false);
+  });
+
   it('does not run step 5b when verify is absent (citations-only / no verify)', async () => {
     const ir = baseIR();
     ir.policies.grounding = { source: 'document', require_citations: false }; // no verify

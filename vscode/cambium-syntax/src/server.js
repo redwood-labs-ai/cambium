@@ -428,7 +428,11 @@ const PRIMITIVE_DOCS = {
   },
   grounded_in: {
     detail: 'Enforces output grounded in a source document.',
-    doc: 'When `require_citations: true`, all claim items must include verbatim quotes.\nFabricated citations are flagged and repaired.\n\n`verify: :field_values` adds a value-level cross-check: each structured output field value must appear in the grounding document (RED-392).\n\n`fields:` is an allowlist of top-level output field names to cross-check; omit to check all fields. Only valid with `verify: :field_values` (RED-399).\n\n```ruby\ngrounded_in :document, require_citations: true\ngrounded_in :invoice, verify: :field_values\ngrounded_in :invoice, verify: :field_values, fields: [:vendor, :total]\n```',
+    doc: 'When `require_citations: true`, all claim items must include verbatim quotes.\nFabricated citations are flagged and repaired.\n\n`verify: :field_values` adds a value-level cross-check: each structured output field value must appear in the grounding document (RED-392).\n\n`fields:` is an allowlist of top-level output field names to cross-check; omit to check all fields. Only valid with `verify: :field_values` (RED-399).\n\n`format: :markdown | :json | :text` names the shape of a text source so the verifier also matches a derived plain-text view of it — the visible text of Markdown, the decoded strings of JSON (#169). Usually inferred at compile time from the extension of whichever path supplied the value (`--arg` over `from:`); declare it explicitly for serve / pipeline inputs, which have no path. What the model sees is unchanged \u2014 the derived view is verifier-only.\n\n```ruby\ngrounded_in :document, require_citations: true\ngrounded_in :invoice, verify: :field_values\ngrounded_in :invoice, verify: :field_values, fields: [:vendor, :total]\ngrounded_in :notes, from: "notes.md", require_citations: true   # format inferred: markdown\n```',
+  },
+  exclude_from_prefix: {
+    detail: 'Keeps a context key out of the prompt-cache prefix (#182).',
+    doc: 'Names context keys that must reach the model but must NOT contribute to the cacheable prompt prefix (#182).\n\nThe prefix is addressed by a content hash, so one per-call byte splits the provider\'s prompt cache: a `fan_out` of 200 reviewers whose branches differ only in `page_id` gets 200 cache entries and shares nothing. Excluded keys render into the **uncached tail** of the user prompt instead — fully model-visible, just after the cache breakpoint.\n\n```ruby\nexclude_from_prefix :page_id\nexclude_from_prefix :page_id, :run_seq\n```\n\nKeys match `/^[a-z][a-z0-9_]*$/`. Naming the `grounded_in` source is a compile error (the document is the reason the prefix exists); so is naming a `_`-prefixed key (those are framework-internal and never reach the prompt at all). Absent from the IR entirely when undeclared, so an existing gen compiles byte-identically.\n\n**Scoped to the cached path.** Below the ~4KB cache floor, or on a provider that cannot mark a breakpoint (oMLX/Ollama always), the declaration is a no-op — the full prefix ships and the prompt is byte-identical to a gen that never declared it. Note that excluding a *large* key can itself drop the prefix under the floor and turn caching off; the `Generate` trace step reports `cache_prefix: { judged_chars, used, excluded_chars }` and the runner warns on that inversion.\n\nSee [[P - GenModel]] § exclude_from_prefix.',
   },
   enrich: {
     detail: 'Pre-generate context enrichment via sub-agent.',
@@ -439,8 +443,8 @@ const PRIMITIVE_DOCS = {
     doc: '`mode :agentic` — multi-turn tool-use loop. Model calls tools, gets results, iterates.\n\n`mode :retro` (RED-215 phase 4) — retro memory agent. Reads a primary gen\'s trace and returns `MemoryWrites` rather than the primary\'s schema. Combined with `reads_trace_of :Primary`.\n\n```ruby\nmode :agentic\nmode :retro\n```',
   },
   repair: {
-    detail: 'Configures the repair policy for validation failures.',
-    doc: 'Controls how the runner retries when output fails validation.\n\n```ruby\nrepair max_attempts: 3, stop_on_no_improvement: true\n```\n\n`max_attempts` — max repair iterations (default: from `policies.max_repair_attempts`)\n`stop_on_no_improvement` — halt if error count doesn\'t decrease',
+    detail: 'Workspace repair model slot (RED-176) — declared in app/config/models.rb, not in a gen.',
+    doc: 'Names the cheaper model that runs repair passes instead of each gen\'s own model.\n\n```ruby\n# app/config/models.rb\nrepair "omlx:nemotron-3-nano-4b", max_tokens: 900\nrepair :fast   # resolves through the aliases above\n```\n\nWorkspace-authoritative — there is no per-gen `repair:`; `model :repair` is a compile error (slot, not alias).\n\nAllowed kwargs: `max_tokens` (positive Integer), `temperature` (Numeric). `effort:` and `fallbacks:` are refused at parse time. Structural repair sites only — schema validate, consensus validate, enrich sub-gen. Absent → repair runs on the gen\'s model and the IR is byte-identical. See [C - Repair Loop] § Repair model slot.',
   },
   security: {
     detail: 'Configures tool-execution security policy (RED-137 / RED-214 / RED-248+).',
@@ -952,14 +956,6 @@ connection.onCompletion((params) => {
       }
     }
     return agentCompletions;
-  }
-
-  // After "repair" at start of line → suggest repair keywords
-  if (/^\s*repair\s*$/.test(line)) {
-    return [
-      { label: 'max_attempts:', kind: CompletionItemKind.Property, detail: 'Max repair iterations' },
-      { label: 'stop_on_no_improvement:', kind: CompletionItemKind.Property, detail: 'Halt if error count unchanged' },
-    ];
   }
 
   // After "security" at start of line → suggest security keywords

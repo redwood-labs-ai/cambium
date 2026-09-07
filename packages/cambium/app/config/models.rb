@@ -13,3 +13,7 @@
 default   "omlx:orinth-1.0-35b@q8_0"
 fast      "omlx:nvidia/nemotron-3-nano-4b"
 embedding "omlx:bge-small-en"
+# Its max_tokens is a FLOOR: the ceiling in force is max(gen, this), so match
+# the biggest gen in the workspace (RED-174: "match repair's ceiling to the largest
+# gen's, not the smallest").
+repair    "omlx:nvidia/nemotron-3-nano-4b", max_tokens: 16000, temperature: 0

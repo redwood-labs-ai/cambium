@@ -259,6 +259,21 @@ if defs[:model_fallbacks]
   end
 end
 
+# RED-176: the workspace repair slot (`app/config/models.rb`:
+# `repair "omlx:nemotron-3-nano-4b", max_tokens: 900`). Absent → every IR is
+# byte-identical to today and repair runs on the gen's own model. Declared →
+# it ships to the runner as `repairModel` and takes authority over the
+# structural repair passes. The ceiling and temperature travel with the slot,
+# not with the gen — a 4B repair model has no reason to inherit the frontier
+# model's sampling settings — and `effort`/`fallbacks` are refused at parse
+# time (ModelAliasesBuilder::REPAIR_KWARGS) rather than silently inherited.
+repair_slot = model_aliases.repair_slot
+if repair_slot
+  repair_slot = repair_slot.merge(
+    'id' => model_aliases.resolve(repair_slot['id'], context: 'models.rb repair slot')
+  )
+end
+
 # RED-325: validate `effort` (only valid for Anthropic models that dropped
 # sampling params — Opus 4.7+, Fable 5, Mythos 5). Rejects on bad values
 # or on a non-Anthropic model; the runner will throw anyway, but the
@@ -512,6 +527,79 @@ if defs[:grounding] && defs[:grounding]['from']
     end
 end
 
+# #169: format-aware grounding text. `policies.grounding.format` names the
+# shape of a TEXT source so the runner can derive a plain-text view of it
+# for the verifier (visible Markdown text, decoded JSON strings) alongside
+# the raw bytes the model sees.
+#
+# Two rules here, both compile-time:
+#
+#   1. Inference (DEC-003). An explicit `format:` always wins. Otherwise
+#      infer from the extension of whichever path actually supplied the
+#      context value — `--arg <path>` when the CLI passed a real file,
+#      else the `from:`-resolved path when the baked-in value is what
+#      lands in context. Same precedence as the `context` ternary below,
+#      so the inferred format always describes the string that ships.
+#      Unrecognized extensions set nothing: plain text is the default and
+#      needs no deriver, and an absent key keeps existing IR byte-identical.
+#      `--arg -` (stdin) has no path, so nothing is inferred.
+#
+#   2. Binary guard (DEC-011). `format:` describes text. A `from:` that
+#      resolved to a base64_pdf / base64_image envelope with an explicit
+#      `format:` is a contradiction — the operator asked for a text view of
+#      something that isn't text. Fail at compile time with the fix in the
+#      message rather than silently ignoring the kwarg at run time.
+#
+#      A-005: the guard keys on the value that SHIPS, not on what `from:`
+#      resolved to. `--arg notes.json` overrides the bake-in (RED-383), so
+#      `from: "report.pdf", format: :json --arg notes.json` is a perfectly
+#      coherent compile — the envelope never reaches `ir.context` — and
+#      refusing it would make the error message describe an IR that was
+#      never going to be emitted. Same precedence the inference below uses.
+if defs[:grounding]
+  arg_supplied = !arg.nil? && arg != ''
+
+  if effective_grounding_value.is_a?(Hash) && !arg_supplied && defs[:grounding]['format']
+    raise Cambium::CompileError,
+          "grounded_in :#{defs[:grounding]['source']} format: #{defs[:grounding]['format'].inspect} " \
+          "applies to text sources, but from: #{defs[:grounding]['from'].inspect} resolved to a " \
+          "#{effective_grounding_value['kind']} envelope. Drop format: or point from: at a text file."
+  end
+
+  if defs[:grounding]['format'].nil?
+    format_by_ext = { '.md' => 'markdown', '.markdown' => 'markdown', '.json' => 'json' }.freeze
+    used_path =
+      if arg_supplied && !arg_path.nil? && arg_path != '-'
+        arg_path
+      elsif !arg_supplied && effective_grounding_value.is_a?(String)
+        full_path
+      end
+    inferred = used_path && format_by_ext[File.extname(used_path).downcase]
+    defs[:grounding]['format'] = inferred if inferred
+  end
+end
+
+# #182 DEC-013(a): `exclude_from_prefix` may not name the grounding
+# source. The grounding document is the single largest stable payload and
+# the entire reason the cacheable prefix exists — excluding it is never
+# what the author meant, and it would silently destroy the caching the gen
+# was tuned for. Checked here, not in the DSL method, because a class body
+# may declare the two in either order.
+#
+# NOT checked (DEC-013): that the key ever appears in `ir.context`. Context
+# is runtime and the declaration is compile-time — a gen legitimately
+# cannot know which optional keys a caller supplies, so silence is correct.
+if defs[:exclude_from_prefix] && defs[:grounding]
+  source = defs[:grounding]['source']
+  if defs[:exclude_from_prefix].include?(source)
+    raise Cambium::CompileError,
+          "exclude_from_prefix :#{source} names the `grounded_in` source. The grounding " \
+          "document is the largest stable payload in the prefix and the reason the prefix " \
+          "exists; excluding it would destroy the caching this gen is tuned for. " \
+          "Name a per-call context key instead."
+  end
+end
+
 # RED-419 C2: the return-schema reference is one of two mutually
 # exclusive shapes, emitted at the same IR position (DEC-001/DEC-004):
 #   - block form → inline `returnSchema` (the collected Draft-07 object,
@@ -551,6 +639,10 @@ build_ir = lambda do |method_name, steps|
       # model id was declared so the single-arg IR is byte-identical.
       'fallbacks' => defs[:model_fallbacks],
     }.compact,
+    # RED-176: omitted entirely when the workspace declares no repair slot,
+    # so a workspace that never adopts this keeps compiling to the bytes it
+    # did before — same reason `model.fallbacks` and `effort` are omitted.
+    **(repair_slot ? { 'repairModel' => repair_slot } : {}),
     'system' => system_prompt,
     'mode' => defs[:mode],
     # RED-325: effort is a per-gen steering control for models that dropped
@@ -564,6 +656,13 @@ build_ir = lambda do |method_name, steps|
     # `.compact`ed because this is the top-level hash, which carries
     # meaningful nulls elsewhere (`returnSchemaId`, `reads_trace_of`).
     **(defs[:effort] ? { 'effort' => defs[:effort] } : {}),
+    # #182: context keys the author declared must not contribute to the
+    # cacheable prompt prefix. Absent (not `[]`, not null) when the gen
+    # declares none — same omitted-when-unused rule as `effort` and
+    # `model.fallbacks` above, and for the same reason: every existing gen
+    # must compile to the bytes it did before the primitive existed, or
+    # upgrading diffs every downstream golden snapshot.
+    **(defs[:exclude_from_prefix]&.any? ? { 'excludeFromPrefix' => defs[:exclude_from_prefix] } : {}),
     'policies' => {
       'tools_allowed' => (defs[:tools] || []),
       'correctors' => (defs[:correctors] || []),

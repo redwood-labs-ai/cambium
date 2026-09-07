@@ -19,11 +19,23 @@
  * Path-traversal stance mirrors RED-274 (resolveGenfileContracts):
  * absolute entries rejected, `..` escapes rejected, NUL bytes rejected,
  * file existence checked.
+ *
+ * #195 precompiled mode: `{ precompiled: true }` or `{ irDir }` resolves
+ * each `[exports.gens]` entry to a `.ir.json` artifact instead of the
+ * `.cmb.rb` source — no Ruby spawn either way (`serve.ts`'s boot loop
+ * reads the artifact off disk rather than calling `compileBare`). The
+ * declared `.cmb.rb` need not exist on disk in this mode (shipped
+ * workspaces carry artifacts only); the artifact path is always built
+ * from `basename()` of the already-validated `.cmb.rb` value, so no new
+ * symbol-into-path join is introduced. `[exports.pipelines]` is refused
+ * outright in precompiled mode — a Pipeline IR still needs Ruby at run
+ * time per sub-gen (DEC-001, `ir-artifact.ts`).
  */
 
 import { readFileSync, existsSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { parse as parseToml } from 'smol-toml';
+import { findGenfileDir } from '../genfile.js';
 
 const GENFILE_NAME = 'Genfile.toml';
 
@@ -45,6 +57,18 @@ export interface GenCatalogEntry {
    *  Genfile section; the IR's own kind field is the runtime-side
    *  invariant. */
   kind: 'gen' | 'pipeline';
+  /** #195: absolute path to the precompiled `.ir.json` artifact. Set only
+   *  when `loadGenCatalog` was called with `{ precompiled: true }` or
+   *  `{ irDir }`; absent (not `undefined`-but-present) otherwise. `serve.ts`'s
+   *  boot loop reads this instead of calling `compileBare` when set. */
+  irPath?: string;
+  /** #195 A-003 (AUD-001): the gen's OWN workspace — the nearest
+   *  `Genfile.toml` above its declared source path, falling back to the
+   *  serve workspace when none sits between. Set only in precompiled mode.
+   *  This is what compile-at-boot resolves by walking up from
+   *  `entry.source`; anchoring every gen on `--workspace` instead broke a
+   *  root that exports gens from a member package with its own `[types]`. */
+  appRoot?: string;
 }
 
 export interface GenCatalog {
@@ -58,14 +82,28 @@ export interface GenCatalog {
   entries: Map<string, GenCatalogEntry>;
 }
 
+export interface LoadGenCatalogOptions {
+  /** #195: resolve every `[exports.gens]` entry to its sibling `.ir.json`
+   *  artifact (what `cambium compile --write` / engine mode writes) instead
+   *  of the `.cmb.rb` source. No Ruby spawn either way. */
+  precompiled?: boolean;
+  /** #195: resolve every `[exports.gens]` entry to `<irDir>/<basename
+   *  without .cmb.rb>.ir.json` (what `cambium compile --out-dir <dir>`
+   *  writes) instead of a sibling of the `.cmb.rb` source. Implies
+   *  `precompiled`; wins when both are set. */
+  irDir?: string;
+}
+
 /**
  * Read `Genfile.toml` from `workspaceDir`, parse `[exports.gens]`, and
  * return a validated catalog. Throws with a workspace-aware message on
  * any error — boot should fail fast, not partially load.
  */
-export function loadGenCatalog(workspaceDir: string): GenCatalog {
+export function loadGenCatalog(workspaceDir: string, opts: LoadGenCatalogOptions = {}): GenCatalog {
   const absWorkspace = resolve(workspaceDir);
   const genfilePath = join(absWorkspace, GENFILE_NAME);
+  const precompiled = Boolean(opts.precompiled || opts.irDir);
+  const absIrDir = opts.irDir ? resolve(opts.irDir) : null;
 
   if (!existsSync(genfilePath)) {
     throw new Error(
@@ -96,6 +134,29 @@ export function loadGenCatalog(workspaceDir: string): GenCatalog {
     );
   }
 
+  // #195 DEC-002: pipelines are refused outright in precompiled mode — a
+  // Pipeline IR still shells out to Ruby per sub-gen at request time
+  // (`ir-artifact.ts`'s `runtimeCompileSites`), so "no Ruby on PATH" would
+  // be a per-request surprise instead of a boot-time refusal. Checked
+  // before any path validation: precompiled mode never touches the
+  // `.pipeline.rb` file, so there's nothing to validate a path against.
+  if (precompiled && pipelines !== undefined) {
+    if (typeof pipelines !== 'object' || Array.isArray(pipelines) || pipelines === null) {
+      throw new Error(
+        `cambium serve: ${genfilePath} [exports.pipelines] must be a TOML table ` +
+          `(got ${Array.isArray(pipelines) ? 'array' : typeof pipelines}).`,
+      );
+    }
+    const names = Object.keys(pipelines as Record<string, unknown>);
+    if (names.length > 0) {
+      throw new Error(
+        `cambium serve: ${genfilePath} declares [exports.pipelines] (${names.join(', ')}) — ` +
+          `pipelines need Ruby at run time (pipeline) and cannot be loaded from a precompiled ` +
+          `artifact (#195). Remove them from [exports.pipelines], or boot without --precompiled/--ir-dir.`,
+      );
+    }
+  }
+
   const entries = new Map<string, GenCatalogEntry>();
   validateAndAddSection(
     'gens',
@@ -105,16 +166,20 @@ export function loadGenCatalog(workspaceDir: string): GenCatalog {
     genfilePath,
     absWorkspace,
     entries,
+    { skipExistenceCheck: precompiled },
   );
-  validateAndAddSection(
-    'pipelines',
-    pipelines,
-    'pipeline',
-    'pipeline.rb',
-    genfilePath,
-    absWorkspace,
-    entries,
-  );
+  if (!precompiled) {
+    validateAndAddSection(
+      'pipelines',
+      pipelines,
+      'pipeline',
+      'pipeline.rb',
+      genfilePath,
+      absWorkspace,
+      entries,
+      {},
+    );
+  }
 
   if (entries.size === 0) {
     throw new Error(
@@ -123,7 +188,46 @@ export function loadGenCatalog(workspaceDir: string): GenCatalog {
     );
   }
 
+  // #195 DEC-002: resolve each gen entry to its precompiled artifact.
+  // `--ir-dir` wins over `--precompiled` when both are set (flat-by-
+  // basename); otherwise the artifact is the sibling `.ir.json` next to
+  // the `.cmb.rb` (what `cambium compile --write` / engine mode write).
+  // Both paths are built from `basename()` of the already-validated
+  // `.cmb.rb` path — no new symbol-into-path join. Every entry must
+  // resolve to an artifact or boot fails, listing every offender in one
+  // error (mixed catalogs are not a thing).
+  if (precompiled) {
+    const missing: string[] = [];
+    for (const entry of entries.values()) {
+      const irPath = absIrDir
+        ? join(absIrDir, irArtifactName(entry.genFilePath))
+        : join(dirname(entry.genFilePath), irArtifactName(entry.genFilePath));
+      if (!existsSync(irPath)) {
+        missing.push(`${entry.name} → ${irPath}`);
+      } else {
+        entry.irPath = irPath;
+        // The declared source path is validated relative-inside-workspace
+        // above, so this walk-up is bounded by the workspace root (which
+        // always has a Genfile — the catalog came from it).
+        entry.appRoot = findGenfileDir(entry.genFilePath) ?? absWorkspace;
+      }
+    }
+    if (missing.length > 0) {
+      throw new Error(
+        `cambium serve: precompiled artifact(s) not found:\n  ${missing.join('\n  ')}\n` +
+          `Run \`cambium compile --write\` (or --out-dir <dir> to match --ir-dir) to produce them.`,
+      );
+    }
+  }
+
   return { workspaceDir: absWorkspace, genfilePath, entries };
+}
+
+/** `<base>.ir.json` for a `.cmb.rb` path — mirrors `cli/compile.mjs`'s
+ *  `irOutputName` for the `.cmb.rb` case (pipelines never reach this
+ *  function; they're refused outright in precompiled mode above). */
+function irArtifactName(cmbRbPath: string): string {
+  return `${basename(cmbRbPath, '.cmb.rb')}.ir.json`;
 }
 
 function validateAndAddSection(
@@ -134,6 +238,7 @@ function validateAndAddSection(
   genfilePath: string,
   absWorkspace: string,
   entries: Map<string, GenCatalogEntry>,
+  { skipExistenceCheck = false }: { skipExistenceCheck?: boolean },
 ): void {
   if (section === undefined) return;
   if (typeof section !== 'object' || Array.isArray(section) || section === null) {
@@ -185,7 +290,10 @@ function validateAndAddSection(
           `outside the workspace directory.`,
       );
     }
-    if (!existsSync(abs)) {
+    // #195: in precompiled mode the declared `.cmb.rb` need not exist on
+    // disk — shipped workspaces carry artifacts only. The extension check
+    // below still applies: the catalog names gens, not arbitrary files.
+    if (!skipExistenceCheck && !existsSync(abs)) {
       throw new Error(
         `cambium serve: ${genfilePath} [exports.${sectionName}].${name} = "${raw}" — file ` +
           `does not exist at ${abs}.`,

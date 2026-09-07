@@ -11,6 +11,11 @@
       "temperature": 0.2,
       "max_tokens": 1200
     },
+    "repairModel": {
+      "id": "omlx:nvidia/nemotron-3-nano-4b",
+      "max_tokens": 16000,
+      "temperature": 0
+    },
     "system": "You are a data analyst agent. You have access to tools that help you compute metrics. Use the calculator tool to compute any aggregates (averages, sums, etc.) rather than computing them yourself. Report your findings as structured data.",
     "mode": "agentic",
     "policies": {

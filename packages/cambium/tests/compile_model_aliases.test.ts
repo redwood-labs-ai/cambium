@@ -381,4 +381,109 @@ end
     const ir = JSON.parse(stdout)
     expect(ir.model.id).toBe('omlx:flat-layout-resolved')
   })
+
+  // ── RED-176: the repair slot ──────────────────────────────────────────
+  //
+  // `repair` is the one models.rb entry a gen cannot reference: it is a
+  // workspace slot the compiler bakes into every gen IR, not an alias a gen
+  // picks up. So the two claims worth pinning are "declared → every IR
+  // carries it" and "absent → every IR is byte-identical to pre-RED-176".
+
+  it('carries the declared repair slot into the IR even when no gen references it', () => {
+    const gen = writeGen(`
+class RepairSlotGen < GenModel
+  model :default
+  system "inline"
+  returns AnalysisReport
+  def analyze(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`)
+    const ir = compile(gen, 'analyze', FIXTURE_ARG)
+    const repair = workspaceAlias('repair')
+    expect(ir.repairModel.id).toBe(repair)
+    // Slot ≠ gen model, or the test passes vacuously on a workspace that
+    // points repair at the same model the gens already run.
+    expect(repair).not.toBe(ir.model.id)
+    expect(ir.repairModel.max_tokens).toBeGreaterThan(0)
+  })
+
+  it('omits repairModel when the workspace declares none (IR byte-identical)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cambium-red176-norepair-'))
+    const configDir = join(dir, 'packages', 'cambium', 'app', 'config')
+    execSync(`mkdir -p ${configDir}`)
+    writeFileSync(join(configDir, 'models.rb'), `default "omlx:declared-default"`)
+
+    const gen = join(dir, 'g.cmb.rb')
+    writeFileSync(gen, `
+class NoRepairGen < GenModel
+  model :default
+  system "inline"
+  returns AnalysisReport
+  def analyze(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`.trim())
+
+    const repoRoot = process.cwd()
+    const stdout = execSync(
+      `ruby ${repoRoot}/ruby/cambium/compile.rb ${gen} --method analyze --arg ${repoRoot}/${FIXTURE_ARG}`,
+      { encoding: 'utf8', cwd: dir },
+    )
+    const ir = JSON.parse(stdout)
+    expect(ir.model.id).toBe('omlx:declared-default')
+    expect(Object.keys(ir)).not.toContain('repairModel')
+  })
+
+  it('refuses `model :repair` — repair is a slot, not an alias', () => {
+    const gen = writeGen(`
+class RepairAsAliasGen < GenModel
+  model :repair
+  system "inline"
+  returns AnalysisReport
+  def analyze(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`)
+    const stderr = compileExpectError(gen, 'analyze', FIXTURE_ARG)
+    expect(stderr).toMatch(/unknown model alias :repair/)
+  })
+
+  it('rejects an unknown kwarg or a duplicate on the repair slot', () => {
+    const build = (tag: string, modelsRb: string) => {
+      const dir = mkdtempSync(join(tmpdir(), `cambium-red176-${tag}-`))
+      const configDir = join(dir, 'packages', 'cambium', 'app', 'config')
+      execSync(`mkdir -p ${configDir}`)
+      writeFileSync(join(configDir, 'models.rb'), modelsRb.trim())
+      const gen = join(dir, 'g.cmb.rb')
+      writeFileSync(gen, `
+class ${tag === 'dup' ? 'DupRepairGen' : 'KwargRepairGen'} < GenModel
+  model "omlx:some-model"
+  system "inline"
+  returns AnalysisReport
+  def analyze(x)
+    generate "x" do
+      returns AnalysisReport
+    end
+  end
+end
+`.trim())
+      const repoRoot = process.cwd()
+      return compileExpectError(gen, 'analyze', `${repoRoot}/${FIXTURE_ARG}`, dir)
+    }
+
+    expect(build('kwarg', `default "omlx:a"\nrepair "omlx:b", effort: "low"`))
+      .toMatch(/repair: unknown kwargs: effort/)
+    expect(build('dup', `default "omlx:a"\nrepair "omlx:b"\nrepair "omlx:c"`))
+      .toMatch(/duplicate repair slot in models\.rb/)
+  })
 })

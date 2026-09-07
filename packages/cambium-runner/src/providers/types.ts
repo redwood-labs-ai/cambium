@@ -152,6 +152,11 @@ export type GenerateWithToolsOpts = {
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
   documents?: any[];
   modelOptions?: { disable_thinking?: boolean };
+  /** #228: the cacheable head of the first user message. Identical contract
+   *  to `GenerateTextOpts.cachedPrefix` — providers without
+   *  `supportsPromptCacheControl` never see it, because the runner folds it
+   *  back into that message before dispatch. */
+  cachedPrefix?: string;
 };
 
 export interface CambiumProvider {
@@ -164,11 +169,22 @@ export interface CambiumProvider {
    *  document never gets silently JSON-stringified into a prompt. */
   supportsDocuments: boolean;
   /** Whether this provider can mark a portion of the user prompt with a
-   *  prompt-cache breakpoint. When true, the runner forwards
-   *  `GenerateTextOpts.cachedPrefix` to the provider unchanged. When false
-   *  (or absent), the runner concatenates `cachedPrefix` into `prompt`
-   *  before dispatch so the provider sees a single combined string and the
-   *  caller's grounded prompts retain their pre-split ordering. */
+   *  prompt-cache breakpoint. When true, the runner forwards **both**
+   *  `GenerateTextOpts.cachedPrefix` *and* `GenerateWithToolsOpts.cachedPrefix`
+   *  to the provider unchanged. When false (or absent), the runner folds
+   *  `cachedPrefix` back in before dispatch — into `prompt` on the
+   *  single-turn path, into the FIRST user message on the agentic path —
+   *  so the provider always sees a single combined string and the caller's
+   *  grounded prompts retain their pre-split ordering.
+   *
+   *  **The agentic half of that contract is new as of this release (#228,
+   *  DEC-009).** This flag previously gated `GenerateTextOpts.cachedPrefix`
+   *  only. A custom provider that sets it and consumes `cachedPrefix` in
+   *  `generateText` but NOT in `generateWithTools` will silently drop the
+   *  prefix — the whole document and context payload — on every agentic
+   *  run: no error, no trace signal. If you set this flag, consume
+   *  `cachedPrefix` in both methods. See `COMPATIBILITY.md` § Behavior
+   *  register. */
   supportsPromptCacheControl?: boolean;
   /** Optional context appended to the thrown error when a fetch to this
    *  provider fails (the "check CAMBIUM_OMLX_BASEURL…" hint). */

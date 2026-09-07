@@ -194,4 +194,131 @@ Quirky = "app/gens/../gens/foo.cmb.rb"
       join(tmp, 'app/gens/foo.cmb.rb'),
     );
   });
+
+  // ── #195: precompiled catalog resolution ───────────────────────────
+
+  function writeIr(relPath: string, body = '{"analyze":{"version":"0.2"}}') {
+    const abs = join(tmp, relPath);
+    const dir = abs.substring(0, abs.lastIndexOf('/'));
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(abs, body);
+  }
+
+  describe('#195 precompiled: { precompiled: true } — sibling artifact resolution', () => {
+    it('resolves each gen entry to its sibling .ir.json without requiring the .cmb.rb to exist', () => {
+      writeGenfile(`
+[exports.gens]
+ResumeParser = "app/gens/resume_parser.cmb.rb"
+`);
+      writeIr('app/gens/resume_parser.ir.json');
+      const catalog = loadGenCatalog(tmp, { precompiled: true });
+      const entry = catalog.entries.get('ResumeParser')!;
+      expect(entry.irPath).toBe(join(tmp, 'app/gens/resume_parser.ir.json'));
+      // The declared .cmb.rb need not exist on disk in precompiled mode.
+      expect(entry.genFilePath).toBe(join(tmp, 'app/gens/resume_parser.cmb.rb'));
+    });
+
+    it('a .cmb.rb catalog value that DOES exist still resolves to the sibling artifact', () => {
+      writeGen('app/gens/foo.cmb.rb');
+      writeGenfile(`
+[exports.gens]
+Foo = "app/gens/foo.cmb.rb"
+`);
+      writeIr('app/gens/foo.ir.json');
+      const catalog = loadGenCatalog(tmp, { precompiled: true });
+      expect(catalog.entries.get('Foo')!.irPath).toBe(join(tmp, 'app/gens/foo.ir.json'));
+    });
+
+    it('a `.ir.json` catalog value is still rejected — the catalog names gens, not files', () => {
+      writeGenfile(`
+[exports.gens]
+Bad = "app/gens/foo.ir.json"
+`);
+      expect(() => loadGenCatalog(tmp, { precompiled: true })).toThrow(/must end.*\.cmb\.rb/);
+    });
+
+    it('lists ALL missing artifacts in a single error, not just the first', () => {
+      writeGenfile(`
+[exports.gens]
+ResumeParser = "app/gens/resume_parser.cmb.rb"
+CandidateSummary = "app/gens/candidate_summary.cmb.rb"
+`);
+      // Neither artifact written.
+      let thrown: Error | undefined;
+      try {
+        loadGenCatalog(tmp, { precompiled: true });
+      } catch (e: any) {
+        thrown = e;
+      }
+      expect(thrown).toBeDefined();
+      expect(thrown!.message).toMatch(/ResumeParser/);
+      expect(thrown!.message).toMatch(/CandidateSummary/);
+      expect(thrown!.message).toMatch(/resume_parser\.ir\.json/);
+      expect(thrown!.message).toMatch(/candidate_summary\.ir\.json/);
+    });
+
+    it('refuses [exports.pipelines] entries with the DEC-001 wording', () => {
+      writeGenfile(`
+[exports.gens]
+Foo = "app/gens/foo.cmb.rb"
+
+[exports.pipelines]
+MyPipeline = "app/pipelines/my_pipeline.pipeline.rb"
+`);
+      writeIr('app/gens/foo.ir.json');
+      expect(() => loadGenCatalog(tmp, { precompiled: true })).toThrow(
+        /\[exports\.pipelines\].*MyPipeline.*need Ruby at run time \(pipeline\)/s,
+      );
+    });
+
+    it('a zero-arg call is byte-identical to before #195 (no precompiled resolution)', () => {
+      writeGen('app/gens/foo.cmb.rb');
+      writeGenfile(`
+[exports.gens]
+Foo = "app/gens/foo.cmb.rb"
+`);
+      const catalog = loadGenCatalog(tmp);
+      expect(catalog.entries.get('Foo')).toEqual({
+        name: 'Foo',
+        genFilePath: join(tmp, 'app/gens/foo.cmb.rb'),
+        kind: 'gen',
+      });
+    });
+  });
+
+  describe('#195 precompiled: { irDir } — flat-by-basename resolution', () => {
+    it('resolves each gen entry to <irDir>/<basename>.ir.json, implying precompiled', () => {
+      writeGenfile(`
+[exports.gens]
+ResumeParser = "app/gens/resume_parser.cmb.rb"
+`);
+      const irDir = join(tmp, 'dist/ir');
+      mkdirSync(irDir, { recursive: true });
+      writeFileSync(join(irDir, 'resume_parser.ir.json'), '{"analyze":{"version":"0.2"}}');
+      const catalog = loadGenCatalog(tmp, { irDir });
+      expect(catalog.entries.get('ResumeParser')!.irPath).toBe(join(irDir, 'resume_parser.ir.json'));
+    });
+
+    it('irDir wins when both precompiled and irDir are set', () => {
+      writeGenfile(`
+[exports.gens]
+Foo = "app/gens/foo.cmb.rb"
+`);
+      // Sibling artifact deliberately absent — only the irDir copy exists.
+      const irDir = join(tmp, 'dist/ir');
+      mkdirSync(irDir, { recursive: true });
+      writeFileSync(join(irDir, 'foo.ir.json'), '{"analyze":{"version":"0.2"}}');
+      const catalog = loadGenCatalog(tmp, { precompiled: true, irDir });
+      expect(catalog.entries.get('Foo')!.irPath).toBe(join(irDir, 'foo.ir.json'));
+    });
+
+    it('missing artifact under irDir fails boot with the irDir path', () => {
+      writeGenfile(`
+[exports.gens]
+Foo = "app/gens/foo.cmb.rb"
+`);
+      const irDir = join(tmp, 'dist/ir');
+      expect(() => loadGenCatalog(tmp, { irDir })).toThrow(/Foo.*dist\/ir\/foo\.ir\.json/s);
+    });
+  });
 });

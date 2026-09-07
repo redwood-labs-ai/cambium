@@ -15,7 +15,37 @@ Control the execution strategy for `generate` blocks.
 - Every tool call MUST be logged in the trace with typed I/O and timing.
 - The loop MUST terminate when the model produces content without tool calls (final output).
 - The loop MUST be capped by `constrain :budget, max_tool_calls: N` (default: 20).
+- The loop MUST NOT re-execute an exact-duplicate tool call (same tool name + same
+  arguments) that already returned this run (RED-184). The re-dispatch is skipped and
+  the model is handed a `duplicate: true` result telling it the call already ran;
+  the call still counts against `max_tool_calls`, so this is a faster trigger for
+  the budget backstop, not a replacement for it. Only successful dispatches are
+  remembered — a call that threw MUST still be retriable, since the throw describes
+  that attempt and not the call. Exact match only — a duplicate `read_file` after a
+  write to that file returns the pre-write result.
 - The final output goes through the normal validate/repair pipeline.
+- The user prompt MUST be split into a cacheable prefix (DOCUMENT + non-primary
+  context sections) and the per-call instruction, whenever the prefix clears
+  `MIN_CACHE_PREFIX_CHARS` (~4 KB) (#228). The agentic prefix deliberately does
+  **not** carry the single-turn path's `OUTPUT_JSON_TEMPLATE` block: the
+  pre-#228 agentic prompt never had one, and #228 is a cost fix that adds no
+  prompt content (DEC-008). Unlike the single-turn path, the split is
+  **size-gated only** — `grounded_in` is not required, because an agentic prefix
+  is re-sent on every turn and the cache write pays for itself from turn 2 onward
+  (a gen that answers on turn 1 pays the write without a read). Providers that
+  cannot mark a prompt-cache breakpoint never see the split:
+  the runner folds the prefix back into the first user message as
+  `<prompt>\n\n<prefix>`, so oMLX/Ollama requests are unchanged.
+- On Anthropic the loop MUST request the API's **automatic** cache breakpoint (a
+  top-level `cache_control` field) rather than placing a rotating marker itself,
+  and MUST keep explicit block-level markers at three or fewer — `system`,
+  `tools[last]`, and the prefix. Anthropic's ceiling is four, the automatic
+  breakpoint consumes one, and a fifth explicit marker is an HTTP 400 on every
+  turn. See [[N - Model Identifiers]] § Anthropic prompt caching.
+- A fan-out MUST NOT prewarm an agentic branch (#228). Prewarm fires through the
+  single-turn path, which sends no tools; Anthropic builds cache prefixes
+  `tools` → `system` → `messages`, so a tools-less warm-up diverges at the first
+  level and writes an entry the branch can never read.
 
 ## Example
 
@@ -42,9 +72,18 @@ end
 ## How it works
 1. Model receives the task + tool definitions (OpenAI format)
 2. Model responds with tool calls (e.g., `calculator({ operation: "avg", operands: [...] })`)
-3. Runtime executes tool calls, returns results to the model
+3. Runtime executes tool calls, returns results to the model. An exact repeat of an
+   earlier call that succeeded (same tool + same args) is answered from memory instead
+   of re-dispatched (RED-184) — the reply says so and the model is told to change tack
+   or answer. A repeat of a call that failed is dispatched again.
 4. Model iterates until it produces the final JSON output
 5. Final output goes through validate → repair → correctors → signals/triggers
+
+The shared head of the first user message (document + context sections — no
+output template, per DEC-008) is assembled once, by the same helpers the
+single-turn path uses, and re-sent verbatim on every turn — so on a
+cache-capable provider it is written once and read on turns 2..N instead of
+re-billed each time (#228).
 
 ## When to use which mode
 
@@ -118,4 +157,6 @@ On the primary side: `writes_memory_via :SupportMemoryAgent`.
 - [[P - constrain]]
 - [[P - Memory]]
 - [[N - Agentic Transactions]]
+- [[N - Model Identifiers]] — Anthropic prompt caching, agentic breakpoint allocation
+- [[N - Orchestration Layer]] — fan-out cache prewarm (and why it skips agentic branches)
 - [[C - Trace (observability)]]

@@ -7,6 +7,7 @@
 
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadRunner } from './runner-freshness.mjs';
 
 // `cli/serve.mjs` lives next to `cli/cambium.mjs` and `ruby/` in the
 // `@redwood-labs/cambium` package, both in the monorepo and in any
@@ -30,6 +31,16 @@ Flags:
                          tcp://127.0.0.1:9000     (loopback, default form)
                          unix:///tmp/cambium.sock (Mac/Linux UDS)
                          pipe://cambium           (Windows named pipe)
+  --precompiled        Boot from each gen's sibling <gen>.ir.json artifact
+                       (what \`cambium compile --write\` / engine mode
+                       write) instead of spawning ruby compile.rb — no
+                       Ruby needed on PATH. [exports.pipelines] is refused
+                       (a Pipeline IR still needs Ruby per sub-gen).
+  --ir-dir <dir>       Like --precompiled, but every artifact lives flat
+                       under <dir>/<basename>.ir.json (what
+                       \`cambium compile --out-dir <dir>\` writes) instead
+                       of a sibling of each gen's source. Implies
+                       --precompiled; wins when both are passed.
   --allow-remote       Allow non-loopback tcp:// binds. The runner is
                        unauthenticated in v1; only pass this when the
                        bind address is isolated by the orchestrator.
@@ -50,6 +61,8 @@ Flags:
 Examples:
   cambium serve --workspace . --bind tcp://127.0.0.1:9000
   cambium serve --workspace ../redwood-ats/cambium --bind unix:///tmp/cambium.sock
+  cambium serve --workspace . --precompiled --bind tcp://127.0.0.1:9000
+  cambium serve --workspace . --ir-dir dist/ir --bind tcp://127.0.0.1:9000
 `);
   process.exit(2);
 }
@@ -58,6 +71,8 @@ export async function runServeCli(args) {
   let workspace = '.';
   let bindUri = null;
   let allowRemote = false;
+  let precompiled = false;
+  let irDir; // undefined → sibling-artifact resolution (or Ruby compile-at-boot)
   let maxInflight; // undefined → unlimited
   let runTimeoutMs; // undefined → unlimited
   let shutdownTimeoutMs; // undefined → server default (30s)
@@ -66,6 +81,8 @@ export async function runServeCli(args) {
     const a = args[i];
     if (a === '--workspace') workspace = args[++i];
     else if (a === '--bind') bindUri = args[++i];
+    else if (a === '--precompiled') precompiled = true;
+    else if (a === '--ir-dir') irDir = args[++i];
     else if (a === '--allow-remote') allowRemote = true;
     else if (a === '--max-inflight') {
       const raw = args[++i];
@@ -99,7 +116,7 @@ export async function runServeCli(args) {
     usage('Missing --bind.');
   }
 
-  const { runServe, parseBind } = await import('@redwood-labs/cambium-runner');
+  const { runServe, parseBind } = await loadRunner();
 
   let bind;
   try {
@@ -113,6 +130,9 @@ export async function runServeCli(args) {
     workspaceDir: resolve(workspace),
     bind,
     compileRb: COMPILE_RB,
+    // --ir-dir is resolved against cwd, same as --workspace.
+    precompiled,
+    irDir: irDir === undefined ? undefined : resolve(irDir),
     maxInflight,
     runTimeoutMs,
     shutdownTimeoutMs,

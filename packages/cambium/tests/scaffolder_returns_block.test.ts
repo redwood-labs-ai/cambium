@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -56,6 +56,40 @@ describe('RED-419 scaffolder defaults to returns do (STEP-005)', () => {
       description: 'one-paragraph summary',
     });
     expect(ir.returnSchemaId).toBeUndefined();
+  });
+
+  it('#205 (DEC-005/A-002): a scaffolded gen edited to add fields the default mock lacks runs --mock to exit 0', () => {
+    // Flat [package] workspace, NO src/contracts.ts, NO [types] section at
+    // all — the shape RED-419's "one file, run it" promise is about, and
+    // (A-002) the shape that used to crash `cambium run` with
+    // ERR_MODULE_NOT_FOUND before Generate ever ran.
+    writeFileSync(join(scratch, 'Genfile.toml'), `[package]\nname = "scaffoldtest"\nversion = "0.0.0"\n`);
+    const r = runCli(['new', 'agent', 'PriceWatcher']);
+    expect(r.status, (r.stderr ?? '') + (r.stdout ?? '')).toBe(0);
+
+    const genPath = join(scratch, 'app', 'gens', 'price_watcher.cmb.rb');
+    const body = readFileSync(genPath, 'utf8');
+    // Add fields the default mock payload ({summary, metrics, key_facts})
+    // lacks — the ticket's headline case for the schema-derived mock.
+    const edited = body.replace(
+      '    field :key_points, [String]\n  end',
+      '    field :key_points, [String]\n    field :score, Float\n    field :tags, [String]\n  end',
+    );
+    expect(edited).not.toBe(body);
+    writeFileSync(genPath, edited);
+
+    mkdirSync(join(scratch, 'examples', 'fixtures'), { recursive: true });
+    const fixturePath = join(scratch, 'examples', 'fixtures', 'price.txt');
+    writeFileSync(fixturePath, 'BTC is up 3% today.\n');
+
+    const result = runCli(['run', genPath, '--method', 'analyze', '--arg', fixturePath, '--mock']);
+    expect(result.status, (result.stderr ?? '') + (result.stdout ?? '')).toBe(0);
+
+    const output = JSON.parse(result.stdout);
+    expect(output.summary).toBe('mock summary');
+    expect(output.key_points).toEqual(['mock key_points']);
+    expect(output.score).toBe(0);
+    expect(output.tags).toEqual(['mock tags']);
   });
 
   it('engine-mode `cambium new agent` also emits a returns do block', () => {

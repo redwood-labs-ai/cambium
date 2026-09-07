@@ -30,13 +30,13 @@ A trace MUST include:
 | Type | When | Key meta |
 |---|---|---|
 | `SecurityCheck` | Startup; before any generation. Validates declared tools against the gen's `security` policy. | `tools_checked`, `policy`, `packs` (pack names that contributed slots, RED-214) |
-| `Generate` | Single-turn model call. | `prompt`, `raw`, `usage`, `model_used` (may differ from `ir.model.id` when a fallback ran), `output_ceiling?` (RED-174; see below) |
+| `Generate` | Single-turn model call. | `prompt`, `raw`, `usage`, `model_used` (may differ from `ir.model.id` when a fallback ran), `cache_prefix` (#182; see below), `output_ceiling?` (RED-174; see below) |
 | `ModelFallback` | Emitted BEFORE each fallback attempt when the primary (or a preceding fallback) failed with a transient error. Transient set (RED-421, DEC-A/DEC-C/DEC-D): `ProviderHttpError` status 5xx / 429 / 408 / 425, or `ProviderConnectionError` status 0 (connection-level failure — ECONNREFUSED / DNS / TLS — DEC-D; built-in providers emit this automatically). One step per fallback taken; never emitted when the primary succeeds, when the error is a deterministic HTTP status (any other 4xx), or when the error is untyped from a CUSTOM provider (a plain `Error`/`TypeError`, not a `ProviderHttpError` subclass — deterministic by DEC-A). Always `ok: true` (the step records the decision to fall back, not the outcome). | `attempted` (the model id that failed), `fallback_to` (the id being tried next), `error_class` (always `"transient"` at the emit site — the loop only falls back on transient errors; the `"deterministic"` arm is a defensive label), `reason` (the first 300 chars of the original error message) |
 | `ReplayResume` | Replaces `Generate` on a replayed run (RED-312). Emitted in lieu of any model call: the post-Generate candidate was seeded from a prior run's output (or `--from-step` checkpoint) and execution falls through to the cheap deterministic tail. No tokens spent here. `ok: false` only if the seeded candidate was `undefined`. | `parent_run_id`, `from_step` (`output` or a step type), `mode` |
-| `AgenticTurn` | One iteration of the agentic loop. | `turn`, `tool_calls`, `results`, `usage` |
+| `AgenticTurn` | One iteration of the agentic loop. | `turn`, `tool_calls`, `results`, `usage`. A re-issued exact-duplicate call gets a `results[]` entry with `duplicate: true` and no `ms` — the tool was not dispatched, the model was handed a synthetic "you already tried this" result (RED-184). It still counts toward `total_tool_calls`. Only calls that returned are remembered, so a repeat of a call that threw dispatches again and records a normal `ok: false` entry rather than replaying the error as a duplicate. |
 | `ToolCall` | A single tool dispatch. | `tool`, `operation`, `input`, `output` |
 | `Validate` | AJV schema validation. First-attempt successes are elided from the trace; only failures and post-repair successes are pushed. | `errors` on failure |
-| `Repair` | Repair-loop iteration. Also emitted by the corrector-feedback and grounding paths (one extra attempt each). | `attempt`, `strategy`, `errors_before`, `errors_after`, `output_ceiling?` (RED-174) |
+| `Repair` | Repair-loop iteration. Also emitted by the corrector-feedback and grounding paths (one extra attempt each). | `attempt`, `model_used` (the gen's model, or the RED-176 repair slot when one is declared), `max_tokens` (RED-176), `source_chars` / `source_docs` / `source_doc_bytes` (RED-175: what this pass was handed — characters of extracted source text, and the count and decoded size of any native document envelopes. All three `0` = context-free structural pass; `source_chars` alone is not the discriminator, because a semantic pass over native PDF/image input has no extracted text and reports `source_chars: 0` with a non-zero `source_docs`), `strategy`, `errors_before`, `errors_after`, `output_ceiling?` (RED-174) |
 | `ValidateAfterRepair` | AJV re-validation after a schema-failure repair attempt. | `errors` on failure |
 | `ValidateAfterCorrect` | AJV re-validation after a corrector that returned `corrected: true` modified the output. | `errors` on failure |
 | `ValidateAfterCorrectorRepair` | AJV re-validation after a corrector-feedback repair attempt (RED-275). Only emitted when a corrector returned `severity: 'error'` issues that fed back into a repair call. | `errors` on failure |
@@ -47,11 +47,11 @@ A trace MUST include:
 | `ValidateAfterGrounding` | AJV re-validation after a grounding-failure repair attempt (citation errors fed back into repair). | `errors` on failure |
 | `ExtractSignals` / `Trigger` | Signal extraction + trigger evaluation (see [[C - Signals, State, and Triggers]]). |
 | `ActionCall` | A trigger's `action :name` side-effect handler invocation (RED-212). | `trigger`, `action`, `input`, `output`, `target` |
-| `GroundingCheck` | Citation verification. | `citations_verified`, `failures` |
-| `GroundingFieldValueCheck` | Value-level grounding cross-check (RED-392), emitted when `grounded_in verify: :field_values` is declared. Walks the output tree and verifies each leaf value (strings/numbers; booleans + null + `citations` fields skipped) appears in the grounding document via normalized substring match. `ok: false` when any field-value error is found — those errors feed one repair attempt. | `passed`, `failed`, `skipped`, `totalChecked`, `details` (the failed-field list) |
+| `GroundingCheck` | Citation verification. Each entry in `citationResult.passed[]` carries `matched_via: "document" \| "derived"` — `"derived"` means the quote verified only against the format-aware view of the source (#169). | `citations_verified`, `failures`, `format?` + `derived?` (both present only when `grounded_in format:` is set — the format string, and whether a derived view was actually produced; invalid JSON derives nothing and is not a failure) |
+| `GroundingFieldValueCheck` | Value-level grounding cross-check (RED-392), emitted when `grounded_in verify: :field_values` is declared. Walks the output tree and verifies each leaf value (strings/numbers; booleans + null + `citations` fields skipped) appears in the grounding document via normalized substring match. `ok: false` when any field-value error is found — those errors feed one repair attempt. Entries in `fieldValuesResult.passed[]` carry `matched_via` (#169), as on `GroundingCheck`. | `passed`, `failed`, `skipped`, `totalChecked`, `details` (the failed-field list), `format?` + `derived?` (#169) |
 | `ValidateAfterGroundingValues` | AJV re-validation after a `field_values` grounding repair attempt (RED-392). | `errors` on failure |
-| `GroundingCheckAfterRepair` | Emitted after a grounding-repair attempt succeeds schema revalidation — re-runs the citations corrector to verify the repair actually healed the fabricated quotes (RED-398). `ok: true` when all citations now pass; `ok: false` when errors persist (accepted anyway — one repair attempt). | `passed`, `failed`, `missing`, `totalChecked`, `details` |
-| `GroundingFieldValueCheckAfterRepair` | Emitted after a field-values-grounding-repair attempt succeeds schema revalidation — re-runs the `field_values` corrector to verify the repair actually healed the ungrounded values (RED-398). `ok: true` when all values now pass; `ok: false` when errors persist. | `passed`, `failed`, `skipped`, `totalChecked`, `details` |
+| `GroundingCheckAfterRepair` | Emitted after a grounding-repair attempt succeeds schema revalidation — re-runs the citations corrector to verify the repair actually healed the fabricated quotes (RED-398). `ok: true` only when every citation still present passes *and* none were removed. `ok: false` when errors persist (accepted anyway — one repair attempt) **or** when the repaired output carries fewer citations than the pre-repair output — that case fails the run (RED-175). | `citations_before` / `citations_after` / `deleted_by_repair` (RED-175), `passed`, `failed`, `missing`, `totalChecked`, `details`, `format?` + `derived?` (#169) |
+| `GroundingFieldValueCheckAfterRepair` | Emitted after a field-values-grounding-repair attempt succeeds schema revalidation — re-runs the `field_values` corrector to verify the repair actually healed the ungrounded values (RED-398). `ok: true` when all values now pass and none were removed; `ok: false` when errors persist, or when the repaired output carries fewer grounded values (`deleted_by_repair: true`, run fails — RED-175). | `values_before` / `values_after` / `deleted_by_repair` (RED-175), `passed`, `failed`, `skipped`, `totalChecked`, `details`, `format?` + `derived?` (#169) |
 | `GroundingMissing` | Pre-flight strict-contract failure: `grounded_in :source` is declared but `ir.context[source]` resolved to empty/missing content. Emitted BEFORE any LLM dispatch; the run returns `ok: false` immediately. Mock-mode (`CAMBIUM_ALLOW_MOCK=1`) is exempt — framework-plumbing tests that chain mock outputs through sub-gens get the legacy lax behavior. Always `ok: false`. | `errors[0].source` (the grounded_in source name), `errors[0].message` (hint pointing to `--arg` or pipeline `with:` binding) |
 | `DocumentExtractionFailed` | Pre-flight failure: native-document extraction from `ir.context` envelopes threw (malformed/oversized document input, unsupported provider) before any LLM dispatch; the run returns `ok: false` immediately with `errorMessage: "Document extraction failed: …"`. Always `ok: false`. | `errors: [{ message }]` |
 | `BudgetParseFailed` | Pre-flight failure: `parseBudget` rejected a malformed budget value — a bad `max_duration` string, or a non-positive-integer `max_tokens`/`max_calls`/`max_tool_calls` — before any LLM dispatch. Fail-closed (a malformed cap can never silently degrade to "no limit"; reachable via `cambium serve`'s untrusted IR). The run returns `ok: false` immediately with `errorMessage: "Budget config invalid: …"`. Always `ok: false`. | `errors: [{ message }]` |
@@ -69,7 +69,7 @@ A trace MUST include:
 | `tool.exec.unsandboxed` | Dispatch-time event when `runtime: :native` runs `execute_code` without isolation (explicit sharp-knife opt-in via `unsafe_native: true`; RED-249). Also surfaces as a stderr warning once per run. | `tool`, `deprecated: true`, `explicit_opt_in` (`true` when the gen used `unsafe_native: true`; `false` when emitted from a compiler-bypassing hand-crafted IR) |
 | `PipelineRun` | Top-level wrapper for a pipeline run (RED-381). Replaces the gen-side `Generate`/`steps[]` shape — pipelines have `operators[]` instead. `ok: false` when any operator failed or the budget cap tripped; `error` carries a human-readable summary. | `name`, `entry`, `run_id`, `version`, `started_at`, `finished_at`, `meta: { total_tokens, total_tool_calls, operators_executed, budget_cap_tokens?, budget_cap_tool_calls? }`, `operators[]` (nested step entries), `log_events?`, `fired_by?`, `error?` |
 | `PipelineStep` | One sequential step in a pipeline. Wraps the sub-gen's full trace. `ok: false` when the sub-gen failed validation/repair or threw. | `id`, `gen`, `method`, `started_at`, `finished_at`, `meta: { tokens, tool_calls }`, `output` (the step's output value — same as flows into `stepResults`; persisted for pipeline replay, RED-385 Phase A), `trace` (the full nested sub-gen trace — has its own `steps[]`), `error?` |
-| `PipelineFanOut` | Parallel-branch operator in a pipeline (RED-381 Phase C). `meta.threshold` carries the resolved require-rule (`"all"` or `"at_least:N"`); `meta.on_branch_failure` carries the policy mode. `branches[]` has one entry per dispatched branch with `branch_id`, `ok`, `output` (per-branch output, ok branches only — RED-385 Phase A), `trace` (sub-gen trace), and `error?` on failures. | `id`, `collect_into`, `meta: { succeeded, failed, threshold, on_branch_failure }`, `output` (merged branch-output array, persisted for pipeline replay — RED-385 Phase A), `branches[]`. `meta.prewarm` is present whenever the fan-out is eligible for cache prewarm (concurrency > 1, multiple branches, not `--mock`, not opted out): `{ groups, fired, failed, tokens }` — `groups` is the number of distinct (model tier × prefix) groups that had enough grounded content to warm (zero means all branches were ungrounded or sub-floor and no warm-up calls were sent), warm-ups that completed, warm-ups that threw (swallowed; those branches ran cold), and the warm-up token spend (also folded into the fan-out's token rollup). |
+| `PipelineFanOut` | Parallel-branch operator in a pipeline (RED-381 Phase C). `meta.threshold` carries the resolved require-rule (`"all"` or `"at_least:N"`); `meta.on_branch_failure` carries the policy mode. `branches[]` has one entry per dispatched branch with `branch_id`, `ok`, `output` (per-branch output, ok branches only — RED-385 Phase A), `trace` (sub-gen trace), and `error?` on failures. | `id`, `collect_into`, `meta: { succeeded, failed, threshold, on_branch_failure }`, `output` (merged branch-output array, persisted for pipeline replay — RED-385 Phase A), `branches[]`. `meta.prewarm` is present whenever the fan-out is eligible for cache prewarm (concurrency > 1, multiple branches, not `--mock`, not opted out): `{ groups, fired, failed, tokens, skipped? }` — `groups` is the number of distinct (model tier × prefix) groups found (`0` = every branch was ungrounded or sub-floor, so no warm-up calls were sent; `groups` equal to the number of cacheable branches = nothing was shared, `skipped: "no-shared-prefix"` and again no calls were sent — RED-183), `fired`/`failed` are warm-ups that completed / threw (threw = swallowed; those branches ran cold), and `tokens` is the warm-up token spend (also folded into the fan-out's token rollup). |
 | `PipelineBranchOn` | Conditional-routing operator (RED-381 Phase D). Records which branch fired. `fired_branch` is the matched `on` values array, or `null` if the `default` block fired. Nested operator traces appear under `operators[]`. | `signal` (the IR bind ref), `signal_value` (the resolved string), `fired_branch` (or null), `default_fired` (bool), `operators[]`, `meta: { total_tokens, total_tool_calls, operators_executed }`, `error?` |
 | `PipelineBudgetExceeded` | Pipeline-level cap trip (RED-381 Phase B.2). Fires before the next operator dispatches (token check projects from the sub-gen's `model.max_tokens`) or after a step completes (tool-call check is post-spend). The pipeline terminates with `ok: false, failureKind: 'budget'`. | `id` (the operator that would have run / just ran), `metric` (`tokens` \| `tool_calls`), `cap`, `used`, `projected?` (token path only) |
 
@@ -90,6 +90,35 @@ Events emitted under `type: "tool.*"` alongside the `ToolCall` step whenever the
 
 ## Pipeline runs (RED-381)
 
+### `cache_prefix` (#182)
+
+Present on every `Generate` step. `{ judged_chars, used, excluded_chars }` —
+the prompt-cache prefix decision, made observable.
+
+| key | meaning |
+|---|---|
+| `judged_chars` | Length of the prefix the floor gate judged, i.e. **with** any `exclude_from_prefix` applied. |
+| `used` | Whether the cached-prefix path was taken: eligibility (`grounded_in` on the single-turn path; waived on the agentic path) **and** `judged_chars >= 4096`. |
+| `excluded_chars` | How many bytes `exclude_from_prefix` removed from the prefix. `0` for every gen that declares none — which is the whole corpus by default. |
+
+The length that actually shipped is `judged_chars` when `used` is true, and
+`judged_chars + excluded_chars` when it is false — below the floor the
+exclusion is not applied at all, so the longer prefix goes on the wire (see
+[[P - GenModel]] § `exclude_from_prefix`). Derivable from the two fields, so
+there is no third one.
+
+**Why it exists.** Excluding a large key can drop the prefix below the cache
+floor and turn prefix caching *off* — the inverse of what the author asked
+for — and before #182 the decision reached no trace field at all. Cambium does
+not second-guess the trade-off (it is a legitimate one), so this is a signal,
+not a gate. When a declaration is specifically the reason caching went off
+(the prefix clears the floor without it and misses with it), the runner also
+writes one `[cambium] exclude_from_prefix turned prompt caching OFF …` line to
+stderr naming both lengths.
+
+Not emitted on `AgenticGenerate` — the agentic loop re-sends its prefix every
+turn, so the size gate is not the interesting variable there.
+
 ### `output_ceiling` (RED-174)
 
 Present on `Generate`, `Repair`, and `AgenticFinal` when the step stopped
@@ -109,12 +138,17 @@ JSON. Shape:
   so it can sharpen a diagnosis but never fail an otherwise-good run.
 - `declared: false` means the ceiling was the built-in 1200 default, not a
   value the gen set. The distinction is in the error text, because a user who
-  never wrote `max_tokens` has no reason to know 1200 exists.
+  never wrote `max_tokens` has no reason to know 1200 exists. When a repair
+  slot is declared, both the text and the `ceiling` value describe the repair
+  model — "the gen's declared `max_tokens`" would point the operator at a
+  limit that never applied (RED-176).
 
-A ceiling hit sets `failureKind: "output_ceiling"` (wire `error.kind:
-"output_ceiling"`) and **stops the repair loop**. Repair regenerates under the
-same `max_tokens` and truncates in the same place, so continuing would spend
-every remaining attempt on a wall it cannot move.
+A ceiling hit — on `Generate` or on a `Repair` step — sets `failureKind:
+"output_ceiling"` (wire `error.kind: "output_ceiling"`) and **stops the repair
+loop**. Repair regenerates under the same `max_tokens` and truncates in the same
+place, so continuing would spend every remaining attempt on a wall it cannot
+move. On a `Repair` step the ceiling, `model_used` and the error text all name
+the repair model (RED-176).
 
 A reported ceiling fails the step even when the fragment happens to parse:
 `extractJsonObject` slices to the last `}`, so a truncated response can yield a

@@ -11,6 +11,11 @@
       "temperature": 0.1,
       "max_tokens": 1200
     },
+    "repairModel": {
+      "id": "omlx:nvidia/nemotron-3-nano-4b",
+      "max_tokens": 16000,
+      "temperature": 0
+    },
     "system": "You are a precise question-answering agent. You have tools: web_search, web_extract, calculator, execute_code.\n\nSTRATEGY:\n1. Search once for the key information you need.\n2. If the search results contain the answer, produce your final output immediately.\n3. Only search again if the first search was insufficient. Do not repeat similar searches.\n4. Use calculator or execute_code for computation, not estimation.\n\nYour final answer must be SHORT — a number, a name, a date, or a comma-separated list. Never a paragraph.\n\nIMPORTANT: After gathering enough information, STOP calling tools and produce your final JSON output.",
     "mode": "agentic",
     "policies": {

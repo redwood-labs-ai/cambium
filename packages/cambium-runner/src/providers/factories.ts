@@ -105,7 +105,13 @@ export function openaiCompatible(config: OpenAICompatibleConfig): CambiumProvide
     async generateText(opts: GenerateTextOpts): Promise<GenerateResult> {
       const disableThinking = config.thinkingSuppression && !!opts.modelOptions?.disable_thinking;
       const systemContent = disableThinking ? `/no_think\n${opts.system}` : opts.system;
-      const userContent = disableThinking ? `${opts.prompt}\n/no_think` : opts.prompt;
+      // `?? ''` per AUD-R2-001: same template-literal coercion class as the
+      // handleGenerate sites — a nullish `prompt` would render the literal
+      // text "null" ahead of the /no_think token. Not reachable from the
+      // in-tree handlers (they normalize first), but this is one
+      // capability-flag change away from being a live path, and the branch
+      // that skips the template literal already passes the value through.
+      const userContent = disableThinking ? `${opts.prompt ?? ''}\n/no_think` : opts.prompt;
 
       const body: any = {
         model: toWire(opts.model),
@@ -260,8 +266,13 @@ export type AnthropicCompatibleConfig = {
   anthropicVersion?: string;
   modelName?: ModelNameTransform;
   errorLabel?: string;
-  /** Apply provider-level prompt caching (system block + last tool + last
-   *  document). Default true. */
+  /** Apply provider-level prompt caching. Default true. Covers every marker
+   *  `buildAnthropicMessagesRequest` emits: the system block, the last tool,
+   *  the last document, the cacheable user-prompt prefix, and — on the
+   *  agentic (tools) path — the top-level AUTOMATIC breakpoint (#228).
+   *  `false` turns all of them off, and also flips
+   *  `supportsPromptCacheControl` false so the runner flattens the prefix
+   *  upstream and this provider only ever sees a single string. */
   cache?: boolean;
 };
 
@@ -353,6 +364,7 @@ export function anthropicCompatible(config: AnthropicCompatibleConfig): CambiumP
         effort: opts.effort,
         cache: config.cache,
         documents: opts.documents ?? [],
+        cacheUserPrefix: opts.cachedPrefix,
       });
       const target = url();
       const h = headers();
