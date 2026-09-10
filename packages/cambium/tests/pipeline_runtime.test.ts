@@ -15,8 +15,16 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync, mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { readRunDir as sharedReadRunDir, tryReadRunDir, cleanupRunDir } from './helpers/run-dir.js';
+import { betterSqlite3Available } from './helpers/native-deps.js';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
+
+// `better-sqlite3` is an optionalDependency of @redwood-labs/cambium-runner
+// — a box without the native build must SKIP the :pipeline_run
+// memory-scope tests below (they read the sqlite bucket back / require a
+// successful run through it), not fail. See helpers/native-deps.test.ts
+// for the two-way proof this is a genuine probe, not a hardcoded skip.
+const DB_OK = await betterSqlite3Available();
 
 const REPO_ROOT = process.cwd();
 const CLI = join(REPO_ROOT, 'cli/cambium.mjs');
@@ -1088,7 +1096,7 @@ end
 
   // --- End-to-end runtime tests ---
 
-  it('sub-gen :pipeline_run decl runs with pipeline-authoritative strategy injected', () => {
+  it.skipIf(!DB_OK)('sub-gen :pipeline_run decl runs with pipeline-authoritative strategy injected', () => {
     // Pipeline declares the slot with strategy: :log; sub-gen declares
     // the slot bare (just name + scope). The runtime should inject
     // strategy: :log + the pipelineRunId into the memCtx so the bucket
@@ -1173,7 +1181,7 @@ end
     expect(result.stderr).toMatch(/pipeline didn't declare a matching slot/);
   });
 
-  it('parallel branches in fan_out + downstream step share the same pipeline_run bucket', () => {
+  it.skipIf(!DB_OK)('parallel branches in fan_out + downstream step share the same pipeline_run bucket', () => {
     // Branches each declare :pipeline_run memory; the downstream synthesize
     // step also declares it. All four sub-gens (2 branches + synthesize +
     // any retro writes) should land in the same bucket file.
@@ -1221,7 +1229,7 @@ end
     try { rmSync(runDir, { recursive: true, force: true }); } catch {}
   });
 
-  it('different pipeline runs get different :pipeline_run buckets (isolation)', () => {
+  it.skipIf(!DB_OK)('different pipeline runs get different :pipeline_run buckets (isolation)', () => {
     const recorderGen = `
 class Recorder < GenModel
   model "omlx:stub"

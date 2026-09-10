@@ -204,10 +204,25 @@ describe('WasmSubstrate (real — quickjs-emscripten)', () => {
       language: 'js',
       // Progressive allocation. A very small memory cap (16 MB) is
       // the minimum QuickJS accepts; fill it with a giant array.
-      code: 'const a = []; while(true) a.push(new Array(100000).fill("x"));',
+      //
+      // #244 CI incident (run 317): a 100_000-element per-iteration
+      // array needed ~10 loop iterations to clear the 16 MB cap —
+      // fine at ~980ms locally, but slow enough on the Forgejo
+      // runner's interpreter (nas-pi) to lose the race to the 5s wall
+      // clock, so the guest was stopped by the timeout handler, not
+      // the memory guard this test exists to prove. A single
+      // 5_000_000-element array (~40 MB) already exceeds the whole
+      // 16 MB budget on its own first allocation, so QuickJS's
+      // `setMemoryLimit` check fires inside one native allocation
+      // rather than after N interpreted loop iterations — the result
+      // no longer depends on interpreter speed. Measured locally:
+      // 25ms (vs. ~980ms before), consistent across repeated runs.
+      // `timeout: 10` (was 5) is margin against a genuinely slow or
+      // contended host, not the load-bearing part of the fix.
+      code: 'const a = []; while(true) a.push(new Array(5000000).fill("x"));',
       cpu: 1,
       memory: 16,
-      timeout: 5,
+      timeout: 10,
       network: 'none',
       filesystem: 'none',
       maxOutputBytes: 50_000,

@@ -4,7 +4,7 @@ import { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'no
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import Database from 'better-sqlite3';
+import { betterSqlite3Available } from './helpers/native-deps.js';
 
 /**
  * RED-215 phase 4: retro memory-agent runtime.
@@ -18,11 +18,18 @@ import Database from 'better-sqlite3';
  * Complements the phase-3 memory_runtime tests — those exercise the
  * trivial-default writer; phase 4 replaces the deferred stub with real
  * retro-agent invocation.
+ *
+ * `better-sqlite3` is an optionalDependency of @redwood-labs/cambium-runner
+ * — a box without the native build must SKIP this whole file (it reads
+ * bucket files back directly), not fail. See
+ * helpers/native-deps.test.ts for the two-way proof this is a genuine
+ * probe, not a hardcoded skip.
  */
 
 const FIXTURE_ARG = 'packages/cambium/examples/fixtures/incident.txt';
+const DB_OK = await betterSqlite3Available();
 
-describe('retro memory agent — spawn cambium run with --mock', () => {
+describe.skipIf(!DB_OK)('retro memory agent — spawn cambium run with --mock', () => {
   const sessionIds: string[] = [];
 
   afterEach(() => {
@@ -66,7 +73,7 @@ describe('retro memory agent — spawn cambium run with --mock', () => {
     };
   }
 
-  it('invokes the retro agent, lands one agent-tagged write, traces dropped writes', () => {
+  it('invokes the retro agent, lands one agent-tagged write, traces dropped writes', async () => {
     // Primary declares `memory :conversation` — matches the conventional
     // name the mockGenerate retro-agent output targets. We do NOT declare
     // :facts, so a hypothetical write to a non-existent slot would drop.
@@ -97,6 +104,7 @@ end
     expect(existsSync(bucket)).toBe(true);
 
     // The agent's write is visible on-disk and tagged with `agent:…`.
+    const { default: Database } = await import('better-sqlite3');
     const db = new Database(bucket, { readonly: true });
     const rows = db.prepare('SELECT * FROM entries').all() as any[];
     db.close();
@@ -114,7 +122,7 @@ end
     expect(agentWrite.meta.entry_id).toBe(1);
   }, 90_000);
 
-  it('traces the failure (agent not found) without breaking the primary', () => {
+  it('traces the failure (agent not found) without breaking the primary', async () => {
     const id = 'retro-missing-' + randomUUID();
     sessionIds.push(id);
 
@@ -151,13 +159,14 @@ end
     // through to the trivial-default writer either.
     const bucket = join('runs', 'memory', 'session', id, 'conversation.sqlite');
     expect(existsSync(bucket)).toBe(true);
+    const { default: Database } = await import('better-sqlite3');
     const db = new Database(bucket, { readonly: true });
     const rows = db.prepare('SELECT * FROM entries').all() as any[];
     db.close();
     expect(rows).toHaveLength(0);
   }, 90_000);
 
-  it('drops writes targeting an undeclared memory slot (best-effort, traced)', () => {
+  it('drops writes targeting an undeclared memory slot (best-effort, traced)', async () => {
     // Set up: primary declares `memory :other_slot`, but the mock retro
     // agent writes to `memory: 'conversation'`. That name is unknown
     // on this primary → drop with trace. Primary runs clean regardless.
@@ -200,6 +209,7 @@ end
     // The declared slot (other_slot) is intact but empty.
     const bucket = join('runs', 'memory', 'session', id, 'other_slot.sqlite');
     expect(existsSync(bucket)).toBe(true);
+    const { default: Database } = await import('better-sqlite3');
     const db = new Database(bucket, { readonly: true });
     const rows = db.prepare('SELECT * FROM entries').all() as any[];
     db.close();

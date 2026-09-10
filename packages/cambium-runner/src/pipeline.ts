@@ -19,10 +19,10 @@
 import { execSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { runGen, makeGenerateText, type IR, type IRInternal, type RunGenResult } from './runner.js';
+import { resolveCompileRb } from './compile-rb.js';
 import { buildGenSystem, buildCacheablePrefix, type GenerateTextFn } from './step-handlers.js';
 import { extractDocuments } from './documents.js';
 import { buildBuiltinRegistry } from './providers/builtins.js';
@@ -67,10 +67,10 @@ export interface RunPipelineFromIrOptions {
    *  computes this from its own location (`cli/cambium.mjs`) and passes
    *  it down so the path doesn't depend on `process.cwd()` — which is
    *  load-bearing for running pipelines from external `[package]`
-   *  workspaces. When omitted, the runner attempts a best-effort
-   *  resolution from `import.meta.url` (works in-tree + standard
-   *  node_modules layouts; throws a clear error if it can't find
-   *  compile.rb). */
+   *  workspaces. When omitted, falls back to `CAMBIUM_COMPILE_RB`, then
+   *  module-location resolution (#242: shared chain, see
+   *  `compile-rb.ts#resolveCompileRb`); throws a clear error if none of
+   *  those resolve to an existing file. */
   compileRb?: string;
   /** RED-385 Phase B: pipeline replay. When set, the runner resumes the
    *  operator DAG from the first incomplete operator in `priorTrace` (or
@@ -131,48 +131,6 @@ function assertSafeMethodName(method: string, opId: string): void {
         `prevent shell injection from hand-crafted IR.`,
     );
   }
-}
-
-/**
- * Best-effort resolution of `ruby/cambium/compile.rb` from this module's
- * location. Used when `runPipelineFromIr` is called without an explicit
- * `compileRb` option. Two known layouts:
- *
- *   1. In-tree development: pipeline.ts (or dist/pipeline.js) at
- *      `<repo>/packages/cambium-runner/{src,dist}/pipeline.{ts,js}`,
- *      compile.rb at `<repo>/ruby/cambium/compile.rb`. Up 3 + path.
- *
- *   2. Production npm install: runner at
- *      `<install>/node_modules/@redwood-labs/cambium-runner/dist/pipeline.js`,
- *      compile.rb shipped by the sibling `@redwood-labs/cambium` package.
- *      Resolve via createRequire(import.meta.url) so the lookup works
- *      with pnpm, yarn workspaces, or any other node_modules layout
- *      that follows the standard resolution algorithm.
- *
- * Returns null when neither candidate exists — caller throws a clear
- * "pass compileRb explicitly" error.
- */
-function resolveDefaultCompileRb(): string | null {
-  // Production: ask Node to resolve the cambium package's manifest,
-  // then walk to `ruby/cambium/compile.rb` next to it. Robust across
-  // package-manager layouts; depends only on standard resolution.
-  try {
-    const req = createRequire(import.meta.url);
-    const cambiumPkg = req.resolve('@redwood-labs/cambium/package.json');
-    const candidate = resolve(dirname(cambiumPkg), 'ruby/cambium/compile.rb');
-    if (existsSync(candidate)) return candidate;
-  } catch {
-    // Falls through to in-tree dev resolution below.
-  }
-
-  // In-tree dev: walk up from this module's location to the repo root.
-  // src/pipeline.ts → packages/cambium-runner/src/ → up 3 → repo root.
-  // dist/pipeline.js shares the same depth, so the same relative works.
-  const here = dirname(fileURLToPath(import.meta.url));
-  const dev = resolve(here, '../../..', 'ruby/cambium/compile.rb');
-  if (existsSync(dev)) return dev;
-
-  return null;
 }
 
 // ── RED-385 Phase B: pipeline replay planning ──────────────────────────
@@ -340,14 +298,20 @@ export async function runPipelineFromIr(
   // must NOT come from process.cwd() — that breaks any pipeline run
   // started from an external `[package]` workspace. CLI callers pass
   // an absolute path explicitly; library callers without one fall
-  // through to import.meta.url-anchored resolution.
-  const compileRb = opts.compileRb ?? resolveDefaultCompileRb();
+  // through to the shared chain (#242: explicit → CAMBIUM_COMPILE_RB →
+  // createRequire sibling → import.meta.url-anchored dev fallback).
+  const compileRb = resolveCompileRb(opts.compileRb);
   if (!compileRb || !existsSync(compileRb)) {
     throw new Error(
       `Pipeline runner could not locate ruby/cambium/compile.rb. ` +
         `Pass it explicitly via runPipelineFromIr({ compileRb: '/absolute/path' }) ` +
         `or ensure @redwood-labs/cambium is reachable via Node's module resolution.` +
-        (opts.compileRb ? ` (Provided path does not exist: ${opts.compileRb})` : ''),
+        // #242: name whichever path was actually resolved (explicit param,
+        // CAMBIUM_COMPILE_RB, or a stale createRequire/dev-fallback result),
+        // not just an explicitly-passed opts.compileRb — pipeline.ts didn't
+        // have the env-var link before this change, so this branch used to
+        // be unreachable for that source.
+        (compileRb ? ` (Provided path does not exist: ${compileRb})` : ''),
     );
   }
 

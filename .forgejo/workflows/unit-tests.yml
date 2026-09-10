@@ -1,0 +1,132 @@
+# Unit Test Suite — gate for the ~2200-test vitest suite under packages/*.
+#
+# #244: neither this workflow's siblings ran `npm test`. `golden-ir.yml`
+# only compiles the DSL corpus (50 fixtures); `ci-review.yml` builds the
+# runner and audits deps but never executes the suite. Everything outside
+# `packages/cambium/tests/golden/` — corrector, memory, pipeline, agentic,
+# trigger, and provider-registry tests among them — had never run on a PR;
+# "gates green" rested on the author having run it locally.
+#
+# Split into its own file rather than folded into golden-ir.yml or
+# ci-review.yml: this workflow's job is "does the suite pass", a distinct
+# concern from "does the IR corpus compile" or "does the LLM review approve
+# this diff", and each of those three files already has its own trigger
+# shape and failure semantics. A job runs its own checkout + setup steps
+# regardless of which file it lives in, so splitting costs nothing extra.
+#
+# `npm test` is `npm run build && vitest run` (see package.json) — it needs
+# the Ruby compiler (most tests compile a .cmb.rb fixture) and a runner
+# build (contracts + typebox), same toolchain as golden-ir.yml.
+#
+# Skip visibility (#244, #245): ~20 memory-backend tests skip via a genuine
+# `describe.skipIf`/`it.skipIf` resolvability probe when the optional
+# `better-sqlite3`/`sqlite-vec` native deps aren't installed — see the
+# "Memory tests skip..." CHANGELOG entry. This job installs no native deps
+# (CLAUDE.md: never add an npm dependency without explicit sign-off), so
+# those tests are expected to skip here. vitest's default reporter prints
+# a per-file skip count (e.g. "packages/cambium-runner/src/memory/backend.
+# test.ts (18 tests | 18 skipped)") and the run summary line ("Tests X
+# passed | Y skipped") unsuppressed in this step's log — that is the
+# distinguishing signal between "skipped as designed" and "silently
+# vanished" (a broken vitest `include` glob that matched zero files would
+# print "No test files found" and exit non-zero, not a quiet 0). Nothing
+# in this workflow pipes or filters that output.
+#
+# Node setup mirrors ci-review.yml / golden-ir.yml (Node 22). Ruby setup
+# also mirrors them: system Ruby from apt, avoiding ruby/setup-ruby@v1
+# because Forgejo's action mirror tracks upstream's runs.using=node24 bump
+# while the Forgejo runner currently maxes out at node20 — the action
+# setup would fail before any step runs. System Ruby from apt is enough
+# since Cambium's Ruby surface is stdlib-only (json, digest).
+#
+# Worker-pool size (runs 320, 323): the runner (nas-pi) is a small, shared
+# ARM board. Both of those runs had ZERO test failures and still exited
+# non-zero, on vitest's own internal worker->main "onTaskUpdate" progress
+# RPC timing out (a hardcoded 60s that vitest does not expose as an
+# option). Run 323 proves capping workers is not by itself sufficient:
+# VITEST_MAX_WORKERS='2' demonstrably took effect (summed test time
+# 433s -> 323s) and the error still fired. It is now '1', green on run
+# 326. The reason 2 was still too many: this suite's slow tests shell out
+# to `cambium run`, so each vitest worker is a worker plus a node and a
+# ruby subprocess — ~5-7 runnable processes on 4 cores at 2 workers, with
+# vitest's main loop (which must answer the RPC inside 60s) competing as
+# one more. Sizing this against nproc alone undercounts by roughly 3x.
+# vitest.config.ts carries the mechanism and the falsified hypotheses
+# with their evidence. Read it before changing this value.
+#
+# The "Runner resources" step below exists because the runner tells us
+# nothing about the hardware, and that gap sent this investigation at a
+# memory-pressure theory the very first measurement refuted: 4 cores,
+# aarch64, 16214 MB total / 13671 MB available, swap untouched. The box
+# is CPU-bound, not memory-bound. Keep the step: if this job fails here
+# again, its output is the evidence to start from rather than a theory.
+#
+# GitHub's hosted runners are dedicated (not shared) and have not shown
+# this failure, so this is Forgejo-only — .github/workflows/unit-tests.yml
+# is intentionally unchanged.
+
+name: Unit Test Suite
+
+on:
+  # `push` only for main so post-merge/direct commits still get a run;
+  # feature branches are covered once by `pull_request` (avoids the
+  # duplicate push+PR run for a branch with an open PR).
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # NOTE: no `cache: 'npm'` here, and no actions/cache steps below. The
+      # Forgejo runner advertises its cache server at a Docker address
+      # (172.19.0.3:42607) on the runner container's own network, while each
+      # job runs on an isolated per-job network with no route to it. Every
+      # cache call therefore hangs to timeout (see ci-review.yml's NOTE for
+      # the full breakdown). Do not reintroduce it here.
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Ruby
+        # Cambium's Ruby surface is stdlib-only (see CLAUDE.md
+        # "Dependency policy") — no gems, so no ruby-dev / native-
+        # extension toolchain is needed; plain `ruby` is enough and
+        # skips a large recommends chain. We avoid ruby/setup-ruby@v1
+        # because Forgejo's action mirror tracks upstream's runs.using
+        # bump to node24, while the Forgejo runner currently maxes out
+        # at node20 — the action setup fails before any step runs.
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ruby
+          ruby --version
+
+      # Diagnostics only — never fails the job. The Forgejo runner reports
+      # nothing about the box it schedules onto, which left the runs 320/323
+      # investigation guessing at core count and memory. See this file's
+      # header.
+      - name: Runner resources
+        continue-on-error: true
+        run: |
+          echo "nproc: $(nproc)"
+          uname -m
+          free -m || true
+          cat /sys/fs/cgroup/memory.max 2>/dev/null || true
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit --no-fund
+
+      - name: Run unit test suite
+        env:
+          # See the header comment above (runs 320, 323) and vitest.config.ts.
+          # '2' was tried in run 323 and was NOT sufficient — do not revert.
+          VITEST_MAX_WORKERS: '1'
+        run: npm test

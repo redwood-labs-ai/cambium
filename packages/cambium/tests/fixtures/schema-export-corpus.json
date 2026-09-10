@@ -1,0 +1,310 @@
+[
+  {
+    "desc": "baseline: literal `export const Name`",
+    "content": "export const Widget = Type.Object({});\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "baseline miss: a different name is not exported",
+    "content": "export const Widget = Type.Object({});\n",
+    "name": "Other",
+    "verdict": "absent",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "bare top-level `const Name` (no export keyword) — DEC-158-007's original fail-safe stance: treated as already-present too",
+    "content": "const Widget = Type.Object({});\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "AUD-206-01 / #210 repro: `const X = ...; export { X }` idiom",
+    "content": "const Widget = Type.Object({});\nexport { Widget };\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "export list naming the target among several others",
+    "content": "const Foo = 1;\nconst Widget = 2;\nconst Bar = 3;\nexport { Foo, Widget, Bar };\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Foo", "Widget", "Bar"]
+  },
+  {
+    "desc": "N-12: multi-line `export { ... }` list, re-exported from another module",
+    "content": "export {\n  Widget,\n} from './other';\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "N-12: `X as Y` aliasing — the LOCAL name is what the export list names, listExports yields the alias target",
+    "content": "const Thing = 1;\nexport { Thing as Widget };\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Thing", "Widget"]
+  },
+  {
+    "desc": "re-export form: `export { Widget } from './other'` (no local declaration at all)",
+    "content": "export { Widget } from './other';\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "AUD-206-02 / #212 repro: `export function <Name>` — pattern 3's old `^\\s*` anchor missed this",
+    "content": "export function Widget() { return {}; }\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "#212: `export async function <Name>`",
+    "content": "export async function Widget() { return {}; }\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "#212: `export class <Name>`",
+    "content": "export class Widget {}\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "#212: `export enum <Name>`",
+    "content": "export enum Widget { A, B }\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "#212: `export let <Name>`",
+    "content": "export let Widget = {};\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "#212: `export var <Name>`",
+    "content": "export var Widget = {};\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "#212: `export namespace <Name>`",
+    "content": "export namespace Widget {}\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "#212: `export default function <Name>` — the companion declaration IS caught by pattern B even with `default`",
+    "content": "export default function Widget() { return {}; }\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "#212: `export default class <Name>`",
+    "content": "export default class Widget {}\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "known approximation (DEC-004): `export type <Name> = ...` counts as exported — type-space, inherited from #158's set",
+    "content": "export type Widget = { a: string };\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "known approximation (DEC-004): `export interface <Name>` counts as exported",
+    "content": "export interface Widget { a: string }\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "known miss (DEC-004, very-low plausibility): `export default <Name>` with no companion declaration keyword — harmless per the audit, no name conflict",
+    "content": "const Widget = {};\nexport default Widget;\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "known miss: `export default <Name>` is the ONLY export (no bare `const Widget` companion) — pattern B needs a declaration keyword",
+    "content": "export default Widget;\n",
+    "name": "Widget",
+    "verdict": "absent",
+    "exports": []
+  },
+  {
+    "desc": "known miss (DEC-004, very-low plausibility): `export type { X }` is NOT matched by pattern A — the `type` keyword sits between `export` and `{`",
+    "content": "export type { Widget };\n",
+    "name": "Widget",
+    "verdict": "absent",
+    "exports": []
+  },
+  {
+    "desc": "known miss: `export type { X } from './y'` — same reasoning, re-export form",
+    "content": "export type { Widget } from './y';\n",
+    "name": "Widget",
+    "verdict": "absent",
+    "exports": []
+  },
+  {
+    "desc": "known miss (very-low plausibility): destructured `const { X } = ...` — pattern B requires the name directly after the keyword",
+    "content": "const { Widget } = something;\n",
+    "name": "Widget",
+    "verdict": "absent",
+    "exports": []
+  },
+  {
+    "desc": "AUD-206-03 / #212 repro: bare `export * from './x'` — the file's export set is unknowable by regex",
+    "content": "export * from './other';\n",
+    "name": "Widget",
+    "verdict": "unknowable",
+    "exports": []
+  },
+  {
+    "desc": "AUD-206-03 variant: `export * as ns from './x'` (namespace re-export) is also unknowable",
+    "content": "export * as domain from './other';\n",
+    "name": "Widget",
+    "verdict": "unknowable",
+    "exports": []
+  },
+  {
+    "desc": "unknowable file still returns what it CAN see (DEC-005: discovery is best-effort, not enforcement) — a star re-export alongside a real local export",
+    "content": "export * from './other';\nexport const Sibling = 1;\n",
+    "name": "Widget",
+    "verdict": "unknowable",
+    "exports": ["Sibling"]
+  },
+  {
+    "desc": "N-5 (known-accepted, unchanged): a line comment mentioning the export idiom is a false 'exists' — fails safe, not fixed by #210/#212. listExports is comment-blind the same way classify is (same regex, no comment-stripping)",
+    "content": "// export { Widget } — planned\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "N-5 (known-accepted, unchanged): a block comment mentioning the export idiom is also a false 'exists'",
+    "content": "/**\n * export { Widget }\n */\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "N-5 (known-accepted, unchanged): prose mention in a block comment is NOT matched by pattern A (no braces immediately after `export`)",
+    "content": "/** Returns a Widget. */\n",
+    "name": "Widget",
+    "verdict": "absent",
+    "exports": []
+  },
+  {
+    "desc": "theoretical (AUD-206-05 lineage): `declare module 'x' { export const Name }` — the inner line still matches pattern B regardless of the enclosing block; documented honestly, not a live repro",
+    "content": "declare module 'x' {\n  export const Widget = 1;\n}\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "escape-hostile name (AUD-206-05): a dot in the name must be a LITERAL dot, not 'any character' — proves the boundary escape, not just no-throw",
+    "content": "export const AXB = 1;\n",
+    "name": "A.B",
+    "verdict": "absent",
+    "exports": ["AXB"]
+  },
+  {
+    "desc": "escape-hostile name (AUD-206-05): parens in the name must not break regex compilation or match structurally",
+    "content": "export const Foo = 1;\n",
+    "name": "A(1)",
+    "verdict": "absent",
+    "exports": ["Foo"]
+  },
+  {
+    "desc": "escape-hostile name: a `+` quantifier metacharacter in the name must be literal",
+    "content": "export const AAAB = 1;\n",
+    "name": "A+B",
+    "verdict": "absent",
+    "exports": ["AAAB"]
+  },
+  {
+    "desc": "empty file: no exports, no star, nothing to see",
+    "content": "",
+    "name": "Widget",
+    "verdict": "absent",
+    "exports": []
+  },
+  {
+    "desc": "engine-mode scaffold shape: TypeBox import plus the literal scaffolded export block",
+    "content": "import { Type } from '@sinclair/typebox';\n\nexport const Widget = Type.Object(\n  {\n    summary: Type.String(),\n  },\n  { additionalProperties: false, $id: 'Widget' },\n);\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "AUD-F1: declaration preceded by a bare `\\r` (not `\\r\\n`) — line-terminator normalization must treat it as a line boundary same as `\\n`",
+    "content": "const X = 1;\rexport const Widget = 1;\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["X", "Widget"]
+  },
+  {
+    "desc": "AUD-F1: star export preceded by a bare `\\r`",
+    "content": "const X = 1;\rexport * from './other';\n",
+    "name": "Widget",
+    "verdict": "unknowable",
+    "exports": ["X"]
+  },
+  {
+    "desc": "AUD-F1: declaration preceded by U+2028 (LINE SEPARATOR) — valid ECMAScript source, JS `^`/`m` treats it as a line terminator",
+    "content": "const X = 1; export const Widget = 1;\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["X", "Widget"]
+  },
+  {
+    "desc": "AUD-F1: star export preceded by U+2028 (LINE SEPARATOR)",
+    "content": "const X = 1; export * from './other';\n",
+    "name": "Widget",
+    "verdict": "unknowable",
+    "exports": ["X"]
+  },
+  {
+    "desc": "AUD-F1: declaration preceded by U+2029 (PARAGRAPH SEPARATOR)",
+    "content": "const X = 1; export const Widget = 1;\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["X", "Widget"]
+  },
+  {
+    "desc": "AUD-F1: star export preceded by U+2029 (PARAGRAPH SEPARATOR)",
+    "content": "const X = 1; export * from './other';\n",
+    "name": "Widget",
+    "verdict": "unknowable",
+    "exports": ["X"]
+  },
+  {
+    "desc": "AUD-F2 repro: target name immediately abutting a non-ASCII letter (`Widgetα`) — Ruby default Unicode-aware `\\w` sees no word boundary and would report absent; `(?a)` forces ASCII-only `\\b` so both sides agree on the (JS-canonical) false-positive `exported`",
+    "content": "export const Widgetα = 1;\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["Widget"]
+  },
+  {
+    "desc": "AUD-F2 follow-up: same Unicode-`\\w` divergence, isolated to the export-list matcher (Pattern A) rather than the declaration matcher (Pattern B) — the declared name is `X`, only the alias target (`Widgetα`) abuts a non-ASCII letter inside `export { X as Widgetα }`, so Pattern B cannot mask a Pattern-A-only failure; both sides agree on the (JS-canonical) false-positive `exported`",
+    "content": "const X = 1;\nexport { X as Widgetα };\n",
+    "name": "Widget",
+    "verdict": "exported",
+    "exports": ["X", "X as Widgetα"]
+  }
+]

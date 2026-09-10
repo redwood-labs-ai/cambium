@@ -4,7 +4,7 @@ import { readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import Database from 'better-sqlite3';
+import { betterSqlite3Available } from './helpers/native-deps.js';
 
 /**
  * RED-215 phase 3: end-to-end memory. Spawns the real CLI twice with
@@ -15,11 +15,18 @@ import Database from 'better-sqlite3';
  *
  * Buckets land under the real `runs/memory/` because that's where the
  * runner writes; we clean up per-session-id to keep the workspace tidy.
+ *
+ * `better-sqlite3` is an optionalDependency of @redwood-labs/cambium-runner
+ * — a box without the native build must SKIP this whole file (it reads
+ * bucket files back directly), not fail. See
+ * helpers/native-deps.test.ts for the two-way proof this is a genuine
+ * probe, not a hardcoded skip.
  */
 
 const FIXTURE_ARG = 'packages/cambium/examples/fixtures/incident.txt';
+const DB_OK = await betterSqlite3Available();
 
-describe('memory runtime — spawn cambium run with --mock', () => {
+describe.skipIf(!DB_OK)('memory runtime — spawn cambium run with --mock', () => {
   const sessionIds: string[] = [];
 
   afterEach(() => {
@@ -67,7 +74,7 @@ describe('memory runtime — spawn cambium run with --mock', () => {
     };
   }
 
-  it('sliding_window :session memory — first run writes, second run reads', () => {
+  it('sliding_window :session memory — first run writes, second run reads', async () => {
     const id = 'test-' + randomUUID();
     sessionIds.push(id);
 
@@ -103,6 +110,7 @@ end
     expect(write1).toBeDefined();
     expect(write1.meta.written_by).toBe('default');
 
+    const { default: Database } = await import('better-sqlite3');
     const db = new Database(bucket, { readonly: true });
     const rows = db.prepare('SELECT * FROM entries').all() as any[];
     db.close();

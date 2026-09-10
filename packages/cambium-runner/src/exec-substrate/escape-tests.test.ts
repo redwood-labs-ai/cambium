@@ -176,9 +176,27 @@ const CATEGORIES: Category[] = [
     // by keeping the allocation loop unwrapped — the substrate-level
     // signal is what makes this a *security* guarantee rather than
     // a guest-visible error.
-    code: 'const a = []; while (true) a.push(new Array(100000).fill("x"));',
+    //
+    // #244 CI incident (run 317): the original 100_000-element
+    // per-iteration array needed ~10 loop iterations (~1.6 MB each) to
+    // clear the 16 MB cap — ~980ms locally, but on the Forgejo runner's
+    // slower interpreter (nas-pi) the outer while loop lost the race to
+    // the 5s wall clock, so the guest was actually stopped by the
+    // *timeout* handler, not the memory guard the test claims to prove.
+    // Both contain the guest, but only one is the assertion below.
+    // Fix: one 5_000_000-element array (~40 MB at ~8 bytes/slot) already
+    // exceeds the entire 16 MB budget on its own first allocation —
+    // QuickJS's `setMemoryLimit` check fires inside that single native
+    // allocation, not after N interpreted loop iterations, so the
+    // result is dominated by memory-subsystem speed, not interpreter
+    // bytecode throughput. Measured locally: 25ms, consistent across 5
+    // runs (vs. ~980ms before) — ~40x faster and no longer a function
+    // of how many times the while loop executes. `timeout: 10` (was 5)
+    // is belt-and-suspenders margin against a genuinely slow/contended
+    // host (e.g. swap pressure), not the load-bearing fix.
+    code: 'const a = []; while (true) a.push(new Array(5000000).fill("x"));',
     forbidden: [],
-    opts: { memory: 16, timeout: 5 },
+    opts: { memory: 16, timeout: 10 },
   },
 ];
 

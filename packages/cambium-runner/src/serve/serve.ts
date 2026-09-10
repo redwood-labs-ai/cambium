@@ -18,6 +18,12 @@
  *
  * Per-request:
  *   - GET  /v1/healthz → status + gen list (503 during boot).
+ *   - GET  /v1/gens    → self-describing catalog (#197): per gen/pipeline,
+ *                         name/kind/description/methods/returns schema/
+ *                         budget/model/egress/example. Healthz-style —
+ *                         built once at boot from the cached IR, never
+ *                         gated by `--max-inflight` (503 during boot,
+ *                         same as healthz; otherwise always answers).
  *   - POST /v1/run     → look up cached IR, inject input, dispatch via
  *                         runGenFromIr, return JSON envelope.
  *   - Anything else    → 404.
@@ -37,8 +43,7 @@ import {
   type ServerResponse,
 } from 'node:http';
 import { spawnSync } from 'node:child_process';
-import { dirname, resolve as pathResolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { resolve as pathResolve } from 'node:path';
 import { runGenFromIr, type IR, type IRInternal } from '../runner.js';
 import { runPipelineFromIr } from '../pipeline.js';
 import { parseMemoryKeys } from '../memory/keys.js';
@@ -46,16 +51,7 @@ import { injectContextInput, readIrArtifactFile, needsContracts } from '../ir-ar
 import { resolveGenfileContracts, loadContractsFromGenfile } from '../genfile.js';
 import { loadGenCatalog, type GenCatalog } from './gen-catalog.js';
 import type { BindTarget } from './bind.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-// Monorepo-only fallback: from `packages/cambium-runner/{src,dist}/serve/serve.{ts,js}`,
-// up 4 levels is the workspace root, where `ruby/cambium/compile.rb` lives.
-// This is correct ONLY for in-tree dev/tests — when `@redwood-labs/cambium-runner`
-// is installed via npm, the layout is `node_modules/@redwood-labs/cambium-runner/dist/`
-// and up-4 lands in `node_modules/`, which has no `ruby/`. Callers should pass
-// `compileRb` (or set `CAMBIUM_COMPILE_RB`) for production use; the CLI does so
-// via `cli/serve.mjs`. See RED-376.
-const MONOREPO_FALLBACK_COMPILE_RB = pathResolve(__dirname, '../../../..', 'ruby/cambium/compile.rb');
+import { resolveCompileRb } from '../compile-rb.js';
 
 const SERVE_VERSION = 'v1';
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
@@ -141,10 +137,15 @@ export interface RunServeOptions {
   bind: BindTarget;
   /** Override the compile fn (default spawns ruby compile.rb in bare mode). */
   compileBare?: CompileBareFn;
-  /** Path to `ruby/cambium/compile.rb`. When omitted, falls back in this order:
-   *  `process.env.CAMBIUM_COMPILE_RB`, then the monorepo-relative path (works in
-   *  the cambium repo and tests, never in `node_modules`). The CLI passes this
-   *  explicitly so npm-installed `cambium serve` works. RED-376. */
+  /** Path to `ruby/cambium/compile.rb`. When omitted, falls back in this
+   *  order (#242: shared chain, see `compile-rb.ts#resolveCompileRb`):
+   *  the `CAMBIUM_COMPILE_RB` env var, then a `createRequire` sibling
+   *  lookup of the `@redwood-labs/cambium` package (works under a
+   *  standard npm/pnpm/yarn `node_modules` install — this is the link
+   *  RED-376 lacked, see that ticket's comment history), then the
+   *  in-tree monorepo-relative path (works in the cambium repo and
+   *  tests). The CLI passes this explicitly regardless, so npm-installed
+   *  `cambium serve` works either way. RED-376, #242. */
   compileRb?: string;
   /** Override the dispatch fn (default is the imported runGenFromIr). For tests. */
   runGenFromIrFn?: RunGenFromIrFn;
@@ -198,6 +199,16 @@ export interface RunServeOptions {
    * `precompiled`; wins when both are set.
    */
   irDir?: string;
+  /**
+   * #198: force the deterministic mock generator on every /v1/run dispatch
+   * instead of a live LLM. Threaded to both `runGenFromIrImpl` and
+   * `runPipelineFromIrImpl` calls in `handleRun`. Defaults to `false`
+   * (byte-identical to pre-#198 behavior — the two dispatch sites passed
+   * a hardcoded `mock: false` before this option existed). `cambium mcp
+   * --mock` is the only caller; `cambium serve`'s CLI does not expose a
+   * flag for this (library-only option, out of scope per PLAN-198).
+   */
+  mock?: boolean;
 }
 
 export type RunServeAddress =
@@ -212,10 +223,293 @@ export interface RunServeHandle {
   close(): Promise<void>;
 }
 
+// ── /v1/gens catalog (#197) ───────────────────────────────────────────
+//
+// Additive, self-describing catalog route. Every field below is a
+// promise under the `/v1` compatibility surface (COMPATIBILITY.md) —
+// present on every entry, `null` where the underlying IR has nothing to
+// report (mirrors the `output`/`run_id` idiom in `handleRun`'s response,
+// rather than omitting keys). Built ONCE at boot from the same cached
+// IRs `/v1/run` dispatches against — zero inference, no new Ruby spawn,
+// no per-request work.
+
+/** Wire shape for one `/v1/gens` catalog entry. */
+export interface GenCatalogWireEntry {
+  name: string;
+  kind: 'gen' | 'pipeline';
+  description: string | null;
+  methods: string[];
+  /** Draft-07 JSON Schema per method — inline `returnSchema`, or resolved
+   *  from contracts for `returns :Symbol` gens (same resolution path
+   *  serve boot already uses for precompiled contract validation:
+   *  `resolveGenfileContracts` + `loadContractsFromGenfile`). `null` when
+   *  a method has no return schema (e.g. every pipeline method — Pipeline
+   *  IRs carry no `returnSchemaId`/`returnSchema`) or contracts can't be
+   *  resolved — best-effort, never fails boot. */
+  returns: Record<string, unknown | null>;
+  /** `null` for pipelines — Pipeline IRs have no single top-level model
+   *  (sub-gens each declare their own). */
+  model: { id: string; fallbacks: string[] | null } | null;
+  /** Raw `ir.policies.budget`, `null` when undeclared. Passed through
+   *  verbatim (RED-214 per-slot shape for gens — `{per_run?, per_tool?}`;
+   *  pipeline-level `{tokens?, tool_calls?}`, RED-381 — deliberately NOT
+   *  unified across kinds: that would invent a ceiling-semantics mapping
+   *  the IR itself doesn't make). `_packs` (trace-only metadata, CLAUDE.md)
+   *  is stripped — it names which policy pack contributed a slot, not a
+   *  ceiling itself. */
+  budget: unknown | null;
+  /** Network egress posture summary from `ir.policies.security.network`.
+   *  `'none'` when the gen declares no network slot, OR when it declares
+   *  one with an empty (non-wildcard) allowlist — `network-guard.ts`
+   *  enforces an empty allowlist as deny-all, so the two are equally
+   *  closed and the label is keyed on effective permissiveness, not slot
+   *  presence (AUD-197-3). `'allowlist'` when it grants at least one
+   *  host, with the allowlist alongside. NOTE: this field reflects only
+   *  the top-level `network:` slot — a gen with `security exec: { network:
+   *  ... }` or `unsafe_native: true` may have execution/network capability
+   *  this field does not report; see the `exec` field below (AUD-197-1). */
+  egress: { network: 'none' | 'allowlist'; allowlist: string[] | null };
+  /** `security exec:` slot (RED-213/RED-248), verbatim per-runtime —
+   *  `null` when the gen/pipeline declares no `exec:` slot at all.
+   *  Reported as declared, never collapsed into a boolean: `runtime` is
+   *  the literal declared runtime string (`'wasm'`, `'firecracker'`,
+   *  `'native'`) or `null` when undeclared; `unsafe_native` is the
+   *  explicit sharp-knife opt-in flag; `network` mirrors the exec slot's
+   *  OWN scoped `network:` sub-key (`:inherit` / `:none` / an allowlist
+   *  Hash) — independent of, and not folded into, the top-level `egress`
+   *  field above. Same effective-permissiveness rule as `egress`: an
+   *  empty allowlist reports `'none'`, not `'allowlist'` (AUD-197-1). */
+  exec: { runtime: string | null; unsafe_native: boolean; network: 'none' | 'allowlist' | 'inherit' } | null;
+  /** One example `/v1/run` request body, using the entry's first method. */
+  example: { gen: string; method: string; input: unknown };
+}
+
+/** Best-effort resolution of a method's return schema for the catalog.
+ *  Inline `returnSchema` wins (RED-419); otherwise resolves `returnSchemaId`
+ *  against the gen's own workspace contracts, reusing the exact functions
+ *  serve boot's precompiled-mode contract preload uses (`resolveGenfileContracts`
+ *  / `loadContractsFromGenfile`) — never re-derives contracts discovery.
+ *  Failures (no `[types].contracts`, missing export) resolve to `null`
+ *  rather than throwing: the catalog is a read-only convenience surface and
+ *  must never turn a schema-resolution hiccup into a boot failure. */
+async function resolveCatalogReturnsSchema(
+  ir: IRInternal,
+  anchor: string,
+  contractsCache: Map<string, Promise<Record<string, any> | null>>,
+): Promise<unknown | null> {
+  if (ir.returnSchema) return ir.returnSchema;
+  const id = ir.returnSchemaId;
+  if (typeof id !== 'string') return null;
+
+  let modPromise = contractsCache.get(anchor);
+  if (!modPromise) {
+    modPromise = (async () => {
+      try {
+        const genfile = resolveGenfileContracts(anchor);
+        if (!genfile) return null;
+        return await loadContractsFromGenfile(genfile);
+      } catch {
+        return null;
+      }
+    })();
+    contractsCache.set(anchor, modPromise);
+  }
+  const mod = await modPromise;
+  if (!mod || !Object.prototype.hasOwnProperty.call(mod, id)) return null;
+  return mod[id];
+}
+
+/** `ir.policies.budget`, verbatim, `_packs` (trace-only, CLAUDE.md)
+ *  stripped. `null` when the gen/pipeline declares no budget. Deliberately
+ *  NOT reshaped per kind — see the `GenCatalogWireEntry.budget` doc. */
+function catalogBudgetSummary(raw: any): unknown | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const { _packs, ...rest } = raw;
+  return Object.keys(rest).length > 0 ? rest : null;
+}
+
+/** AUD-197-3: an empty, non-wildcard allowlist is enforced deny-all by
+ *  `network-guard.ts` (~line 218: `if (policy.allowlist.length === 0)
+ *  return { allowed: false, ... }`) — key the `'none'`/`'allowlist'`
+ *  posture on effective permissiveness, not slot presence. Shared by the
+ *  top-level network summary (`catalogEgressSummary`) and the exec-scoped
+ *  network summary (`catalogExecSummary`, AUD-197-1). */
+function allowlistPosture(allowlist: unknown): 'none' | 'allowlist' {
+  return Array.isArray(allowlist) && allowlist.length > 0 ? 'allowlist' : 'none';
+}
+
+/** Raw `ir.policies.security.network` (`{allowlist, denylist, block_private,
+ *  block_metadata}`, RED-137) → the catalog's `none`/`allowlist` posture
+ *  summary. Absent slot (deny-by-default), or a declared slot with an
+ *  empty allowlist (AUD-197-3), → `'none'`. */
+function catalogEgressSummary(network: any): { network: 'none' | 'allowlist'; allowlist: string[] | null } {
+  if (!network || typeof network !== 'object') {
+    return { network: 'none', allowlist: null };
+  }
+  const allowlist = Array.isArray(network.allowlist) ? network.allowlist : [];
+  const posture = allowlistPosture(allowlist);
+  return { network: posture, allowlist: posture === 'allowlist' ? allowlist : null };
+}
+
+/** AUD-197-1: `ir.policies.security.exec` (RED-213/RED-248), verbatim —
+ *  `null` when the gen/pipeline declares no `exec:` slot at all. Never
+ *  collapses `wasm`/`firecracker`/`unsafe_native` into a boolean: `runtime`
+ *  is the literal declared string or `null`; `unsafe_native` is the
+ *  explicit flag; `network` mirrors the slot's own scoped `network:`
+ *  sub-key (`'inherit'` string, `'none'` string, an allowlist Hash, or
+ *  undeclared) through the same effective-permissiveness rule as
+ *  `catalogEgressSummary` (empty allowlist → `'none'`). */
+function catalogExecSummary(
+  exec: any,
+): { runtime: string | null; unsafe_native: boolean; network: 'none' | 'allowlist' | 'inherit' } | null {
+  if (!exec || typeof exec !== 'object') return null;
+  const rawNetwork = exec.network;
+  const network: 'none' | 'allowlist' | 'inherit' =
+    rawNetwork === 'inherit'
+      ? 'inherit'
+      : rawNetwork && typeof rawNetwork === 'object'
+        ? allowlistPosture(rawNetwork.allowlist)
+        : 'none'; // 'none' string, or no exec-scoped network: sub-key declared (deny-by-default).
+  return {
+    runtime: typeof exec.runtime === 'string' ? exec.runtime : null,
+    unsafe_native: exec.unsafe_native === true,
+    network,
+  };
+}
+
+/** One example `/v1/run` body for this entry. Gen IRs carry exactly one
+ *  context key (the `grounded_in` source, or `document` — RED-276); a
+ *  plain-string placeholder mirrors what `injectContextInput` accepts.
+ *  Pipeline IRs carry named `input` slots (#226): a single slot mirrors
+ *  the CLI's single-slot string convenience, multiple slots produce an
+ *  object (the multi-slot JSON-object convention `parsePipelineInputs`
+ *  expects), and zero slots produce `""` (the zero-slot default). */
+function catalogExampleInvocation(
+  name: string,
+  method: string,
+  ir: IRInternal,
+): { gen: string; method: string; input: unknown } {
+  if (ir.kind === 'Pipeline') {
+    const slots = ir.input && typeof ir.input === 'object' ? Object.keys(ir.input) : [];
+    if (slots.length === 0) return { gen: name, method, input: '' };
+    if (slots.length === 1) return { gen: name, method, input: `<${slots[0]}>` };
+    const input: Record<string, string> = {};
+    for (const slot of slots) input[slot] = `<${slot}>`;
+    return { gen: name, method, input };
+  }
+  const ctxKeys = ir.context && typeof ir.context === 'object' ? Object.keys(ir.context) : [];
+  const key = ctxKeys[0] ?? 'document';
+  return { gen: name, method, input: `<${key}>` };
+}
+
+/**
+ * Build the full `/v1/gens` catalog once at boot from the already-cached
+ * IRs. `catalog.entries` supplies name/kind/appRoot (precompiled mode
+ * only — falls back to `workspaceDir`, same as `handleRun`'s dispatch
+ * anchor); `cache` supplies the compiled per-method IRs.
+ */
+async function buildGenCatalogWire(
+  catalog: GenCatalog,
+  cache: Map<string, Map<string, IRInternal>>,
+  workspaceDir: string,
+): Promise<GenCatalogWireEntry[]> {
+  const contractsCache = new Map<string, Promise<Record<string, any> | null>>();
+  const wire: GenCatalogWireEntry[] = [];
+
+  for (const [name, entry] of catalog.entries) {
+    const methodMap = cache.get(name);
+    if (!methodMap || methodMap.size === 0) continue; // never happens post-boot; defensive
+    const methods = Array.from(methodMap.keys());
+    const anchor = entry.appRoot ?? workspaceDir;
+    const firstIr = methodMap.get(methods[0])!;
+
+    const returns: Record<string, unknown | null> = {};
+    for (const method of methods) {
+      returns[method] = await resolveCatalogReturnsSchema(methodMap.get(method)!, anchor, contractsCache);
+    }
+
+    wire.push({
+      name,
+      kind: entry.kind,
+      description: firstIr.description ?? null,
+      methods,
+      returns,
+      model: entry.kind === 'gen'
+        ? { id: firstIr.model?.id ?? null, fallbacks: firstIr.model?.fallbacks ?? null }
+        : null,
+      budget: catalogBudgetSummary(firstIr.policies?.budget),
+      egress: catalogEgressSummary(firstIr.policies?.security?.network),
+      // AUD-197-1: pipelines can carry `security exec:` too (pipeline.rb's
+      // `security` DSL method routes through the same `Normalize.security_slots`
+      // as the gen side) — no kind-based null, unlike `model` above.
+      exec: catalogExecSummary(firstIr.policies?.security?.exec),
+      example: catalogExampleInvocation(name, methods[0], firstIr),
+    });
+  }
+
+  return wire;
+}
+
 export function runServe(opts: RunServeOptions): RunServeHandle {
-  const compileRb =
-    opts.compileRb ?? process.env.CAMBIUM_COMPILE_RB ?? MONOREPO_FALLBACK_COMPILE_RB;
-  const compileBare = opts.compileBare ?? makeDefaultCompileBare(compileRb);
+  // #195: `irDir` implies `precompiled`. Computed FIRST — see the
+  // resolution below, and reused by the boot loop (dispatch source) and
+  // `handleRun` (appRoot anchoring, DEC-005).
+  const precompiledMode = Boolean(opts.precompiled || opts.irDir);
+
+  // #242: shared chain (explicit → CAMBIUM_COMPILE_RB → createRequire
+  // sibling → in-tree dev fallback) — see compile-rb.ts#resolveCompileRb.
+  // The createRequire sibling link is new here: previously this fell
+  // straight from the env var to a bare monorepo-relative path with no
+  // existence check, silently wrong under a standard npm install
+  // (RED-376's gap; see the removed MONOREPO_FALLBACK_COMPILE_RB comment
+  // history).
+  //
+  // #242 fix round, AUD-001: resolving eagerly (and throwing on total
+  // failure) unconditionally here broke #195's "no Ruby needed on PATH"
+  // contract for a `--precompiled`/`--ir-dir` boot — the boot loop below
+  // never calls `compileBare` for an entry with `entry.irPath` set (every
+  // gen, in precompiled mode), and pipelines (the only per-request
+  // consumer of the resolved `compileRb`, at the `runPipelineFromIr` call
+  // below) are refused outright in precompiled mode by `gen-catalog.ts`.
+  // So resolution is fatal only when something can actually dereference
+  // it: compile-at-boot needs a real `compileRb` to spawn ruby for every
+  // catalog entry, unless the caller already injected a `compileBare`
+  // override that makes resolution moot. Precompiled mode (or an
+  // injected `compileBare`) gets a best-effort, non-fatal resolution
+  // instead — `compileRb` stays `undefined` if nothing resolves, and the
+  // unreachable-in-precompiled-mode pipeline path would get its own
+  // clear resolution-and-throw from `runPipelineFromIr` if it ever were
+  // reached.
+  let compileRb: string | undefined;
+  let compileBare = opts.compileBare;
+  if (!compileBare && !precompiledMode) {
+    const resolvedCompileRb = resolveCompileRb(opts.compileRb);
+    if (!resolvedCompileRb) {
+      throw new Error(
+        `cambium serve could not locate ruby/cambium/compile.rb. Pass it explicitly via ` +
+          `runServe({ compileRb: '/absolute/path' }), set CAMBIUM_COMPILE_RB, or ensure ` +
+          `@redwood-labs/cambium is reachable via Node's module resolution.`,
+      );
+    }
+    compileRb = resolvedCompileRb;
+    compileBare = makeDefaultCompileBare(compileRb);
+  } else {
+    compileRb = resolveCompileRb(opts.compileRb) ?? undefined;
+    if (!compileBare) {
+      // Only reachable in precompiled mode with no injected override:
+      // the boot loop below never calls `compileBare` for a catalog
+      // entry with `entry.irPath` set, which precompiled mode guarantees
+      // for every entry (`gen-catalog.ts`). A call here means that
+      // invariant broke elsewhere — fail loudly rather than spawn ruby
+      // against an unresolved (or wrong) path.
+      compileBare = () => {
+        throw new Error(
+          'runServe: compileBare invoked in precompiled mode — expected every catalog ' +
+            'entry to resolve to a precompiled artifact instead.',
+        );
+      };
+    }
+  }
   const runGenFromIrImpl = opts.runGenFromIrFn ?? runGenFromIr;
   const runPipelineFromIrImpl = opts.runPipelineFromIrFn ?? runPipelineFromIr;
   const runCwd = opts.runCwd ?? opts.workspaceDir;
@@ -233,14 +527,13 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
     typeof opts.shutdownTimeoutMs === 'number' && opts.shutdownTimeoutMs > 0
       ? opts.shutdownTimeoutMs
       : DEFAULT_SHUTDOWN_TIMEOUT_MS;
-  // #195: `irDir` implies `precompiled`. Read once, reused by the boot
-  // loop (dispatch source) and `handleRun` (appRoot anchoring, DEC-005).
-  const precompiledMode = Boolean(opts.precompiled || opts.irDir);
 
   // Per-(gen, method) IR cache populated at boot. Map<gen, Map<method, IRInternal>>.
   const cache = new Map<string, Map<string, IRInternal>>();
   let booted = false;
   let catalogRef: GenCatalog | null = null;
+  // #197: built once at boot, alongside `cache` — see `buildGenCatalogWire`.
+  let genCatalogWire: GenCatalogWireEntry[] = [];
 
   const inflight = new Set<Promise<unknown>>();
   let closing = false;
@@ -329,6 +622,11 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
       cache.set(name, methodMap);
     }
 
+    // #197: catalog is a pure read over what's now cached — built once,
+    // reused by every /v1/gens request (same "cheap, ungated" stance as
+    // healthz's `catalogRef`, never recomputed per-request).
+    genCatalogWire = await buildGenCatalogWire(catalog, cache, opts.workspaceDir);
+
     server = createServer((req, res) => handleRequest(req, res));
     await listen(server, opts.bind);
     booted = true;
@@ -359,6 +657,18 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
         status: 'ok',
         gens: catalogRef ? Array.from(catalogRef.entries.keys()) : [],
         version: SERVE_VERSION,
+      });
+      return;
+    }
+
+    // #197: healthz-style — a cheap read over the catalog built at boot,
+    // never gated by --max-inflight. Sits above the /v1/run branch below
+    // (and, like healthz, above the inflight check inside it), so a
+    // saturated server still answers.
+    if (method === 'GET' && url === `/${SERVE_VERSION}/gens`) {
+      sendJson(res, 200, {
+        version: SERVE_VERSION,
+        gens: genCatalogWire,
       });
       return;
     }
@@ -504,7 +814,7 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
         ? runPipelineFromIrImpl({
             ir,
             cwd: runCwd,
-            mock: false,
+            mock: opts.mock === true,
             firedBy: typeof body.fired_by === 'string' ? body.fired_by : undefined,
             // Hand the same compile.rb path serve already resolved at
             // boot to the per-step sub-gen compiles. Mirrors the CLI.
@@ -513,6 +823,7 @@ export function runServe(opts: RunServeOptions): RunServeHandle {
         : runGenFromIrImpl({
             ir,
             cwd: runCwd,
+            mock: opts.mock === true,
             memoryKeys,
             firedBy: typeof body.fired_by === 'string' ? body.fired_by : undefined,
             // #195 DEC-005 / A-003: a precompiled artifact's `entry.source`

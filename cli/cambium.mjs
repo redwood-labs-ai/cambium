@@ -55,6 +55,7 @@ Usage:
   cambium compile <file.cmb.rb> [--method <method>] [--arg <path>|-] [-o <output>]
   cambium compile [--out-dir <dir>] [--write]   # (no file) recompile every gen/pipeline IR in the workspace
   cambium serve --workspace <path> --bind <uri> [--allow-remote] [--precompiled|--ir-dir <dir>]
+  cambium mcp --workspace <path> [--precompiled|--ir-dir <dir>] [--mock]
   cambium inspect [run-id] [--port <n>] [--runs-dir <path>] [--host <h>] [--allow-remote] [--no-open]
   cambium schedule preview|list|compile <args>
   cambium doctor
@@ -73,6 +74,8 @@ Commands:
             engine mode writes each <base>.ir.json; app mode validates only
             (--out-dir/--write to materialize). (RED-407)
   serve     Start a long-lived HTTP server hosting every gen in this workspace.
+  mcp       Speak MCP over stdio: one typed tool per gen×method, adapted
+            from this workspace's /v1/gens catalog (#198).
   inspect   Start a local read-only trace viewer over this workspace's runs/.
   doctor    Check environment setup and dependencies
   test      Run the test suite
@@ -229,6 +232,14 @@ if (cmd === 'serve') {
   const { runServeCli } = await import('./serve.mjs');
   await runServeCli(args);
   // runServeCli runs until a signal arrives; if it returns, exit cleanly.
+  process.exit(0);
+}
+
+// ── cambium mcp (#198) ────────────────────────────────────────────────
+if (cmd === 'mcp') {
+  const { runMcpCli } = await import('./mcp.mjs');
+  await runMcpCli(args);
+  // runMcpCli runs until stdin EOF or a signal; if it returns, exit cleanly.
   process.exit(0);
 }
 

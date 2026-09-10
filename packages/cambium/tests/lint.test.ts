@@ -285,6 +285,63 @@ describe('cambium lint — RED-284 coverage for new surfaces', () => {
     expect(output).toMatch(/Did you mean 'BlockReport'\?/);
   });
 
+  // ── #210 (AUD-206-01): app mode's `returns <Schema>` check must agree
+  // with the scaffolder about what "exported" means — the same
+  // `classify`/`listExports` single source (DEC-001/002/003), not the
+  // old lone `export const` regex.
+
+  it('#210: app mode passes symbol-form returns when the export uses the `export { X }` idiom (AUD-206-01 repro)', () => {
+    const pkg = setupMinimalWorkspace(scratch);
+    writeFileSync(
+      join(pkg, 'src/contracts.ts'),
+      `const BlockReport = Type.Object({});\nexport { BlockReport };\n`,
+    );
+    mkdirSync(join(pkg, 'app/gens'), { recursive: true });
+    writeFileSync(
+      join(pkg, 'app/gens/sym_gen.cmb.rb'),
+      `class SymGen < GenModel\n  model "omlx:stub"\n  returns BlockReport\nend\n`,
+    );
+
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(0);
+    expect(output).toMatch(/sym_gen\.cmb\.rb: returns BlockReport \(found in src\/contracts\.ts\)/);
+    expect(output).not.toMatch(/not exported from src\/contracts\.ts/);
+  });
+
+  it('#212 (AUD-206-03): app mode warns (does not fail) when contracts.ts is a barrel using `export *`', () => {
+    const pkg = setupMinimalWorkspace(scratch);
+    writeFileSync(join(pkg, 'src/contracts.ts'), `export * from './domain';\n`);
+    mkdirSync(join(pkg, 'app/gens'), { recursive: true });
+    writeFileSync(
+      join(pkg, 'app/gens/sym_gen.cmb.rb'),
+      `class SymGen < GenModel\n  model "omlx:stub"\n  returns BlockReport\nend\n`,
+    );
+
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(0);
+    expect(output).toMatch(
+      /returns BlockReport — src\/contracts\.ts has an `export \*` re-export; could not verify this reference/,
+    );
+    expect(output).not.toMatch(/not exported from src\/contracts\.ts/);
+  });
+
+  it('#212 (AUD-206-03): app mode pipeline input schema warns (does not fail) against a barrel `export *` contracts file', () => {
+    const pkg = setupMinimalWorkspace(scratch);
+    writeFileSync(join(pkg, 'src/contracts.ts'), `export * from './domain';\n`);
+    mkdirSync(join(pkg, 'app/pipelines'), { recursive: true });
+    writeFileSync(
+      join(pkg, 'app/pipelines/review.pipeline.rb'),
+      `class Review < Pipeline\n  input :doc, schema: Foo\n\n  def review(doc)\n  end\nend\n`,
+    );
+
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(0);
+    expect(output).toMatch(
+      /input schema Foo — src\/contracts\.ts has an `export \*` re-export; could not verify this reference/,
+    );
+    expect(output).not.toMatch(/input schema Foo not exported/);
+  });
+
   // ── issue #211 round 2 (AUD-211-01): the unanchored `returns` regex
   // grabs prose out of a live (non-comment) string, not just comments.
   // A gen using RED-419 block-form `returns do … end` with a `system`
@@ -502,32 +559,48 @@ smoke = "tests/smoke.test.ts"
     expect(output).toMatch(/has 2 gens/);
   });
 
-  // ── issue #211: `returns <Schema>` guard must not swallow the
-  // "schemas.ts exists but the single-pattern `export const` scan
-  // recognized none of its exports" case. Widening the scan itself is
-  // issue #210's territory (out of scope here); this only closes the
-  // silent-pass hole the too-broad `availableSchemas.size > 0` guard
-  // opened.
+  // ── issue #211 (round 1): `returns <Schema>` guard must not swallow
+  // the "schemas.ts exists but the scan recognized none of its exports"
+  // case with a false all-clear. Superseded by #210/#212: the scan
+  // itself is no longer single-pattern — `export { X }` is one of the
+  // idioms `classify`/`listExports` recognize directly now, so this
+  // case is a genuine PASS, not a "could not validate" warn. The warn
+  // path still exists for the case regex truly cannot resolve — an
+  // `export *` re-export — covered below.
 
-  it('engine mode: warns (does not silently pass) when schemas.ts uses an `export { X }` idiom the export-const scan cannot see', () => {
+  it('#210/#212: `export { X }` idiom is now correctly detected, not just non-failing (AUD-206-01 repro)', () => {
     setupEngineFolder(scratch);
-    // `const X = ...; export { X }` — the single `/^\s*export\s+const\s+.../`
-    // pattern at cli/lint.mjs finds zero matches even though TestReport is
-    // genuinely exported.
+    // `const X = ...; export { X }` — the AUD-206-01 repro shape. Before
+    // #210, the single `/^\s*export\s+const\s+.../` pattern found zero
+    // matches even though TestReport is genuinely exported, and lint
+    // could only warn "could not validate" rather than confirm it.
     writeFileSync(
       join(scratch, 'schemas.ts'),
       `const TestReport = { type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'], $id: 'TestReport' };\n`
         + `export { TestReport };\n`,
     );
 
-    const { output } = runLint(scratch);
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(0);
+    expect(output).toMatch(/✓ All checks passed\./);
+    expect(output).toMatch(/returns TestReport \(found in schemas\.ts\)/);
+    expect(output).not.toMatch(/could not validate|could not verify/);
+    expect(output).not.toMatch(/not exported from schemas\.ts/);
+  });
+
+  it('#212 (AUD-206-03): an `export *` re-export makes schemas.ts unknowable — warns, does not claim a miss', () => {
+    setupEngineFolder(scratch);
+    // A barrel schemas.ts whose real export set lint cannot see by
+    // regex. Must not report "not exported" (the AUD-206-01
+    // misdirection) — the schema may genuinely be there.
+    writeFileSync(join(scratch, 'schemas.ts'), `export * from './domain';\n`);
+
+    const { status, output } = runLint(scratch);
+    expect(status).toBe(0);
     expect(output).not.toMatch(/✓ All checks passed\./);
     expect(output).toMatch(
-      /returns TestReport — schemas\.ts has no `export const` declarations lint recognizes, could not validate this reference/,
+      /returns TestReport — schemas\.ts has an `export \*` re-export; could not verify this reference/,
     );
-    // Must not claim the schema is missing — it IS exported, just via an
-    // idiom the scan doesn't recognize (the audit's "not exported"
-    // misdirection this issue calls out).
     expect(output).not.toMatch(/not exported from schemas\.ts/);
   });
 

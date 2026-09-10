@@ -90,6 +90,45 @@ describe('#158 round 3: cambium new schema app-mode write/skip (DEC-158-007)', (
     expect(body.match(/\bHandRolled\b/g) ?? []).toHaveLength(3); // const decl, $id, export{}
   });
 
+  it('#212 (AUD-206-02): `export function <Name>` already present skips instead of duplicating (app mode intentionally widened)', () => {
+    // #212's explicitly-lifted constraint: app-mode behavior MAY now
+    // change, deliberately and covered by tests. Pre-#210/#212, pattern
+    // 3's `^\s*` anchor meant `export function Widget` never matched —
+    // the scaffolder appended a colliding `export const Widget` and the
+    // next `tsc --noEmit --strict` raised `TS2300: Duplicate identifier`.
+    mkdirSync(join(scratch, 'src'), { recursive: true });
+    const original = `import { Type } from '@sinclair/typebox'\nexport function Widget() { return Type.Object({}); }\n`;
+    writeFileSync(join(scratch, 'src', 'contracts.ts'), original);
+
+    const r = runCli(['new', 'schema', 'Widget']);
+    expect(r.status, (r.stderr ?? '') + (r.stdout ?? '')).toBe(0);
+    expect((r.stdout ?? '') + (r.stderr ?? '')).toMatch(/already exported.*\(skipped\)/);
+    expect((r.stdout ?? '') + (r.stderr ?? '')).not.toMatch(/appended:/);
+
+    const body = readFileSync(join(scratch, 'src', 'contracts.ts'), 'utf8');
+    expect(body).toBe(original);
+  });
+
+  it('#212 (AUD-206-03): a barrel file using `export * from` refuses to append instead of silently shadowing the real export', () => {
+    // AUD-206-03: `export * from './other'` makes the file's export set
+    // unknowable by regex. Appending anyway risks silently shadowing a
+    // re-exported name with the scaffolded stub, with NO tsc diagnostic.
+    // The fail-safe fix is to refuse to append at all — the same
+    // "skipped" branch as a genuinely-present export, just for a
+    // different reason (verdict 'unknowable', not 'exported').
+    mkdirSync(join(scratch, 'src'), { recursive: true });
+    const original = `export * from './domain';\n`;
+    writeFileSync(join(scratch, 'src', 'contracts.ts'), original);
+
+    const r = runCli(['new', 'schema', 'Widget']);
+    expect(r.status, (r.stderr ?? '') + (r.stdout ?? '')).toBe(0);
+    expect((r.stdout ?? '') + (r.stderr ?? '')).toMatch(/already exported.*\(skipped\)/);
+    expect((r.stdout ?? '') + (r.stderr ?? '')).not.toMatch(/appended:/);
+
+    const body = readFileSync(join(scratch, 'src', 'contracts.ts'), 'utf8');
+    expect(body).toBe(original);
+  });
+
   it('pipeline-invoked path: `cambium new pipeline` skips an already-present `<Name>Input` via the export-list idiom instead of duplicating', () => {
     // The AUD-158-01 report flagged this as reachable "silently, without
     // the developer explicitly choosing to scaffold a schema" — a

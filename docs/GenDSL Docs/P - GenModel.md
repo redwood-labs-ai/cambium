@@ -128,6 +128,35 @@ collapses those 200 groups to **one**.
   agentic path, and the semantic-repair path alike. See
   [[C - IR (Intermediate Representation)]] § Top-level IR fields.
 
+## `describe` (#196)
+
+`describe` is a machine-readable, one-line statement of what the gen does — the thing a
+capability surface (`/v1/gens`, an MCP `tools/list`, a shim `--catalog`) reads instead of
+the gen's source.
+
+```ruby
+class PaletteExtractor < GenModel
+  describe "Extracts a 26-key semantic palette from wallpaper swatches"
+  # ...
+end
+```
+
+- **Class-level only, one string, optional.** Per-method descriptions are a v1 non-goal
+  and can come later, additively.
+- **Metadata only — never read during prompt assembly.** `describe` has no runtime
+  behavior; it does not reach the model, the system prompt, or any cacheable prefix. This
+  is a hard invariant: a self-description surface must never become a hidden prompt
+  input.
+- **A different `description` than the one you may already be looking at.** `returns do …
+  end` field blocks accept a per-field `description:` kwarg, which lands nested inside
+  `returnSchema/properties/*/description` (JSON Schema field docs). The gen-level
+  `describe` primitive emits a *sibling* top-level IR field, `description`, alongside
+  `system`/`model`/`mode` — same name, different nesting, different purpose. See
+  [[C - IR (Intermediate Representation)]] § Top-level IR fields.
+- **Byte-identical when unused.** A gen with no `describe` declaration emits no
+  `description` IR field at all — same omitted-when-unused rule as `effort` and
+  `model.fallbacks`.
+
 ## Failure modes
 - Unknown model provider or model not available.
 - Return schema not found (caught at compile time by RED-210).

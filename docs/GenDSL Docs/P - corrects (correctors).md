@@ -59,6 +59,12 @@ Scaffold the boilerplate via `cambium new corrector <Name>` (RED-284) — the ge
 
 The name must match `/^[a-z][a-z0-9_]*$/` (traversal guard). The export name must match the file basename. `loadAppCorrectors` additionally `realpath`s each file and rejects any target that escapes the correctors dir (`relative(realDir, realFile).startsWith('..')`) — so a symlink dropped into `app/correctors/` can't pull in code from outside the workspace. App correctors override same-named built-ins with a one-time stderr warning per process (mirrors the RED-209 tool-plugin precedence rule).
 
+### Vendoring third-party support code (#201)
+
+A corrector's implementation is free to import support code that isn't itself a corrector — e.g. a vendored third-party parser used to verify output against the real target system rather than a reimplementation of its rules. The convention: non-`.corrector.ts` support files live under `app/correctors/vendor/<upstream>/`, one subdirectory per upstream project. `loadAppCorrectors` (and `cambium lint`'s corrector check) both discover correctors via a **non-recursive, suffix-filtered** `readdirSync` (`entry.endsWith('.corrector.ts')`) — a nested `vendor/` directory, and any non-`.corrector.ts` file inside it, is silently outside that scan by construction, not specially exempted. It never reaches the name-regex or realpath-escape checks because those only run on files the scan actually enumerates.
+
+Vendored files should carry a header naming the upstream repo, branch/commit, and original path, and state whether the body is byte-identical to the pinned commit. See `packages/cambium/app/correctors/vendor/omarchy/menu_model.cjs` for the pattern (loaded via `createRequire` from the corrector that uses it — see that corrector's own header for the CommonJS-loading rationale).
+
 ## Engine-mode hosts: `RunGenOptions.correctors` (RED-299)
 
 Library consumers that import `runGen` from `@redwood-labs/cambium-runner` and drive multiple gens in one process pass correctors per-call via `RunGenOptions`:

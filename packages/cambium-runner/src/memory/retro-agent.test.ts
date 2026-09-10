@@ -12,6 +12,13 @@ import {
   MAX_RETRO_CONTENT_BYTES,
 } from './retro-agent.js';
 import { SqliteMemoryBackend } from './backend.js';
+import { betterSqlite3Available } from './native-deps.js';
+
+// `better-sqlite3` is an optionalDependency (this package's package.json)
+// — a box without the native build must SKIP the tests below that open a
+// real backend, not fail. See native-deps.test.ts for the two-way proof
+// this is a genuine probe, not a hardcoded skip.
+const DB_OK = await betterSqlite3Available();
 
 describe('classNameToFileBase (RED-215 phase 4)', () => {
   it('snake_cases a multi-word CamelCase name', () => {
@@ -136,7 +143,7 @@ describe('applyRetroWrites (RED-215 phase 4)', () => {
     return { backend: await SqliteMemoryBackend.open(path), path };
   }
 
-  it('applies a write to the matching backend and tags written_by', async () => {
+  it.skipIf(!DB_OK)('applies a write to the matching backend and tags written_by', async () => {
     const { backend, path } = await freshBackend('conversation');
     const backends = new Map([['conversation', backend]]);
     const { applied, dropped } = applyRetroWrites(
@@ -155,7 +162,7 @@ describe('applyRetroWrites (RED-215 phase 4)', () => {
     rmSync(path, { force: true });
   });
 
-  it('drops writes naming a memory slot not on the primary (best-effort)', async () => {
+  it.skipIf(!DB_OK)('drops writes naming a memory slot not on the primary (best-effort)', async () => {
     const { backend, path } = await freshBackend('conversation');
     const backends = new Map([['conversation', backend]]);
     const { applied, dropped } = applyRetroWrites(
@@ -176,7 +183,7 @@ describe('applyRetroWrites (RED-215 phase 4)', () => {
 
   // Security finding (MEDIUM): defense-in-depth against prompt-injected
   // retro agents flooding memory or smuggling control chars.
-  it('truncates content over MAX_RETRO_CONTENT_BYTES and flags truncated: true', async () => {
+  it.skipIf(!DB_OK)('truncates content over MAX_RETRO_CONTENT_BYTES and flags truncated: true', async () => {
     const { backend, path } = await freshBackend('conversation');
     const backends = new Map([['conversation', backend]]);
     const big = 'a'.repeat(MAX_RETRO_CONTENT_BYTES + 500);
@@ -192,7 +199,7 @@ describe('applyRetroWrites (RED-215 phase 4)', () => {
     rmSync(path, { force: true });
   });
 
-  it('strips C0/DEL control characters from content before committing', async () => {
+  it.skipIf(!DB_OK)('strips C0/DEL control characters from content before committing', async () => {
     const { backend, path } = await freshBackend('conversation');
     const backends = new Map([['conversation', backend]]);
     applyRetroWrites(
@@ -211,7 +218,7 @@ describe('applyRetroWrites (RED-215 phase 4)', () => {
     expect(content).toBe('line1\nline2');
   });
 
-  it('drops malformed entries (missing string fields) without crashing', async () => {
+  it.skipIf(!DB_OK)('drops malformed entries (missing string fields) without crashing', async () => {
     const { backend, path } = await freshBackend('conversation');
     const backends = new Map([['conversation', backend]]);
     const { applied, dropped } = applyRetroWrites(

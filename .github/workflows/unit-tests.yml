@@ -1,0 +1,95 @@
+# Unit Test Suite (GitHub lane) — mirrors .forgejo/workflows/unit-tests.yml.
+#
+# Why this exists alongside the Forgejo lane: same reasoning as
+# .github/workflows/golden-ir.yml carries for the IR corpus. External
+# contributors open PRs on GitHub (the Forgejo instance is private), so
+# without a GitHub-side copy those PRs get the golden-IR gate but never
+# the ~2200-test unit suite — a bigger coverage gap than skipping the IR
+# corpus mirror would be, since the unit suite is the superset. GitHub-
+# hosted runners are also x86_64 against the Forgejo runner's arm64 Pi,
+# so this doubles as architecture coverage.
+#
+# Ruby is pinned to 3.4 here for the same reason golden-ir.yml pins it:
+# it's the version `scripts/test-on-ruby.mjs` defaults to and the one
+# Alpine ships (SECURITY.md § Ruby supply chain). The Forgejo lane
+# installs system Ruby from a bullseye container (EOL 2.7) and so does
+# not exercise the Ruby 3.x surface the project actually targets; this
+# lane does.
+#
+# Deliberately NOT ported: the `cambium_ci_review` LLM pipeline, for the
+# same reason golden-ir.yml's header gives — it needs a Tailscale-only
+# oMLX endpoint and GitHub withholds secrets from fork PRs, so it could
+# only ever run in --mock mode there.
+#
+# Skip visibility (#244, #245): this lane installs no optional native
+# deps either, so the same ~20 memory-backend tests are expected to skip
+# here via `describe.skipIf`/`it.skipIf` — vitest's default reporter
+# prints the per-file and aggregate skip counts unsuppressed in this
+# step's log. See .forgejo/workflows/unit-tests.yml for the full note.
+#
+# Cost: nothing. Public repositories get unlimited free minutes on
+# standard GitHub-hosted runners. Do not switch `runs-on` to a larger
+# runner — those are billed even on public repos.
+
+name: Unit Test Suite
+
+on:
+  # `push` only for main so post-merge and mirror-sync commits still get a
+  # run; feature branches are covered once by `pull_request`.
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: this workflow only reads the tree.
+permissions:
+  contents: read
+
+# Supersede in-flight runs for the same ref. Free minutes are not a reason
+# to leave five stale runs churning on a branch that has already moved on.
+concurrency:
+  group: unit-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Actions are pinned to full commit SHAs, not floating tags — see
+      # golden-ir.yml's matching comment for the rationale.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      # Unlike the Forgejo lane, ruby/setup-ruby works fine here: the
+      # node24 runs.using problem is specific to Forgejo's action mirror
+      # and its node20-capped runner, not to GitHub.
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          ruby-version: '3.4'
+
+      # No `cache: 'npm'` and no actions/cache — see golden-ir.yml's
+      # matching note. `npm test` here does run a build step (tsc, via
+      # `npm run build`), but that build is a few seconds; not worth a
+      # save/restore round-trip.
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit --no-fund
+
+      - name: Show toolchain versions
+        run: |
+          node --version
+          ruby --version
+
+      # `npm test` = `npm run build && vitest run` (package.json). Runs
+      # the full suite under packages/*; skipped tests (optional native
+      # deps not installed here) print their per-file and aggregate
+      # counts via vitest's default reporter, unsuppressed.
+      - name: Run unit test suite
+        run: npm test

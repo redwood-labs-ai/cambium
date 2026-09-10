@@ -90,15 +90,46 @@ jobs:
       - name: Build runner
         run: cd packages/cambium-runner && npm run build
 
-      - name: Compute PR diff
+      - name: Compute PR diff + touched surfaces
         run: |
-          git fetch origin ${{ github.event.pull_request.base.sha }}
-          git diff ${{ github.event.pull_request.base.sha }}..HEAD > /tmp/pr.diff
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          git fetch origin "$BASE_SHA"
+          git diff "$BASE_SHA"...HEAD > /tmp/pr.diff
           echo "Diff size: $(wc -c < /tmp/pr.diff) bytes"
           # Surface the first 100 lines in the workflow log for debugging
           # if the pipeline produces unexpected output.
           echo "::group::Diff preview (first 100 lines)"
           head -100 /tmp/pr.diff
+          echo "::endgroup::"
+
+          # #233: deterministic touched_surfaces floor (DEC-004/005/006).
+          # CambiumDiffAnalyzer's own touched_surfaces can only ADD to this
+          # list, never subtract from it — see
+          # `classifyTouchedSurfaces` in packages/cambium/src/contracts.ts
+          # and `app/systems/cambium_pr_reviewer.system.md`.
+          #
+          # `cambium_ci_review.pipeline.rb` is now MULTI-SLOT (`diff` +
+          # `surfaces`), which #226 enforces fail-closed: --arg must be a
+          # JSON object supplying every declared slot, not the raw diff
+          # text this workflow passed before. scripts/ci-review-input.mjs
+          # builds that object.
+          git diff --name-only -z "$BASE_SHA"...HEAD > /tmp/pr-changed-files.txt
+          node scripts/ci-review-input.mjs /tmp/pr.diff \
+            < /tmp/pr-changed-files.txt > /tmp/pipeline-input.json
+          SCRIPT_STATUS=$?
+          # AUD-006 (round 3 audit): this step's last command used to be an
+          # unconditional `echo`, so a failure above could in principle be
+          # papered over rather than actually failing the step — this is
+          # the honest check that replaces relying on that. The script
+          # itself now also catches and reports its own errors (see
+          # scripts/ci-review-input.mjs) rather than resting on a bare
+          # Node stack trace plus the runner's shell defaults.
+          if [ "$SCRIPT_STATUS" -ne 0 ]; then
+            echo "::error::scripts/ci-review-input.mjs failed (exit $SCRIPT_STATUS) -- see the log above for the reason."
+            exit "$SCRIPT_STATUS"
+          fi
+          echo "::group::Deterministic touched surfaces"
+          node -e 'console.log(JSON.parse(require("fs").readFileSync("/tmp/pipeline-input.json", "utf8")).surfaces)'
           echo "::endgroup::"
 
       - name: Run Cambium CI Review pipeline
@@ -149,7 +180,7 @@ jobs:
           node cli/cambium.mjs run \
             packages/cambium/app/pipelines/cambium_ci_review.pipeline.rb \
             --method review \
-            --arg /tmp/pr.diff \
+            --arg /tmp/pipeline-input.json \
             --out /tmp/review.json \
             $MOCK_FLAG
 

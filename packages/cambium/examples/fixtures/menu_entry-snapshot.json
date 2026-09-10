@@ -1,0 +1,9 @@
+{
+  "id": "mock id",
+  "label": "mock label",
+  "action": "mock action",
+  "target": "mock target",
+  "when": "mock when",
+  "checked": "mock checked",
+  "disabled": "mock disabled"
+}

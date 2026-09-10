@@ -92,6 +92,12 @@ export type {
 export { parseBind, isLoopback } from './serve/bind.js';
 export type { BindTarget, ParseBindOptions } from './serve/bind.js';
 
+// #198: `cambium mcp` — MCP-stdio adapter over the same `/v1` wire
+// `runServe` exposes. Exported beside `runServe` per DEC-010; the CLI
+// (`cambium mcp`) is argv glue over this. See `docs/GenDSL Docs/C - MCP Mode.md`.
+export { runMcpStdio } from './mcp/mcp-stdio.js';
+export type { McpStdioOptions, McpStdioHandle } from './mcp/mcp-stdio.js';
+
 // #195: shared IR-artifact reader. `cambium serve --precompiled`/`--ir-dir`
 // and `cambium run --ir` both load compiler output straight off disk (no
 // Ruby spawn) through this validator — the version gate, the structural

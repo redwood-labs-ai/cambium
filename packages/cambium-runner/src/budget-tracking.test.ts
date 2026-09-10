@@ -2,7 +2,10 @@ import { describe, it, expect } from 'vitest';
 import { Budget, trackBudgetFromTraceStep } from './budget.js';
 
 describe('budget tracking from trace steps', () => {
-  it('counts tool calls from AgenticTurn meta.tool_calls', () => {
+  // The agentic loop charges each dispatch as it happens, so an AgenticTurn
+  // must contribute tokens but not tool calls — otherwise every agentic call
+  // is billed twice.
+  it('counts tokens but NOT tool calls from AgenticTurn steps', () => {
     const b = new Budget({ max_tool_calls: 10 });
 
     trackBudgetFromTraceStep(b, {
@@ -17,7 +20,7 @@ describe('budget tracking from trace steps', () => {
       },
     });
 
-    expect(b.toolCallsUsed).toBe(2);
+    expect(b.toolCallsUsed).toBe(0);
     expect(b.tokensUsed).toBe(100);
   });
 

@@ -743,6 +743,14 @@ export interface RunGenOptions {
    *  without a live network target. NOT part of the public contract and may
    *  be removed without notice; deliberately not exported in index.ts. */
   _testProviders?: Map<string, CambiumProvider>;
+  /** #219: explicit path to `ruby/cambium/compile.rb`, forwarded to
+   *  `enrich.ts`'s sub-agent compile spawn so it doesn't depend on
+   *  `process.cwd()`. Same role as `RunPipelineFromIrOptions.compileRb`
+   *  (pipeline.ts) and `invokeRetroAgent`'s `cambiumCli` (retro-agent.ts).
+   *  When omitted, `runEnrichment` falls back to `CAMBIUM_COMPILE_RB`,
+   *  then module-location resolution — see `compile-rb.ts#resolveCompileRb`
+   *  (#242: shared by `enrich.ts`, `pipeline.ts`, `serve.ts`). */
+  compileRb?: string;
 }
 
 export interface RunGenResult {
@@ -1280,16 +1288,19 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   // ── Memory (RED-215 phase 3): plan + pre-generate read ──────────────
   // Each memory decl opens its SQLite bucket, optionally reads recent
   // entries (sliding_window), and contributes a block that is appended
-  // to the gen's system prompt. The backends are tracked in a Map that's
-  // wired to `process.once('exit', ...)` below, so every exit path —
-  // including the several `process.exit(1)` bailouts in main() — flushes
-  // WAL and closes handles. The explicit `closeBackends` call on the
-  // success path is still there so handles don't linger past the run.
+  // to the gen's system prompt. When the gen actually declares memory,
+  // the backends are tracked in a Map wired to a per-run `process.once
+  // ('exit', ...)` handler below, so every exit path — including the
+  // several `process.exit(1)` bailouts in main() — flushes WAL and
+  // closes handles. The handler is registered only once we know memory
+  // is in play (#250: `cambium serve` calls `runGenFromIr` per
+  // request in a long-lived process, so an unconditional registration
+  // leaked one listener per request) and is released with `process.off`
+  // at every path that reaches the explicit `closeBackends` call, so a
+  // memory-using gen doesn't leak a listener either.
   let memoryPlans: MemoryPlan[] = [];
   const memoryBackends: Map<string, SqliteMemoryBackend> = new Map();
-  process.once('exit', () => {
-    if (memoryBackends.size > 0) closeBackends(memoryBackends);
-  });
+  let memoryExitHandler: (() => void) | undefined;
   // RED-215 phase 4: retro memory agents (mode :retro) are the MEMORY
   // WRITERS, not primary gens with their own memory. Skip the whole
   // memory machinery for them — a retro agent shouldn't have its own
@@ -1329,6 +1340,10 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     if (block) {
       ir.system = ir.system ? `${ir.system}\n\n${block}` : block;
     }
+    memoryExitHandler = () => {
+      if (memoryBackends.size > 0) closeBackends(memoryBackends);
+    };
+    process.once('exit', memoryExitHandler);
   }
 
   // RED-298: IR shape changed from Array<string> to
@@ -1376,6 +1391,14 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
       ok: false,
       errors: [{ message: e?.message ?? String(e) }],
     });
+    // #250: this return happens before main()'s process.exit(1)
+    // bailout, so the deferred exit-hook flush would never fire for
+    // this path — close the memory backends synchronously here instead
+    // (mirrors the normal-path `closeBackends` call below), then
+    // release the exit-hook registration so it doesn't sit around for
+    // the lifetime of a long-lived host like `cambium serve`.
+    if (memoryExitHandler) process.off('exit', memoryExitHandler);
+    if (memoryBackends.size > 0) closeBackends(memoryBackends);
     return {
       ok: false,
       output: null,
@@ -1460,6 +1483,12 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
 
     const enrichResult = await runEnrichment(
       enrichDef, resolved.value, ir, contractsMod, generateText, extractJsonObject,
+      // #219 DEV-004/DEV-005: appPkgRoot is the SAME root resolved above for
+      // tool/action/provider/log-sink discovery — reused here rather than
+      // re-resolved, per CLAUDE.md's app-root single-sourcing invariant. Now
+      // a required positional argument (DEV-005) — there is no default to
+      // silently fall back on.
+      appPkgRoot, undefined, opts.compileRb,
     );
 
     // Add sub-agent trace steps under the enrichment
@@ -2207,6 +2236,11 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
         }
       }
     }
+    // #250: release the exit-hook registration now that the normal
+    // path is closing the backends itself — otherwise the listener
+    // sits around for the lifetime of a long-lived host like
+    // `cambium serve`, which calls `runGenFromIr` once per request.
+    if (memoryExitHandler) process.off('exit', memoryExitHandler);
     closeBackends(memoryBackends);
   }
 
@@ -2401,6 +2435,15 @@ export interface RunGenFromIrOptions {
   /** RED-312 replay: id of the run being resumed, recorded as
    *  `trace.parent_run_id`. */
   parentRunId?: string;
+  /** #219: explicit path to `ruby/cambium/compile.rb`, forwarded to
+   *  `runGen`'s `compileRb` option (which `enrich.ts` uses for its
+   *  sub-agent compile spawn). The CLI / `cambium serve` already resolve
+   *  this same path for `RunPipelineFromIrOptions.compileRb`; pass it here
+   *  too when a gen may declare `enrich`. When omitted, resolution falls
+   *  back to `CAMBIUM_COMPILE_RB`, then module-location resolution — see
+   *  `compile-rb.ts#resolveCompileRb` (#242: shared by `enrich.ts`,
+   *  `pipeline.ts`, `serve.ts`). */
+  compileRb?: string;
 }
 
 export interface RunGenFromIrResult extends RunGenResult {
@@ -2603,6 +2646,8 @@ export async function runGenFromIr(opts: RunGenFromIrOptions): Promise<RunGenFro
     // RED-330: pass the same runId we emitted on stderr so the artifact
     // path the operator saw is the path that gets written.
     runId,
+    // #219: forward to enrich.ts's sub-agent compile spawn.
+    compileRb: opts.compileRb,
   });
 
   // RED-287: engine-mode run artifacts go under <engineDir>/runs/ so

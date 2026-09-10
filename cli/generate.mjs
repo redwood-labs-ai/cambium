@@ -3,6 +3,7 @@ import { writeFileSync, appendFileSync, readFileSync, mkdirSync, existsSync } fr
 import { join, dirname, basename } from 'node:path';
 import process from 'node:process';
 import { detectWorkspaceShape } from './workspace-shape.mjs';
+import { isExportedOrUnknowable } from './schema-export.mjs';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -37,31 +38,26 @@ export function validateName(name, kind = 'name') {
   }
 }
 
-// DEC-158-007 (issue #158, AUD-158-01), ported to engine mode by #206: a
-// hand-authored schemas file can export `<pascalName>` via idioms a
-// single-pattern check (`export const <Name>`) never sees — e.g.
-// `const X = …; export { X }`. A false "not present" doesn't fail closed,
-// it fails OPEN: the caller's append runs anyway and inserts a second,
-// colliding `const`/`$id` declaration that breaks the TS build. Skipping
-// is the fail-safe direction — a false "exists" costs the user one export
-// added by hand; a false "absent" corrupts their file — so treat the name
-// as already-present (skip) when ANY of these match: a literal
-// `export const <Name>`, an `export { … }` list naming it anywhere, or a
-// top-level const/let/var/class/function/type/interface/enum declaration.
-// Shared by both the engine-mode (`schemas.ts`) and app-mode
-// (`src/contracts.ts`) branches of generateSchema so they can't drift
-// apart again.
+// DEC-158-007 (issue #158, AUD-158-01), ported to engine mode by #206,
+// widened by #210/#212: a hand-authored schemas file can export
+// `<pascalName>` via idioms the checks used to miss — e.g.
+// `const X = …; export { X }`, `export function X`, or a barrel
+// `export * from './domain'` this scaffolder can't see into at all. A
+// false "not present" doesn't fail closed, it fails OPEN: the caller's
+// append runs anyway and inserts a second, colliding `const`/`$id`
+// declaration that breaks the TS build (or, for a star re-export,
+// silently shadows the real export with no build error — AUD-206-03).
+// Skipping is the fail-safe direction — a false "exists" costs the user
+// one export added by hand; a false "absent" corrupts their file — so
+// this thin wrapper treats BOTH `classify`'s 'exported' and 'unknowable'
+// verdicts as already-present. The classification itself is single-sourced
+// in `./schema-export.mjs` (DEC-001/007) — mirrored on the Ruby side by
+// `ruby/cambium/schema_export.rb` and kept in agreement by the parity test
+// over `packages/cambium/tests/fixtures/schema-export-corpus.json`. Shared
+// by both the engine-mode (`schemas.ts`) and app-mode (`src/contracts.ts`)
+// branches of generateSchema so they can't drift apart again.
 function schemaNameAlreadyPresent(fileContents, pascalName) {
-  // Escape at the boundary (RED-206, AUD-206-05): pascalName is interpolated
-  // into three regex literals below. No-op for every currently-legal name
-  // (validateName's /^[A-Za-z][A-Za-z0-9_]*$/ never produces a metacharacter)
-  // but the helper shouldn't rely on that precondition silently.
-  const n = pascalName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return (
-    new RegExp(`^\\s*export\\s+const\\s+${n}\\b`, 'm').test(fileContents) ||
-    new RegExp(`export\\s*\\{[^}]*\\b${n}\\b[^}]*\\}`).test(fileContents) ||
-    new RegExp(`^\\s*(?:const|let|var|class|function|type|interface|enum)\\s+${n}\\b`, 'm').test(fileContents)
-  );
+  return isExportedOrUnknowable(fileContents, pascalName);
 }
 
 function writeFile(path, content) {
@@ -265,6 +261,7 @@ You are inside a Cambium engine folder (marked by \`cambium.engine.json\`). This
   // Gen file.
   writeFile(join(engineDir, `${snake}.cmb.rb`), `\
 class ${pascal} < GenModel
+  describe "TODO: one-line, machine-readable statement of what this gen does"
   model "omlx:gemma-4-31b-it-8bit"
   system :${snake}
   temperature 0.2
@@ -379,6 +376,7 @@ function generateAgent(name, ctx) {
   if (ctx.mode === 'engine') {
     writeFile(join(ctx.engineDir, `${snake}.cmb.rb`), `\
 class ${pascal} < GenModel
+  describe "TODO: one-line, machine-readable statement of what this gen does"
   model "omlx:gemma-4-31b-it-8bit"
   system :${snake}
   temperature 0.2
@@ -417,6 +415,7 @@ You are a ${snake.replace(/_/g, ' ')}. TODO: describe the role and behavior.`);
   const PKG = ctx.appPkgRoot;
   writeFile(join(PKG, 'app/gens', `${snake}.cmb.rb`), `\
 class ${pascal} < GenModel
+  describe "TODO: one-line, machine-readable statement of what this gen does"
   model "omlx:gemma-4-31b-it-8bit"
   system :${snake}
   temperature 0.2

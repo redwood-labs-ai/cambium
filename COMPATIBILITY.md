@@ -82,6 +82,16 @@ break; recorded here because §1 is the surface an author checks before upgradin
 a `.cmb.rb`, and in `CHANGELOG.md` because that is how anyone finds out at all
 (DEC-010).
 
+`describe` (#196) — a new top-level `GenModel` keyword: a one-line, class-level,
+machine-readable description of what the gen does, for a self-description
+surface (`/v1/gens`, MCP `tools/list`, a shim `--catalog`) to read instead of the
+gen's source. Metadata only — never reaches prompt assembly. Its IR counterpart
+(`description`, a top-level sibling of `system`/`model`/`mode`) takes the same
+absent-when-unset shape as `exclude_from_prefix`, so a gen that never declares
+`describe` compiles byte-identically. Distinct from the pre-existing, unrelated
+`description:` kwarg on a `returns do … end` field, which lands nested under
+`returnSchema.properties.<field>.description` — same name, different nesting.
+
 ### 2. IR JSON shape (and the opaque TypeScript type)
 
 The IR has **two distinct contractual surfaces**, and only one is promised.
@@ -96,8 +106,8 @@ inspectable plan. Adding an IR field is additive (the same philosophy as Rails'
 - **Additive:** new top-level or nested fields; a new operator kind; a new optional
   key on an operator. A key that is *absent when unset* (so pre-existing IR stays
   byte-identical) is the preferred additive shape — see `model.fallbacks`,
-  `returnSchema`, `excludeFromPrefix`, and the `prewarm` operator key for worked
-  examples.
+  `returnSchema`, `excludeFromPrefix`, `description`, and the `prewarm` operator
+  key for worked examples.
 - **Breaking (MAJOR):** removing a field, renaming a field, or changing the meaning
   or type of an existing field.
 
@@ -158,6 +168,15 @@ cancellation work is modeled deliberately as a **non-error outcome** (a terminal
 status on the success envelope), **not** a further `error.kind` — a cancellation
 the caller requested is a cooperative result, not a failure. The enum stays at 12.
 
+**New routes are additive, per the Additive/Breaking rules at the top of this section.** `GET /v1/gens`
+(#197 — a self-describing catalog of every booted gen/pipeline: schemas,
+budget ceilings, model + fallbacks, egress posture, exec-sandbox disclosure,
+an example invocation)
+is a new endpoint under the existing `/v1` path, healthz-style (never gated
+by `--max-inflight`; see [`C - Serve Mode`](docs/GenDSL%20Docs/C%20-%20Serve%20Mode.md)
+§ Catalog). It adds **zero** `error.kind` values — the enum stays at 12 — and
+changes no existing route's response.
+
 ### 4. Trace step vocabulary
 
 Every run emits a `trace.json` whose steps carry a framework-owned `type`. The
@@ -205,7 +224,12 @@ The `cambium` verbs and their flags are a promised surface — scripts and CI th
 call the CLI keep working across a major line.
 
 - **Promised verbs:** `init`, `new`, `run`, `replay`, `compile`, `schedule`,
-  `serve`, `inspect`, `doctor`, `test`, `lint`.
+  `serve`, `mcp`, `inspect`, `doctor`, `test`, `lint`.
+- `mcp` (#198) is additive CLI surface — an MCP-stdio adapter over the same
+  `/v1` wire `serve` exposes. Its `<GenName>__<method>` tool-naming scheme
+  and `{ input }` argument wrapper are governed by this same CLI promise:
+  once shipped, a tool name or argument shape does not change meaning within
+  a major line.
 - **Additive:** new verbs, new subcommands, new flags, new `--arg` input forms.
 - **Breaking (MAJOR):** removing a verb or flag, or changing a flag's meaning.
   There are **no CLI surface removals** within a major line.

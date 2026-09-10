@@ -11,6 +11,9 @@
     "input": {
       "diff": {
         "schema": "PullRequestDiff"
+      },
+      "surfaces": {
+        "schema": "CambiumTouchedSurfaces"
       }
     },
     "policies": {
@@ -48,6 +51,12 @@
             "param": "analysis",
             "from": {
               "step": "analyze"
+            }
+          },
+          {
+            "param": "surfaces",
+            "from": {
+              "input": "surfaces"
             }
           }
         ]

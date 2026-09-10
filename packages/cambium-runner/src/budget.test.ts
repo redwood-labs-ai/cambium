@@ -208,14 +208,15 @@ describe('trackBudgetFromTraceStep', () => {
     expect(b.getToolUsage('tavily').calls).toBe(1);
   })
 
-  it('attributes AgenticTurn tool_calls to named tools', () => {
+  it('does not re-charge AgenticTurn tool_calls the loop already charged', () => {
     const b = new Budget({}, { tavily: { max_calls: 5 }, linear: { max_calls: 5 } });
     trackBudgetFromTraceStep(b, {
       type: 'AgenticTurn',
       meta: { tool_calls: [{ tool: 'tavily' }, { function: { name: 'linear' } }] },
     });
-    expect(b.getToolUsage('tavily').calls).toBe(1);
-    expect(b.getToolUsage('linear').calls).toBe(1);
+    expect(b.getToolUsage('tavily').calls).toBe(0);
+    expect(b.getToolUsage('linear').calls).toBe(0);
+    expect(b.toolCallsUsed).toBe(0);
   })
 })
 

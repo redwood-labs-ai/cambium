@@ -2,7 +2,7 @@
 
 **Doc ID:** gen-dsl/security/exec-sandboxing
 **Status:** Draft (RED-213)
-**Last edited:** 2026-04-16
+**Last edited:** 2026-09-07
 
 ---
 
@@ -218,6 +218,8 @@ Test bench per substrate. Same coverage matrix; substrate-specific assertions.
 | OOM | progressive allocation | QuickJS memory cap rejects | cgroup memory cap kicks in |
 
 Lives at `packages/cambium-runner/src/builtin-tools/execute_code.escape-tests.ts` (or similar). Run as part of the regular suite; failure indicates a substrate config regression.
+
+> **Operational note (#244).** The OOM row above is the steady-state expectation, not an unconditional guarantee about *which* mechanism fires first. WASM's memory cap and wall-clock timeout are two independent checks racing inside the same guest; a progressive-allocation attack that grows memory in small increments needs many interpreted loop iterations to clear the cap, and on a slow or contended host those iterations can take longer than the wall-clock deadline — the timeout fires first instead of the memory limit. The guest is still stopped either way (this is not an escape), but an operator expecting "OOM ⇒ memory cap" specifically would be wrong on that hardware. This is why the RED-250 memory-bomb fixtures allocate one large chunk per iteration (enough on its own to clear the cap) rather than many small ones — it makes the memory check the one that actually fires, deterministically, regardless of interpreter speed, instead of merely being what fires on a fast enough box. Found via a real CI failure on a shared ARM runner (`nas-pi`); see the #244 change record for the reproduction.
 
 ---
 
