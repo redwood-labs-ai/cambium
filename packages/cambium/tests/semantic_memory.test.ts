@@ -4,8 +4,7 @@ import { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'no
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import Database from 'better-sqlite3';
-import * as sqliteVec from 'sqlite-vec';
+import { sqliteVecAvailable } from './helpers/native-deps.js';
 
 /**
  * RED-215 phase 5: end-to-end :semantic memory.
@@ -21,19 +20,14 @@ import * as sqliteVec from 'sqlite-vec';
 
 const FIXTURE_ARG = 'packages/cambium/examples/fixtures/incident.txt';
 
-// RED-378/RED-408: sqlite-vec ships no musl prebuilt → its native extension
-// can't load on Alpine. Skip rather than hard-fail (optional native dep) so the
-// Ruby-3.x docker gate stays green; on glibc/macOS it loads and the test runs.
-const VEC_OK = (() => {
-  try {
-    const db = new Database(':memory:');
-    (sqliteVec as any).load(db);
-    db.close();
-    return true;
-  } catch {
-    return false;
-  }
-})();
+// `better-sqlite3` and `sqlite-vec` are optionalDependencies of
+// @redwood-labs/cambium-runner. RED-378/RED-408: sqlite-vec also ships no
+// musl prebuilt → its native extension can't load on Alpine. Skip rather
+// than hard-fail on either gap (both are optional native deps) so the
+// Ruby-3.x docker gate stays green; on a box with the native build it
+// loads and the tests run. See helpers/native-deps.test.ts for the
+// two-way proof this is a genuine probe, not a hardcoded skip.
+const VEC_OK = await sqliteVecAvailable();
 
 describe.skipIf(!VEC_OK)('semantic memory runtime — spawn cambium run with --mock', () => {
   const sessionIds: string[] = [];
@@ -78,7 +72,7 @@ describe.skipIf(!VEC_OK)('semantic memory runtime — spawn cambium run with --m
     };
   }
 
-  it('writes + round-trip reads a semantic entry via vec search', () => {
+  it('writes + round-trip reads a semantic entry via vec search', async () => {
     const id = 'sem-' + randomUUID();
     sessionIds.push(id);
 
@@ -117,6 +111,8 @@ end
     // Load vec0 on the test's read-back instance too — the virtual
     // table's metadata is in the bucket file, but the module itself is
     // loaded per-connection.
+    const { default: Database } = await import('better-sqlite3');
+    const sqliteVec: any = await import('sqlite-vec');
     const db = new Database(bucket, { readonly: true });
     sqliteVec.load(db);
     const entryCount = db.prepare('SELECT COUNT(*) AS n FROM entries').get() as any;

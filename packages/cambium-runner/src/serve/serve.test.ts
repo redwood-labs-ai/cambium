@@ -15,12 +15,14 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseBind } from './bind.js';
 import {
   classifyThrownError,
   runServe,
   type RunGenFromIrFn,
+  type RunPipelineFromIrFn,
   type RunServeHandle,
 } from './serve.js';
 
@@ -29,6 +31,12 @@ import {
 // mode (no --method), stdout written verbatim to the artifact file.
 const REPO_ROOT = process.cwd();
 const RUBY_COMPILE_RB = join(REPO_ROOT, 'ruby', 'cambium', 'compile.rb');
+
+// #242: this test file's own directory, used only to plant the fake
+// createRequire-sibling fixture one level up (at ../node_modules,
+// `compile-rb.ts`'s own directory) — see the "compileRb precedence"
+// describe block below.
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Fixture gen + permissive contracts. The runner imports contracts.ts
 // at run time; we keep it as a plain object literal (no @sinclair/typebox
@@ -439,7 +447,7 @@ TestPipeline = "app/pipelines/test_pipeline.pipeline.rb"
   });
 });
 
-describe('runServe — compileRb precedence (RED-376)', () => {
+describe('runServe — compileRb precedence (RED-376, #242)', () => {
   let tmp: string;
   let handle: RunServeHandle | undefined;
 
@@ -502,6 +510,42 @@ TestGen = "app/gens/test_gen.cmb.rb"
     } finally {
       if (prevEnv === undefined) delete process.env.CAMBIUM_COMPILE_RB;
       else process.env.CAMBIUM_COMPILE_RB = prevEnv;
+    }
+  });
+
+  // #242: the link `serve.ts` lacked before this change — its own
+  // comment flagged this as "broken under node_modules". Plants a real
+  // (uncommitted, gitignored) fake npm-install sibling at the first
+  // node_modules Node's `createRequire` resolution checks from
+  // `compile-rb.ts`'s own location, and points it at a ruby script that
+  // fails in a way only IT could produce — proving this exact file was
+  // spawned, not the in-tree ruby/cambium/compile.rb dev fallback.
+  it('falls back to the createRequire sibling lookup when opts.compileRb and CAMBIUM_COMPILE_RB are both unset', async () => {
+    const prevEnv = process.env.CAMBIUM_COMPILE_RB;
+    delete process.env.CAMBIUM_COMPILE_RB;
+    const siblingRoot = join(
+      __dirname, '..', 'node_modules', '@redwood-labs', 'cambium',
+    );
+    const siblingCompileRb = join(siblingRoot, 'ruby', 'cambium', 'compile.rb');
+    mkdirSync(join(siblingRoot, 'ruby', 'cambium'), { recursive: true });
+    writeFileSync(
+      join(siblingRoot, 'package.json'),
+      JSON.stringify({ name: '@redwood-labs/cambium', version: '0.0.0-test' }),
+    );
+    writeFileSync(
+      siblingCompileRb,
+      "STDERR.puts 'SIBLING_FIXTURE_MARKER_242'\nexit 1\n",
+    );
+    try {
+      handle = runServe({
+        workspaceDir: tmp,
+        bind: parseBind('tcp://127.0.0.1:0'),
+      });
+      await expect(handle.ready).rejects.toThrow(/SIBLING_FIXTURE_MARKER_242/);
+    } finally {
+      if (prevEnv === undefined) delete process.env.CAMBIUM_COMPILE_RB;
+      else process.env.CAMBIUM_COMPILE_RB = prevEnv;
+      rmSync(join(__dirname, '..', 'node_modules'), { recursive: true, force: true });
     }
   });
 });
@@ -1696,6 +1740,147 @@ end
     });
   });
 
+  describe('mock option (#198 DEC-003)', () => {
+    let tmp: string | undefined;
+    afterEach(() => {
+      if (tmp) rmSync(tmp, { recursive: true, force: true });
+      tmp = undefined;
+    });
+
+    it('threads mock: true to runGenFromIrImpl when opts.mock is set, mock: false when absent', async () => {
+      tmp = setupWorkspace();
+
+      const capturedOpts: any[] = [];
+      const captureRun: RunGenFromIrFn = async (opts: any) => {
+        capturedOpts.push(opts);
+        return {
+          ok: true, output: {}, trace: { steps: [] },
+          runId: 'r', schemaId: 'X', ir: {} as any,
+          tracePath: '/x', outputPath: '/x', irPath: '/x', runDir: '/x',
+        } as any;
+      };
+
+      const handleA = runServe({
+        workspaceDir: tmp,
+        bind: parseBind('tcp://127.0.0.1:0'),
+        mock: true,
+        runGenFromIrFn: captureRun,
+      });
+      const addrA = await handleA.ready;
+      if (addrA.kind !== 'tcp') throw new Error('expected tcp');
+      await fetch(`http://127.0.0.1:${addrA.port}/v1/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gen: 'TestGen', method: 'analyze', input: 'x' }),
+      });
+      await handleA.close();
+
+      const handleB = runServe({
+        workspaceDir: tmp,
+        bind: parseBind('tcp://127.0.0.1:0'),
+        runGenFromIrFn: captureRun,
+      });
+      const addrB = await handleB.ready;
+      if (addrB.kind !== 'tcp') throw new Error('expected tcp');
+      await fetch(`http://127.0.0.1:${addrB.port}/v1/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gen: 'TestGen', method: 'analyze', input: 'x' }),
+      });
+      await handleB.close();
+
+      expect(capturedOpts).toHaveLength(2);
+      expect(capturedOpts[0].mock).toBe(true);
+      expect(capturedOpts[1].mock).toBe(false);
+    });
+
+    it('threads mock: true to runPipelineFromIrImpl when opts.mock is set, mock: false when absent (AUD-198-04)', async () => {
+      // The gen-site test above only pins `serve.ts`'s GEN dispatch call —
+      // reverting the PIPELINE dispatch site's `mock: opts.mock === true`
+      // to `mock: false` left every other suite green (SECURITY-AUDIT-198
+      // § AUD-198-04). This fixture adds the missing Pipeline IR coverage.
+      const pipeTmp = mkdtempSync(join(tmpdir(), 'cambium-serve-pipe-mock-'));
+      mkdirSync(join(pipeTmp, 'app/gens'), { recursive: true });
+      mkdirSync(join(pipeTmp, 'app/pipelines'), { recursive: true });
+      mkdirSync(join(pipeTmp, 'src'), { recursive: true });
+      writeFileSync(join(pipeTmp, 'app/gens/test_gen.cmb.rb'), FIXTURE_GEN);
+      writeFileSync(join(pipeTmp, 'src/contracts.ts'), FIXTURE_CONTRACTS);
+      writeFileSync(
+        join(pipeTmp, 'app/pipelines/test_pipeline.pipeline.rb'),
+        `
+class TestPipeline < Pipeline
+  input :doc, schema: AnalysisReport
+  step :one, gen: TestGen, method: :analyze,
+    with: { doc: bind(:input).doc }
+  def run(doc); end
+end
+`.trim(),
+      );
+      writeFileSync(
+        join(pipeTmp, 'Genfile.toml'),
+        `[package]
+name = "serve-pipe-mock"
+
+[types]
+contracts = ["src/contracts.ts"]
+
+[exports.gens]
+TestGen = "app/gens/test_gen.cmb.rb"
+
+[exports.pipelines]
+TestPipeline = "app/pipelines/test_pipeline.pipeline.rb"
+`,
+      );
+
+      try {
+        const capturedOpts: any[] = [];
+        const capturePipeline: RunPipelineFromIrFn = async (opts: any) => {
+          capturedOpts.push(opts);
+          return {
+            ok: true, output: {}, trace: { steps: [] },
+            runId: 'r', schemaId: 'X', ir: {} as any,
+            tracePath: '/x', outputPath: '/x', irPath: '/x', runDir: '/x',
+          } as any;
+        };
+
+        const handleA = runServe({
+          workspaceDir: pipeTmp,
+          bind: parseBind('tcp://127.0.0.1:0'),
+          mock: true,
+          runPipelineFromIrFn: capturePipeline,
+        });
+        const addrA = await handleA.ready;
+        if (addrA.kind !== 'tcp') throw new Error('expected tcp');
+        await fetch(`http://127.0.0.1:${addrA.port}/v1/run`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ gen: 'TestPipeline', method: 'run', input: 'x' }),
+        });
+        await handleA.close();
+
+        const handleB = runServe({
+          workspaceDir: pipeTmp,
+          bind: parseBind('tcp://127.0.0.1:0'),
+          runPipelineFromIrFn: capturePipeline,
+        });
+        const addrB = await handleB.ready;
+        if (addrB.kind !== 'tcp') throw new Error('expected tcp');
+        await fetch(`http://127.0.0.1:${addrB.port}/v1/run`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ gen: 'TestPipeline', method: 'run', input: 'x' }),
+        });
+        await handleB.close();
+
+        expect(capturedOpts).toHaveLength(2);
+        expect(capturedOpts[0].mock).toBe(true);
+        expect(capturedOpts[1].mock).toBe(false);
+      } finally {
+        rmSync(pipeTmp, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('nested member package (A-003 / AUD-001) + boot-time contracts resolution (AUD-002)', () => {
     const NESTED_GEN = `
 class NestedGen < GenModel
@@ -1809,5 +1994,459 @@ end
       await expect(handle.ready).rejects.toThrow(/TestGen\.analyze: returnSchemaId "RenamedAwaySchema" is not exported by/);
       await handle.close().catch(() => {});
     });
+  });
+});
+
+// #197: GET /v1/gens — self-describing catalog.
+describe('runServe — GET /v1/gens catalog (#197)', () => {
+  // Rich gen: describe, model + fallback, budget (per_run + per_tool),
+  // security network allowlist, `returns :Symbol` (exercises the
+  // contracts-resolution reuse path).
+  const CATALOG_GEN = `
+class CatalogGen < GenModel
+  model "ollama:test", "ollama:test-fallback"
+  system "test prompt"
+  describe "Extracts structured data from a document."
+  security network: { allowlist: ["api.tavily.com"] }
+  budget per_run: { max_calls: 10, max_tokens: 4000 },
+         per_tool: { tavily: { max_calls: 3 } }
+  returns AnalysisReport
+
+  def analyze(doc)
+    generate "analyze the document" do
+      with context: doc
+    end
+  end
+
+  def summarize(doc)
+    generate "summarize" do
+      with context: doc
+    end
+  end
+end
+`;
+
+  // Plain gen: no describe, no budget, no security, single model, inline
+  // `returns do … end` block — every "absent" field on the wire should be
+  // null and the schema should be the inline block, not contracts-resolved.
+  const PLAIN_GEN = `
+class PlainGen < GenModel
+  model "ollama:test"
+  system "test prompt"
+
+  returns do
+    field :summary, String
+  end
+
+  def analyze(doc)
+    generate "analyze" do
+      with context: doc
+    end
+  end
+end
+`;
+
+  const CATALOG_CONTRACTS = `
+export const AnalysisReport = {
+  $id: 'AnalysisReport',
+  type: 'object',
+  properties: { summary: { type: 'string' } },
+  required: ['summary'],
+  additionalProperties: true,
+};
+`;
+
+  // Pipeline: security + budget declared (pipeline-level flat
+  // {tokens, tool_calls} shape — deliberately NOT the same shape as a
+  // gen's {per_run, per_tool}, to prove the catalog passes each through
+  // verbatim rather than inventing a unified shape). 1:1 class/method
+  // (RED-374), so exactly one method: "run".
+  const CATALOG_PIPELINE = `
+class CatalogPipeline < Pipeline
+  input :doc, schema: AnalysisReport
+  security network: { allowlist: ["api.tavily.com"] }
+  budget tokens: 5000, tool_calls: 20
+  step :one, gen: CatalogGen, method: :analyze,
+    with: { doc: bind(:input).doc }
+  def run(doc); end
+end
+`;
+
+  // AUD-197-1: sandboxed exec, non-empty exec-scoped network allowlist.
+  // Mirrors the audit report's minimal repro — the real Ruby compiler
+  // emits `{ allowed: false, runtime: "firecracker", network: { allowlist } }`
+  // for this declaration (no top-level `security network:` slot at all).
+  const EXEC_GEN = `
+class ExecGen < GenModel
+  model "ollama:test"
+  system "test prompt"
+  security exec: {
+    runtime: :firecracker,
+    network: { allowlist: ["evil.example.com"] },
+  }
+
+  returns do
+    field :summary, String
+  end
+
+  def analyze(doc)
+    generate "analyze" do
+      with context: doc
+    end
+  end
+end
+`;
+
+  // AUD-197-1: the explicit unsandboxed sharp-knife opt-in — proves
+  // `runtime`/`unsafe_native` are reported verbatim, not collapsed into
+  // a single boolean, and that an undeclared exec-scoped network:
+  // sub-key reports 'none' (deny-by-default), not null/omitted.
+  const UNSAFE_NATIVE_GEN = `
+class UnsafeNativeGen < GenModel
+  model "ollama:test"
+  system "test prompt"
+  security exec: { unsafe_native: true }
+
+  returns do
+    field :summary, String
+  end
+
+  def analyze(doc)
+    generate "analyze" do
+      with context: doc
+    end
+  end
+end
+`;
+
+  // AUD-197-3: a declared network slot with no allowlist key — compiles
+  // to allowlist: [] (functionally deny-all per network-guard.ts), which
+  // must label as 'none', not 'allowlist'.
+  const EMPTY_ALLOWLIST_GEN = `
+class EmptyAllowlistGen < GenModel
+  model "ollama:test"
+  system "test prompt"
+  security network: { block_private: false }
+
+  returns do
+    field :summary, String
+  end
+
+  def analyze(doc)
+    generate "analyze" do
+      with context: doc
+    end
+  end
+end
+`;
+
+  // AUD-197-2: a policy-pack-sourced security/budget declaration — the
+  // only path that populates the Ruby-side \`_packs\` accumulator this
+  // change strips before the wire. Mirrors app/policies/research_defaults
+  // + web_researcher.cmb.rb in this repo.
+  const CATALOG_PACK = `
+network \\
+  allowlist: %w[packed.example.com]
+
+budget \\
+  per_tool: { packed_tool: { max_calls: 2 } },
+  per_run:  { max_calls: 7 }
+`;
+
+  const PACKED_GEN = `
+class PackedGen < GenModel
+  model "ollama:test"
+  system "test prompt"
+  security :catalog_pack
+  budget   :catalog_pack
+
+  returns do
+    field :summary, String
+  end
+
+  def analyze(doc)
+    generate "analyze" do
+      with context: doc
+    end
+  end
+end
+`;
+
+  function setupWorkspace(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'cambium-serve-catalog-'));
+    mkdirSync(join(dir, 'app/gens'), { recursive: true });
+    mkdirSync(join(dir, 'app/pipelines'), { recursive: true });
+    mkdirSync(join(dir, 'app/policies'), { recursive: true });
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'app/gens/catalog_gen.cmb.rb'), CATALOG_GEN);
+    writeFileSync(join(dir, 'app/gens/plain_gen.cmb.rb'), PLAIN_GEN);
+    writeFileSync(join(dir, 'app/gens/exec_gen.cmb.rb'), EXEC_GEN);
+    writeFileSync(join(dir, 'app/gens/unsafe_native_gen.cmb.rb'), UNSAFE_NATIVE_GEN);
+    writeFileSync(join(dir, 'app/gens/empty_allowlist_gen.cmb.rb'), EMPTY_ALLOWLIST_GEN);
+    writeFileSync(join(dir, 'app/gens/packed_gen.cmb.rb'), PACKED_GEN);
+    writeFileSync(join(dir, 'app/policies/catalog_pack.policy.rb'), CATALOG_PACK);
+    writeFileSync(join(dir, 'app/pipelines/catalog_pipeline.pipeline.rb'), CATALOG_PIPELINE);
+    writeFileSync(join(dir, 'src/contracts.ts'), CATALOG_CONTRACTS);
+    writeFileSync(
+      join(dir, 'Genfile.toml'),
+      `[package]
+name = "serve-catalog"
+
+[types]
+contracts = ["src/contracts.ts"]
+
+[exports.gens]
+CatalogGen = "app/gens/catalog_gen.cmb.rb"
+PlainGen = "app/gens/plain_gen.cmb.rb"
+ExecGen = "app/gens/exec_gen.cmb.rb"
+UnsafeNativeGen = "app/gens/unsafe_native_gen.cmb.rb"
+EmptyAllowlistGen = "app/gens/empty_allowlist_gen.cmb.rb"
+PackedGen = "app/gens/packed_gen.cmb.rb"
+
+[exports.pipelines]
+CatalogPipeline = "app/pipelines/catalog_pipeline.pipeline.rb"
+`,
+    );
+    return dir;
+  }
+
+  let tmp: string;
+  let handle: RunServeHandle | undefined;
+  let prevMock: string | undefined;
+
+  beforeAll(() => {
+    prevMock = process.env.CAMBIUM_ALLOW_MOCK;
+    process.env.CAMBIUM_ALLOW_MOCK = '1';
+  });
+  afterAll(() => {
+    if (prevMock === undefined) delete process.env.CAMBIUM_ALLOW_MOCK;
+    else process.env.CAMBIUM_ALLOW_MOCK = prevMock;
+  });
+
+  beforeEach(() => {
+    tmp = setupWorkspace();
+  });
+  afterEach(async () => {
+    if (handle) await handle.close().catch(() => {});
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('returns the full wire shape for a gen, a defaults-only gen, and a pipeline', async () => {
+    handle = runServe({ workspaceDir: tmp, bind: parseBind('tcp://127.0.0.1:0') });
+    const addr = await handle.ready;
+    if (addr.kind !== 'tcp') throw new Error('expected tcp bind');
+    const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    const res = await fetch(`${baseUrl}/v1/gens`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.version).toBe('v1');
+    expect(Array.isArray(body.gens)).toBe(true);
+
+    const byName = Object.fromEntries(body.gens.map((g: any) => [g.name, g]));
+    expect(Object.keys(byName).sort()).toEqual([
+      'CatalogGen',
+      'CatalogPipeline',
+      'EmptyAllowlistGen',
+      'ExecGen',
+      'PackedGen',
+      'PlainGen',
+      'UnsafeNativeGen',
+    ]);
+
+    // Rich gen: every field populated, returns:Symbol resolved via contracts.
+    const catalogGen = byName.CatalogGen;
+    expect(catalogGen.kind).toBe('gen');
+    expect(catalogGen.description).toBe('Extracts structured data from a document.');
+    expect(catalogGen.methods.sort()).toEqual(['analyze', 'summarize']);
+    expect(catalogGen.returns.analyze).toMatchObject({
+      $id: 'AnalysisReport',
+      type: 'object',
+      properties: { summary: { type: 'string' } },
+    });
+    expect(catalogGen.returns.summarize).toMatchObject({ $id: 'AnalysisReport' });
+    expect(catalogGen.model).toEqual({ id: 'ollama:test', fallbacks: ['ollama:test-fallback'] });
+    expect(catalogGen.budget).toEqual({
+      per_run: { max_calls: 10, max_tokens: 4000 },
+      per_tool: { tavily: { max_calls: 3 } },
+    });
+    expect(catalogGen.egress).toEqual({ network: 'allowlist', allowlist: ['api.tavily.com'] });
+    // AUD-197-1: no `security exec:` slot declared — exec is null, not omitted.
+    expect(catalogGen.exec).toBeNull();
+    expect(catalogGen.example.gen).toBe('CatalogGen');
+    expect(['analyze', 'summarize']).toContain(catalogGen.example.method);
+    expect(typeof catalogGen.example.input).toBe('string');
+
+    // Plain gen: every optional field is null, schema is the inline block
+    // (not contracts-resolved — PlainGen never declares [types] usage for
+    // itself, it's just never looked up because returnSchema is inline).
+    const plainGen = byName.PlainGen;
+    expect(plainGen.kind).toBe('gen');
+    expect(plainGen.description).toBeNull();
+    expect(plainGen.methods).toEqual(['analyze']);
+    expect(plainGen.returns.analyze).toMatchObject({
+      $id: 'PlainGenOutput',
+      type: 'object',
+      properties: { summary: { type: 'string' } },
+    });
+    expect(plainGen.model).toEqual({ id: 'ollama:test', fallbacks: null });
+    expect(plainGen.budget).toBeNull();
+    expect(plainGen.egress).toEqual({ network: 'none', allowlist: null });
+    expect(plainGen.exec).toBeNull();
+    expect(plainGen.example).toEqual({ gen: 'PlainGen', method: 'analyze', input: '<document>' });
+
+    // Pipeline: no model (no single top-level model on a Pipeline IR), no
+    // returns schema (Pipeline IRs carry no returnSchemaId/returnSchema),
+    // budget/egress passed through verbatim in the pipeline's own shape.
+    const pipeline = byName.CatalogPipeline;
+    expect(pipeline.kind).toBe('pipeline');
+    expect(pipeline.description).toBeNull();
+    expect(pipeline.methods).toEqual(['run']);
+    expect(pipeline.returns).toEqual({ run: null });
+    expect(pipeline.model).toBeNull();
+    expect(pipeline.budget).toEqual({ tokens: 5000, tool_calls: 20 });
+    expect(pipeline.egress).toEqual({ network: 'allowlist', allowlist: ['api.tavily.com'] });
+    expect(pipeline.exec).toBeNull();
+    expect(pipeline.example).toEqual({ gen: 'CatalogPipeline', method: 'run', input: '<doc>' });
+  });
+
+  it('AUD-197-1: discloses the security exec: slot verbatim per-runtime, never collapsed into a boolean', async () => {
+    handle = runServe({ workspaceDir: tmp, bind: parseBind('tcp://127.0.0.1:0') });
+    const addr = await handle.ready;
+    if (addr.kind !== 'tcp') throw new Error('expected tcp bind');
+    const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    const res = await fetch(`${baseUrl}/v1/gens`);
+    const body = await res.json();
+    const byName = Object.fromEntries(body.gens.map((g: any) => [g.name, g]));
+
+    // Sandboxed exec, non-empty exec-scoped network allowlist — and NO
+    // top-level `security network:` slot, matching the audit repro: a
+    // gen can be network-reachable purely via its exec sandbox while
+    // `egress` (the top-level-only field) reports 'none'.
+    const execGen = byName.ExecGen;
+    expect(execGen.exec).toEqual({ runtime: 'firecracker', unsafe_native: false, network: 'allowlist' });
+    expect(execGen.egress).toEqual({ network: 'none', allowlist: null });
+
+    // Explicit unsandboxed sharp-knife opt-in — runtime/unsafe_native
+    // reported verbatim, not collapsed into a single boolean. No
+    // exec-scoped network: sub-key declared → 'none' (deny-by-default).
+    const unsafeNativeGen = byName.UnsafeNativeGen;
+    expect(unsafeNativeGen.exec).toEqual({ runtime: 'native', unsafe_native: true, network: 'none' });
+  });
+
+  it('AUD-197-3: a declared network slot with an empty allowlist reports egress.network as none, not allowlist', async () => {
+    handle = runServe({ workspaceDir: tmp, bind: parseBind('tcp://127.0.0.1:0') });
+    const addr = await handle.ready;
+    if (addr.kind !== 'tcp') throw new Error('expected tcp bind');
+    const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    const res = await fetch(`${baseUrl}/v1/gens`);
+    const body = await res.json();
+    const byName = Object.fromEntries(body.gens.map((g: any) => [g.name, g]));
+
+    const emptyAllowlistGen = byName.EmptyAllowlistGen;
+    expect(emptyAllowlistGen.egress).toEqual({ network: 'none', allowlist: null });
+  });
+
+  it('AUD-197-2: budget/egress from a policy-pack-sourced declaration match the pack, and _packs never reaches the wire', async () => {
+    handle = runServe({ workspaceDir: tmp, bind: parseBind('tcp://127.0.0.1:0') });
+    const addr = await handle.ready;
+    if (addr.kind !== 'tcp') throw new Error('expected tcp bind');
+    const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    const res = await fetch(`${baseUrl}/v1/gens`);
+    const body = await res.json();
+    const byName = Object.fromEntries(body.gens.map((g: any) => [g.name, g]));
+
+    const packedGen = byName.PackedGen;
+    expect(packedGen.budget).toEqual({
+      per_tool: { packed_tool: { max_calls: 2 } },
+      per_run: { max_calls: 7 },
+    });
+    expect(packedGen.egress).toEqual({ network: 'allowlist', allowlist: ['packed.example.com'] });
+    // Guards every field on the entry, not just budget/egress — a future
+    // field that forwards pack-sourced state must strip `_packs` too.
+    expect(JSON.stringify(packedGen)).not.toContain('_packs');
+  });
+
+  it('is never gated by --max-inflight — answers while the server is saturated with an in-flight run', async () => {
+    let release!: () => void;
+    const blocker = new Promise<void>((res) => { release = res; });
+    const slowRun: RunGenFromIrFn = async () => {
+      await blocker;
+      return {
+        ok: true, output: { summary: 'ok' }, trace: { steps: [] },
+        runId: 'run_slow', schemaId: 'AnalysisReport', ir: {} as any,
+        tracePath: '/tmp/fake/trace.json', outputPath: '/tmp/fake/output.json',
+        irPath: '/tmp/fake/ir.json', runDir: '/tmp/fake',
+      } as any;
+    };
+
+    handle = runServe({
+      workspaceDir: tmp,
+      bind: parseBind('tcp://127.0.0.1:0'),
+      runGenFromIrFn: slowRun,
+      maxInflight: 1,
+    });
+    const addr = await handle.ready;
+    if (addr.kind !== 'tcp') throw new Error('expected tcp bind');
+    const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    try {
+      // Saturate the single inflight slot.
+      const firstP = fetch(`${baseUrl}/v1/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gen: 'CatalogGen', method: 'analyze', input: 'x' }),
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Confirm the cap is actually hit (mirrors the existing overloaded test).
+      const overloadRes = await fetch(`${baseUrl}/v1/run`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ gen: 'CatalogGen', method: 'analyze', input: 'x' }),
+      });
+      expect(overloadRes.status).toBe(503);
+
+      // /v1/gens is a cheap read over the boot-time catalog — must answer
+      // 200 regardless of the saturated /v1/run cap (settled decision).
+      const catalogRes = await fetch(`${baseUrl}/v1/gens`);
+      expect(catalogRes.status).toBe(200);
+      const catalogBody = await catalogRes.json();
+      expect(catalogBody.gens.map((g: any) => g.name).sort()).toEqual([
+        'CatalogGen', 'CatalogPipeline', 'EmptyAllowlistGen', 'ExecGen',
+        'PackedGen', 'PlainGen', 'UnsafeNativeGen',
+      ]);
+
+      release();
+      await firstP;
+    } finally {
+      release();
+      await handle.close().catch(() => {});
+    }
+  });
+
+  it('boot-gating is identical to healthz: both sit behind the same booted check, before any URL routing', async () => {
+    // Not independently testable over HTTP (the listener only binds after
+    // boot work — including catalog construction — completes, so there is
+    // no window in which a connection can reach a not-yet-`booted` server;
+    // true of healthz too, which has no such test either). What IS
+    // provable: after boot, both routes are reachable and consistent.
+    handle = runServe({ workspaceDir: tmp, bind: parseBind('tcp://127.0.0.1:0') });
+    const addr = await handle.ready;
+    if (addr.kind !== 'tcp') throw new Error('expected tcp bind');
+    const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+    const [healthRes, catalogRes] = await Promise.all([
+      fetch(`${baseUrl}/v1/healthz`),
+      fetch(`${baseUrl}/v1/gens`),
+    ]);
+    expect(healthRes.status).toBe(200);
+    expect(catalogRes.status).toBe(200);
+    const healthBody = await healthRes.json();
+    const catalogBody = await catalogRes.json();
+    expect(catalogBody.gens.map((g: any) => g.name).sort()).toEqual(healthBody.gens.sort());
   });
 });

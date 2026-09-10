@@ -18,9 +18,9 @@ const WORKSPACE_ROOT = resolve(MODULE_DIR, '..', '..', '..', '..');
 
 /**
  * RED-380: Resolve the `cli/cambium.mjs` path. Mirrors the precedence
- * chain established by RED-376 (`resolveDefaultCompileRb`) so the retro
- * subprocess no longer depends on `process.cwd()` being the monorepo
- * root. Precedence, highest first:
+ * chain established by RED-376 (#242: unified as `compile-rb.ts#resolveCompileRb`)
+ * so the retro subprocess no longer depends on `process.cwd()` being the
+ * monorepo root. Precedence, highest first:
  *
  *   1. Explicit `override` (caller/test override — `opts.cambiumCli`).
  *

@@ -1,0 +1,4 @@
+{
+  "request": "Add a menu entry that opens my notes in Obsidian.",
+  "overlay": "{\n  // Bookmarks the user already added by hand.\n  \"projects\": { \"label\": \"Projects\", \"target\": \"https://github.com/me/projects\" },\n}\n"
+}

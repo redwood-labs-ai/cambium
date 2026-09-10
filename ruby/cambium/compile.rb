@@ -3,6 +3,7 @@
 require 'json'
 require_relative './runtime'
 require_relative './pipeline'
+require_relative './schema_export'
 
 # Make GenModel + Pipeline available at top-level for the Ruby DSL.
 GenModel = Cambium::GenModel unless defined?(GenModel)
@@ -168,18 +169,31 @@ if (schema_name = defs[:returnSchema])
   # catch the typo, and we don't want to block compile on arbitrary
   # contracts layouts. Validation is best-effort but should be strict
   # when it can run.
+  #
+  # #210/#212 (DEC-001/003/006): "is it exported" is single-sourced
+  # through Cambium::SchemaExport.classify/list_exports — the same
+  # tri-state mirror of `cli/schema-export.mjs` the scaffolder and lint
+  # use. A barrel `export * from './domain'` makes a contracts file's
+  # export set unknowable by regex; that must NOT raise (it would
+  # re-open the exact dead end #210 exists to close for the barrel
+  # layout `[types].contracts` already supports as an array) —
+  # enforcement falls through to the runner's own-property lookup and
+  # serve's boot preflight. Only a genuinely 'absent' name still raises;
+  # the RED-210 typo class stays caught.
   unless contracts_candidates.empty?
     all_exports = []
     found = false
+    unknowable_in = nil
     contracts_candidates.each do |cf|
       content = File.read(cf)
-      content.scan(/^\s*export\s+const\s+([A-Z][A-Za-z0-9_]*)\b/) do |m|
-        all_exports << m[0]
+      all_exports.concat(Cambium::SchemaExport.list_exports(content))
+      case Cambium::SchemaExport.classify(content, schema_name)
+      when 'exported' then found = true
+      when 'unknowable' then unknowable_in = cf
       end
-      found = true if content.match?(/^\s*export\s+const\s+#{Regexp.escape(schema_name)}\b/)
     end
 
-    unless found
+    if !found && !unknowable_in
       available = all_exports.uniq.sort
       suggestion = available.find { |e| e.downcase == schema_name.downcase } ||
                    available.find { |e| e.start_with?(schema_name) || schema_name.start_with?(e) }
@@ -644,6 +658,13 @@ build_ir = lambda do |method_name, steps|
     # did before — same reason `model.fallbacks` and `effort` are omitted.
     **(repair_slot ? { 'repairModel' => repair_slot } : {}),
     'system' => system_prompt,
+    # #196: machine-readable gen description, distinct from the JSON-Schema
+    # `description` nested under `returnSchema/properties/*` (per-field docs).
+    # Absent (not null) when the gen never declares `describe` — same
+    # omitted-when-unused rule as `effort` and `model.fallbacks` above, so
+    # every existing gen compiles to the bytes it did before this primitive
+    # existed.
+    **(defs[:description] ? { 'description' => defs[:description] } : {}),
     'mode' => defs[:mode],
     # RED-325: effort is a per-gen steering control for models that dropped
     # sampling params. Passed through the IR as-is; the runner validates

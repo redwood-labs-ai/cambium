@@ -1,10 +1,11 @@
 import { readFileSync, existsSync } from 'node:fs';
-import { execSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import Ajv from 'ajv';
 import type { GenerateTextFn, ExtractJsonFn, TokenUsage } from './step-handlers.js';
 import { handleGenerate, handleValidate, handleRepair } from './step-handlers.js';
 import { isDocumentEntry } from './documents.js';
+import { resolveCompileRb } from './compile-rb.js';
 
 export type EnrichmentDef = {
   field: string;   // context field to enrich (e.g., "datadog_logs")
@@ -89,19 +90,40 @@ export async function runEnrichment(
   contractsMod: any,
   generateText: GenerateTextFn,
   extractJson: ExtractJsonFn,
+  // #219 DEV-004/DEV-005: app-package root (RED-286: `<root>/packages/cambium`
+  // for a [workspace] Genfile, `<root>` for a [package] Genfile) — the SAME
+  // `appPkgRoot` `runGen` already resolves via `resolveAppRoot` and uses for
+  // tool/action/provider/log-sink discovery (CLAUDE.md's "App-root resolution
+  // is single-sourced" invariant: never re-resolve from cwd independently
+  // here). Threaded down from `runGen`'s call site.
+  //
+  // DELIBERATELY NO DEFAULT. `process.cwd()` plus a hardcoded `packages/cambium`
+  // prefix is exactly the pair of bugs #219 exists to remove (the cwd
+  // dependency AND the [workspace]-only layout assumption) — a default here
+  // would silently reintroduce both the moment a future call site omits this
+  // argument, with no compile error to catch it. Required on purpose: every
+  // caller must state where its app root actually is. Positioned before the
+  // optional test-override parameters below so it can be required without a
+  // "required parameter after optional" TS error.
+  appPkgRoot: string,
   // Optional override for tests: inject a custom agent-file resolver so
   // the test can supply a temp-dir path without writing to the live gens dir
-  // (AUD-F1). Defaults to the real filesystem search.
-  _findAgentFile: (name: string) => string | null = findAgentFile,
+  // (AUD-F1). When omitted, resolves via findAgentFile(name, appPkgRoot) below.
+  _findAgentFile?: (name: string) => string | null,
+  // #219: explicit `ruby/cambium/compile.rb` path, threaded from
+  // `RunGenFromIrOptions.compileRb` via `runGen`. See `compile-rb.ts#resolveCompileRb`
+  // for the fallback chain used when this is omitted.
+  compileRb?: string,
 ): Promise<EnrichmentResult> {
   const traceSteps: any[] = [];
   const method = enrichment.method ?? 'summarize';
 
-  // Find the agent's .cmb.rb file by looking for it in the registered classes.
-  // The agent must be defined in a file that's been loaded by the parent compilation.
-  // For v0, we look in the same package's gens directory.
+  // Find the agent's .cmb.rb file under <appPkgRoot>/app/gens/ — layout-aware
+  // (RED-286): appPkgRoot is already the right root for both [workspace] and
+  // [package] shapes, resolved upstream from ir.entry.source, never cwd.
   const agentName = enrichment.agent;
-  const agentFile = _findAgentFile(agentName);
+  const resolveAgentFile = _findAgentFile ?? ((name: string) => findAgentFile(name, appPkgRoot));
+  const agentFile = resolveAgentFile(agentName);
 
   if (!agentFile) {
     traceSteps.push({
@@ -112,15 +134,40 @@ export async function runEnrichment(
     return { field: enrichment.field, ok: false, traceSteps };
   }
 
-  // Compile the sub-agent by spawning Ruby
+  // #219: resolve compile.rb before spawning — a caller-passed cwd doesn't
+  // enter into it any more (#242: shared chain, see compile-rb.ts).
+  const resolvedCompileRb = resolveCompileRb(compileRb);
+  if (!resolvedCompileRb) {
+    traceSteps.push({
+      type: 'EnrichCompileError',
+      ok: false,
+      errors: [{
+        message:
+          'Could not locate ruby/cambium/compile.rb to compile agent ' +
+          `"${agentName}". Pass compileRb explicitly (RunGenFromIrOptions.compileRb), ` +
+          'set CAMBIUM_COMPILE_RB, or run from the cambium monorepo root.',
+      }],
+    });
+    return { field: enrichment.field, ok: false, traceSteps };
+  }
+
+  // Compile the sub-agent by spawning Ruby. #219: argv array via spawnSync,
+  // never a shell string — the agent file path is not shell-escaped.
   let subIr: any;
   try {
     const contextStr = typeof contextValue === 'string' ? contextValue : JSON.stringify(contextValue);
-    const irJson = execSync(
-      `ruby ruby/cambium/compile.rb "${agentFile}" --method ${method} --arg -`,
-      { input: contextStr, encoding: 'utf8', cwd: process.cwd() },
+    const spawned = spawnSync(
+      'ruby',
+      [resolvedCompileRb, agentFile, '--method', method, '--arg', '-'],
+      { input: contextStr, encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 },
     );
-    subIr = JSON.parse(irJson);
+    if (spawned.error) throw spawned.error;
+    if (spawned.status !== 0) {
+      throw new Error(
+        `ruby compile.rb exited with status ${spawned.status ?? 'null'}: ${spawned.stderr || '(no stderr)'}`,
+      );
+    }
+    subIr = JSON.parse(spawned.stdout);
   } catch (e: any) {
     traceSteps.push({
       type: 'EnrichCompileError',
@@ -219,15 +266,24 @@ export async function runEnrichment(
   };
 }
 
-function findAgentFile(agentName: string): string | null {
+/**
+ * #219 DEV-004: locate the enrichment sub-agent's `.cmb.rb` file under
+ * `<appPkgRoot>/app/gens/`. `appPkgRoot` is layout-aware (RED-286) —
+ * `<root>/packages/cambium` for a [workspace] Genfile, `<root>` for a
+ * [package] Genfile — so this resolves correctly under both project shapes
+ * without special-casing either here. Never re-resolves from
+ * `process.cwd()` itself; the caller (`runEnrichment`) is responsible for
+ * passing the already-resolved root.
+ */
+function findAgentFile(agentName: string, appPkgRoot: string): string | null {
   const snakeName = agentName
     .replace(/([A-Z])/g, '_$1')
     .toLowerCase()
     .replace(/^_/, '');
 
   const candidates = [
-    join('packages', 'cambium', 'app', 'gens', `${snakeName}.cmb.rb`),
-    join('packages', 'cambium', 'app', 'gens', `${agentName.toLowerCase()}.cmb.rb`),
+    join(appPkgRoot, 'app', 'gens', `${snakeName}.cmb.rb`),
+    join(appPkgRoot, 'app', 'gens', `${agentName.toLowerCase()}.cmb.rb`),
   ];
 
   for (const path of candidates) {

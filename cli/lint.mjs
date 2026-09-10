@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, basename, dirname, resolve } from 'node:path';
 import { parse as parseToml } from 'smol-toml';
 import { detectWorkspaceShape, resolveMembers } from './workspace-shape.mjs';
+import { classify, listExports } from './schema-export.mjs';
 
 // Engine-mode sentinel — RED-246 / RED-220. A directory marked with
 // this file is a self-contained engine folder; lint scans siblings
@@ -366,12 +367,21 @@ function lintPackage(pkgDir) {
       // inline into the IR and never consults contracts.ts, and
       // lowercase prose in comments ("…returns a structured…") must not
       // trip the check (issues #167 / #160).
+      //
+      // #210/#212 (DEC-002/003/005): "is it exported" is single-sourced
+      // through `classify`/`listExports` (`./schema-export.mjs`), the
+      // same tri-state the scaffolder and the Ruby compiler use. A
+      // barrel `export * from './domain'` makes a file's export set
+      // unknowable by regex — that must NOT be reported as a miss (the
+      // AUD-206-01 misdirection), so it's a non-failing `warn`, not a
+      // `fail`. Only a genuinely `absent` name still fails.
       const returnsMatch = scan.match(/^\s*returns\s+:?([A-Z]\w*)/m);
       if (returnsMatch && genfile.types?.contracts) {
         const schemaName = returnsMatch[1];
         const contracts = Array.isArray(genfile.types.contracts) ? genfile.types.contracts : [genfile.types.contracts];
         const availableExports = new Set();
         let foundIn = null;
+        let unknowableIn = null;
         for (const c of contracts) {
           // See the types.contracts guard in section 3 above (AUD-217-04)
           // — this is a second, independent consumption site for the
@@ -381,12 +391,15 @@ function lintPackage(pkgDir) {
             continue;
           }
           const contractsContent = readFileSync(join(pkgDir, c), 'utf8');
-          const exportRe = /^\s*export\s+const\s+([A-Z][A-Za-z0-9_]*)\b/gm;
-          for (const m of contractsContent.matchAll(exportRe)) availableExports.add(m[1]);
-          if (contractsContent.includes(`export const ${schemaName}`)) foundIn = c;
+          for (const e of listExports(contractsContent)) availableExports.add(e);
+          const verdict = classify(contractsContent, schemaName);
+          if (verdict === 'exported') foundIn = c;
+          else if (verdict === 'unknowable') unknowableIn = c;
         }
         if (foundIn) {
           pass(`${f}: returns ${schemaName} (found in ${foundIn})`);
+        } else if (unknowableIn) {
+          warn(`${f}: returns ${schemaName} — ${unknowableIn} has an \`export *\` re-export; could not verify this reference`);
         } else {
           const sorted = [...availableExports].sort();
           const suggestion = sorted.find(e => e.toLowerCase() === schemaName.toLowerCase())
@@ -485,11 +498,14 @@ function lintPackage(pkgDir) {
 
       // 8d. Input schema (best-effort) — every input :name, schema: X
       // should resolve to a contracts.ts export. Mirrors the gen-side
-      // returns check above.
+      // returns check above, including the #210/#212 tri-state: an
+      // `export *` re-export makes a contracts file's export set
+      // unknowable, and that's a non-failing `warn`, not a `fail`.
       const inputMatches = [...content.matchAll(/input\s+:[a-z_][a-z0-9_]*\s*,\s*schema:\s*(\w+)/g)];
       if (inputMatches.length > 0 && genfile.types?.contracts) {
         const contracts = Array.isArray(genfile.types.contracts) ? genfile.types.contracts : [genfile.types.contracts];
         const availableExports = new Set();
+        const contractsContents = [];
         for (const c of contracts) {
           // See the types.contracts guard in section 3 above (AUD-217-04)
           // — a fifth independent consumption site for the same array
@@ -499,12 +515,25 @@ function lintPackage(pkgDir) {
             continue;
           }
           const cc = readFileSync(join(pkgDir, c), 'utf8');
-          const exportRe = /^\s*export\s+const\s+([A-Z][A-Za-z0-9_]*)\b/gm;
-          for (const m of cc.matchAll(exportRe)) availableExports.add(m[1]);
+          contractsContents.push(cc);
+          for (const e of listExports(cc)) availableExports.add(e);
         }
         for (const m of inputMatches) {
           const schemaName = m[1];
-          if (!availableExports.has(schemaName)) {
+          let found = false;
+          let unknowable = false;
+          for (const cc of contractsContents) {
+            const verdict = classify(cc, schemaName);
+            if (verdict === 'exported') { found = true; break; }
+            if (verdict === 'unknowable') unknowable = true;
+          }
+          if (found) continue;
+          if (unknowable) {
+            warn(
+              `app/pipelines/${f}: input schema ${schemaName} — ${contracts.join(', ')} has an ` +
+              `\`export *\` re-export; could not verify this reference`,
+            );
+          } else {
             const suggestion = [...availableExports]
               .find((e) => e.toLowerCase() === schemaName.toLowerCase());
             const hint = suggestion ? ` Did you mean '${suggestion}'?` : '';
@@ -570,16 +599,17 @@ function lintEngine(engineDir) {
   const entries = readdirSync(engineDir);
 
   // 2. Schemas — parse schemas.ts for top-level exports, we'll validate
-  //    `returns <Schema>` against these below.
+  //    `returns <Schema>` against these below. #210/#212 (DEC-002/005):
+  //    discovery goes through the same `listExports` the scaffolder and
+  //    Ruby compiler use, not a lone `export const` regex.
   const availableSchemas = new Set();
   const schemasPath = join(engineDir, 'schemas.ts');
   const hasSchemasFile = existsSync(schemasPath);
+  let schemasContent = '';
   if (hasSchemasFile) {
     pass('schemas.ts');
-    const content = readFileSync(schemasPath, 'utf8');
-    for (const m of content.matchAll(/^\s*export\s+const\s+([A-Z][A-Za-z0-9_]*)\b/gm)) {
-      availableSchemas.add(m[1]);
-    }
+    schemasContent = readFileSync(schemasPath, 'utf8');
+    for (const e of listExports(schemasContent)) availableSchemas.add(e);
   } else {
     warn('no schemas.ts (required for `returns <Schema>` validation)');
   }
@@ -731,29 +761,29 @@ function lintEngine(engineDir) {
     // corrects :math` examples must not be matched as if they were live.
     const scan = stripCommentLines(content);
 
-    // returns <Schema>
+    // returns <Schema>. #210/#212 (DEC-002/003): classify through the
+    // same tri-state the scaffolder and Ruby compiler use — `exported`
+    // passes, `absent` fails (with a did-you-mean from `availableSchemas`),
+    // and `unknowable` (an `export *` re-export) is a non-failing `warn`
+    // rather than a claimed miss (the AUD-206-01 misdirection issue #211
+    // first patched over with the old `size > 0` guard).
     const returnsMatch = scan.match(/^\s*returns\s+([A-Z]\w*)/m);
     if (returnsMatch) {
       const schemaName = returnsMatch[1];
-      if (availableSchemas.size > 0) {
-        if (availableSchemas.has(schemaName)) {
+      if (hasSchemasFile) {
+        const verdict = classify(schemasContent, schemaName);
+        if (verdict === 'exported') {
           pass(`${f}: returns ${schemaName} (found in schemas.ts)`);
+        } else if (verdict === 'unknowable') {
+          warn(`${f}: returns ${schemaName} — schemas.ts has an \`export *\` re-export; could not verify this reference`);
         } else {
           const sorted = [...availableSchemas].sort();
           const suggestion = sorted.find(s => s.toLowerCase() === schemaName.toLowerCase());
           const hint = suggestion ? ` Did you mean '${suggestion}'?` : '';
           fail(`${f}: returns ${schemaName} — not exported from schemas.ts.${hint}`);
         }
-      } else if (hasSchemasFile) {
-        // schemas.ts exists but the `export const` scan (issue #210's
-        // territory, not this fix's) recognized no top-level exports —
-        // e.g. `const X = ...; export { X }`. The schema may genuinely be
-        // exported; lint just can't see it, so it must not claim a miss
-        // (that misdirection is exactly what the audit flagged about the
-        // compiler's own error message — issue #211).
-        warn(`${f}: returns ${schemaName} — schemas.ts has no \`export const\` declarations lint recognizes, could not validate this reference`);
       }
-      // else: no schemas.ts at all — already warned above (line ~556).
+      // else: no schemas.ts at all — already warned above (line ~613).
     }
 
     // system :name → <name>.system.md sibling

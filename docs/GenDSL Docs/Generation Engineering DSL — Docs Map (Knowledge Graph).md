@@ -33,6 +33,7 @@ This folder is the canonical doc graph for **Cambium** ("Rails for generation en
 - [[C - Signals, State, and Triggers]]
 - [[C - Schema Description (auto-generated)]]
 - [[C - Serve Mode]] — long-lived HTTP server hosting every gen in a workspace (RED-360); locked v1 wire format, closed `error.kind` enum, `--max-inflight` / `--run-timeout` / `--shutdown-timeout`; `--precompiled` / `--ir-dir` boot with no Ruby on PATH (#195)
+- [[C - MCP Mode]] — MCP-stdio ↔ `/v1`-HTTP adapter exposing every gen×method as a typed MCP tool (`<GenName>__<method>`); private-socket `runServe` reuse, `{ input }` wrapper, dispatch failures relayed as tool results carrying the `/v1/run` error envelope verbatim (#198)
 - [[P - cambium replay]] — re-run a prior run's post-Generate tail from its candidate output, skipping the expensive Generate; trace-as-savepoint, `parent_run_id` lineage, `--edit` / `--from-step` (gen, RED-312); `--from-op` pipeline-operator resume reusing recorded outputs (RED-385 Phase B)
 - [[P - Golden Tests (RED-140)]] — field-level snapshot comparison with tolerances and normalizers (dates, numbers, citations, strings); deterministic via `--mock`/replay so regression runs never burn tokens; `goldenTest` exported from the runner package; `cambium new agent` scaffolds the pattern automatically
 

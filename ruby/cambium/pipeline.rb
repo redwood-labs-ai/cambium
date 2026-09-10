@@ -2,6 +2,7 @@
 
 require 'json'
 require_relative './runtime'
+require_relative './schema_export'
 
 module Cambium
   # A typed reference to a value flowing through the pipeline.
@@ -817,6 +818,11 @@ module Cambium
     # contracts.ts. Same best-effort stance as compile.rb's `returns`
     # validation: skip silently when no contracts file is discoverable;
     # raise CompileError on a name miss when validation can run.
+    #
+    # #210/#212 (DEC-001/003/006): "is it exported" goes through the
+    # same Cambium::SchemaExport tri-state compile.rb uses. An
+    # unknowable contracts file (`export *`) proceeds rather than
+    # raises — see compile.rb's matching comment for the full rationale.
     def validate_input_schemas(defs, file)
       inputs = defs['inputs']
       return if inputs.nil? || inputs.empty?
@@ -824,16 +830,14 @@ module Cambium
       contracts_candidates = contracts_candidates_for(file)
       return if contracts_candidates.empty?
 
-      all_exports = []
-      contracts_candidates.each do |cf|
-        content = File.read(cf)
-        content.scan(/^\s*export\s+const\s+([A-Z][A-Za-z0-9_]*)\b/) { |m| all_exports << m[0] }
-      end
-      all_exports.uniq!
+      contents = contracts_candidates.map { |cf| File.read(cf) }
+      all_exports = contents.flat_map { |content| Cambium::SchemaExport.list_exports(content) }.uniq
 
       inputs.each do |name, info|
         schema = info['schema']
-        next if all_exports.include?(schema)
+        verdicts = contents.map { |content| Cambium::SchemaExport.classify(content, schema) }
+        next if verdicts.include?('exported') || verdicts.include?('unknowable')
+
         suggestion = all_exports.find { |e| e.downcase == schema.downcase }
         hint = suggestion ? "\n\nDid you mean '#{suggestion}'?" : ''
         raise Cambium::CompileError,

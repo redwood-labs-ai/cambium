@@ -8,6 +8,189 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _Nothing yet._
 
+## [0.12.0] — 2026-09-09 — The Catalog
+
+To find out what a Cambium workspace could do, you read its source. There was no
+other way. A gen's purpose lived in a `.cmb.rb` file and nowhere else — not in the
+IR, not on the wire, not anywhere a program could ask.
+
+This release gives that answer a place to live and three ways to read it.
+`describe` is a one-line class-level declaration that compiles to a top-level IR
+field. `GET /v1/gens` serves the catalog built from it — description, methods,
+per-method output schema, budget ceilings, model and fallbacks, egress posture,
+exec disclosure, and a worked `/v1/run` body — assembled at boot from the same
+cached IRs `/v1/run` dispatches against, so it cannot drift from what actually
+runs. And `cambium mcp` adapts that catalog into typed MCP tools over stdio, one
+per gen×method, so an MCP client gets a Cambium workspace's whole surface without
+knowing Cambium exists.
+
+The adapter is deliberately thin. It boots `runServe`'s own HTTP core on a private
+socket and relays, so dispatch, error mapping, and boot are reused byte-for-byte
+rather than reimplemented — which is why a failed `tools/call` carries the
+`/v1/run` error envelope verbatim instead of a second classification that could
+drift from the first.
+
+The other half of the release is gates that turned out not to be watching. CI had
+never run the unit suite, so every "tests pass" claim rested on the author having
+run them locally. CI review computed a tip-to-tip diff instead of a merge-base one
+and reviewed unrelated commits. Five independent regexes disagreed about what
+"exported from `contracts.ts`" means. And `budget per_run: { max_calls: }` charged
+every agentic tool call twice, so the cap silently meant half what it said. Each
+of those was load-bearing, and each was wrong in the direction that looks fine.
+
+### Breaking Changes
+
+- **`cambium_ci_review.pipeline.rb`'s `--arg` is now a JSON object, not raw diff text (#233).** The pipeline gained a second `input :surfaces` slot alongside `input :diff`, making it multi-slot — which #226 (0.11.0) enforces fail-closed: `--arg` must supply every declared slot as a JSON object. `.forgejo/workflows/ci-review.yml` builds `{"diff": "...", "surfaces": [...]}` via `scripts/ci-review-input.mjs`; a caller still passing a raw diff string (or file path) to `--arg` now gets #226's "must be a JSON object" error instead of a review. Scoped to this one shipped example pipeline — no change to the multi-slot mechanism itself, which #226 already covers.
+
+### Added
+
+- **`cambium mcp` — gen catalog as typed MCP tools over stdio (#198).** `cambium mcp --workspace <path>` speaks MCP over stdio: an MCP client can `initialize`, get one typed tool per gen×method from `tools/list` (`<GenName>__<method>`, input schema derived per catalog entry, output schema from `returns`), and `tools/call` end-to-end. It's a pure adapter — boots `runServe`'s HTTP core in-process on a private socket (a fresh `mkdtemp` unix socket on POSIX, a named pipe on win32) and relays `GET /v1/gens` + `POST /v1/run` traffic into MCP's shape, so dispatch and boot are reused byte-for-byte rather than reimplemented. Dispatch failures come back as tool results (`isError: true`) carrying the `/v1/run` error envelope verbatim in both `content` and `structuredContent`; protocol-level failures (unknown tool, malformed params, JSON-RPC batching) stay JSON-RPC errors. No new `error.kind` values, no changes to any existing `/v1` route. Zero new dependencies — framing is hand-rolled newline-delimited JSON-RPC 2.0 on `node:http`/`process.stdin`/`stdout`. `--precompiled`/`--ir-dir`/`--mock` mirror `cambium serve`'s own flags. Protocol core: `packages/cambium-runner/src/mcp/mcp-stdio.ts` (`runMcpStdio` — plus its `McpStdioOptions`/`McpStdioHandle` types — exported alongside `runServe`, for engine-mode hosts that want to embed the MCP adapter directly rather than shell out to `cambium mcp`); CLI glue: `cli/mcp.mjs`. Docs: [`C - MCP Mode`](docs/GenDSL%20Docs/C%20-%20MCP%20Mode.md). **Hardened in an audit-response follow-up (same #198):** `tools/call` arguments are now validated structurally against the tool's own advertised `inputSchema` *before* dispatch — a missing or mistyped `input` is rejected with `-32602`, never silently dispatched against an empty document; a single stdin line is capped at 16 MiB, with discard-until-newline resync on overflow (bounded memory, no process kill); a boot failure now cleans up its private socket tmpdir; and `process.stdout.write` itself (not just `console.log`) is rebound to stderr for the process's lifetime, so an in-process plugin can't corrupt the protocol stream either.
+
+- **First vendored third-party source: Omarchy's `MenuModel.js` (#201).** `packages/cambium/app/correctors/vendor/omarchy/menu_model.cjs` — a byte-for-byte copy (pinned commit, header names upstream repo/branch/commit/path) of Omarchy's real menu-entry parser, loaded via `createRequire` so the new `MenuEntry` gen's corrector validates proposals against the actual consumer instead of reimplementing its inference rules. `app/correctors/vendor/<upstream>/` is now a documented convention (`P - corrects (correctors).md`) for non-corrector support code; it's inert to corrector discovery, which only scans `*.corrector.ts` non-recursively. Not a dependency-policy change — CLAUDE.md's dependency-policy cluster (npm/Ruby) doesn't cover vendored source yet; noted here for discoverability, not as new policy.
+
+- **`compileRb` option on `RunGenOptions` / `RunGenFromIrOptions`.** An explicit path to
+  `ruby/cambium/compile.rb` for hosts that know where theirs lives. Purely additive —
+  omitting it selects the same default chain described below, so existing callers are
+  unaffected. Part of #219.
+
+- **`scripts/new-worktree.mjs` — worktree isolation helper (#243).** The obvious
+  shortcut for a parallel `git worktree` — symlink `node_modules` in from the main
+  checkout to skip the install — is unsafe here: npm workspaces self-link
+  `@redwood-labs/cambium-runner` into `node_modules` as a *relative* symlink, which
+  resolves back into the checkout it was borrowed from rather than the worktree,
+  silently testing the wrong code. This script creates the worktree off `main`, runs a
+  real `npm ci` inside it, and asserts the workspace symlink resolves inside the new
+  worktree before declaring success. See `CONTRIBUTING.md` § Working in a second
+  worktree.
+
+- **Deterministic `touched_surfaces` floor for CI Review (#233).** `CambiumDiffAnalyzer`'s own classification could (and did, on #231's 1,666-line diff) drop a surface the diff plainly touches — a docs-only PR reviewed as though it carried no docs, despite two rounds of prompt hardening. `packages/cambium/src/contracts.ts` now exports `classifyTouchedSurfaces`, an executable form of the path→label associations already documented as comments on `CAMBIUM_SURFACE`; `.forgejo/workflows/ci-review.yml` computes it from the PR's changed-file list (`scripts/ci-review-input.mjs`) and passes it to `cambium_ci_review.pipeline.rb` as a second declared input, threaded to Stage 2 alongside Stage 1's analysis. `CambiumPrReviewer`'s system prompt now treats the union of the two lists as authoritative for *presence* — a deterministic label can be added to by the model (`trace`, and anything else a bare path can't reveal) but never subtracted. `tests_only` is a whole-set predicate ("every changed file is a test"), not a per-file label (OQ-001); it's computed as a separate pass over the full changed-file list rather than folded into the per-path table.
+
+- **CI now runs the unit suite on every PR (#244).** Neither `.forgejo/workflows/golden-ir.yml` (50 IR-compiler fixtures) nor `ci-review.yml` (build + dep audit + LLM review) executed `npm test` — the ~2200-test vitest suite had never run in CI; every "gates green" claim rested on the author having run it locally. A new `Unit Test Suite` workflow (`.forgejo/workflows/unit-tests.yml`, mirrored to `.github/workflows/unit-tests.yml` for external GitHub-only PRs, same rationale as the golden-ir GitHub mirror) runs `npm test` on push-to-main and every PR. No native deps are installed, so the ~20 `better-sqlite3`/`sqlite-vec`-gated memory tests (#245) are expected to skip; vitest's default reporter prints per-file and aggregate skip counts unsuppressed, which is what makes "skipped as designed" distinguishable from "silently vanished." Split into its own workflow file rather than added as a job to `golden-ir.yml` or `ci-review.yml`: each existing file already has a distinct trigger shape and a single stated concern, and a job pays its own checkout/setup cost regardless of which file hosts it.
+
+- **`GET /v1/gens` — self-describing catalog route on `cambium serve` (#197).** Additive route returning, per booted gen/pipeline: `name`, `kind`, `description` (the `describe` IR field, #196), `methods[]`, a Draft-07 JSON Schema per method (`returns` — inline, or resolved from `[types].contracts` for `returns :Symbol` gens, reusing serve boot's existing precompiled-mode contracts-resolution path rather than a second one), budget ceilings (`ir.policies.budget`, verbatim, `_packs` stripped whether inline or pack-sourced), model id + fallbacks (`null` for pipelines — no single top-level model), an egress posture summary (`none` / `allowlist` from `ir.policies.security.network`, keyed on effective permissiveness — an empty allowlist reports `none`, not `allowlist`), an `exec` disclosure field (`security exec:`, verbatim per-runtime — `runtime`/`unsafe_native`/`network`, `null` when undeclared; not kind-gated, pipelines can carry it too), and one example `/v1/run` invocation body. Built once at boot from the same cached IRs `/v1/run` dispatches against — zero inference, no new Ruby spawn. Healthz-style: **never** gated by `--max-inflight`. Adds no `error.kind` values (see `COMPATIBILITY.md` § Serve `/v1` wire format) and changes no existing route's response. Docs: [`C - Serve Mode`](docs/GenDSL%20Docs/C%20-%20Serve%20Mode.md) § Catalog.
+
+- **`describe` primitive — machine-readable gen description (#196).** `describe "Extracts a 26-key semantic palette from wallpaper swatches"` is a new class-level, optional DSL declaration; the compiler emits it as a top-level IR `description` field (distinct from the per-field `description:` kwarg nested under `returnSchema/properties/*`) for a self-description surface (`/v1/gens`, MCP `tools/list`, a shim `--catalog`) to read instead of the gen's source. Metadata only — never reaches prompt assembly. Additive: absent declaration → the IR key is omitted entirely, so every existing gen compiles byte-identically. `cambium new agent` / `cambium new engine` scaffolds now include a `describe` line. Covered by `packages/cambium/tests/compile_describe.test.ts`, which pins both halves of the contract: the declared text reaching the top-level IR field, and the key being **absent** (not `null`) when undeclared — the property the byte-identical guarantee rests on.
+
+### Changed
+
+- **`@redwood-labs/cambium`** and **`@redwood-labs/cambium-runner`** bump to `0.12.0`, and the
+  CLI's runner dependency pin moves `0.11.0` → `0.12.0` in lockstep. `package-lock.json` was
+  regenerated; no dependency resolution changed.
+
+- **`cambium-client` (Python) stays at `0.2.0`.** It is independently versioned and nothing under
+  `packages/cambium-client-python/` changed in this window. No `error.kind` was added or removed in
+  0.12 — `/v1/gens` is a new route, not a new error — so an existing client keeps working without
+  regeneration.
+
+### Fixed
+
+- **The CI-review surface test no longer fails the Ruby 3.x container gate (#233 follow-up).** One
+  pin in `ci_review_surface_classification.test.ts` shells out to `git ls-files -z` to assert that
+  the repo's real em-dash-named docs paths classify as `docs` without git's C-quoting in the way.
+  The Ruby 3.x gate (`scripts/test-on-ruby.mjs`) runs the suite against a `git archive HEAD` export
+  — tracked files, **no `.git`** — so `git` exits 128 there and the test failed on an environment
+  that cannot host the behavior it pins. It now skips on a `git rev-parse --is-inside-work-tree`
+  probe, the same shape as the `rangeReachable()` guard the file already used for its
+  history-dependent block; that guard covered the shallow-clone case but was never extended to the
+  one test that needs only a repo, not history. Caught by the release gate for 0.12.0 — the suite is
+  green on a developer checkout and in CI, where `.git` is always present.
+
+- **Agentic tool calls were billed twice against `per_run` (#254, contrib by kennethsqe).** Every
+  agentic tool call was charged at two sites: `handleToolCall` charged it at dispatch, and
+  `trackBudgetFromTraceStep` charged it *again* walking `AgenticTurn.meta.tool_calls`. A
+  `budget per_run: { max_calls: N }` therefore refused at roughly `N/2` real calls — the cap
+  silently meant half what it said, and the tighter the budget the sooner a healthy run died. The
+  trace-step site no longer charges agentic calls (it still counts token usage); the loop is the
+  single charging site. Paired with the inverse bug in the same PR: a call that *dispatched and
+  threw* was charged nothing, so a deterministically-failing tool could be retried for free until
+  `maxToolCalls` ran out. The loop's catch now charges it. A call refused by the gate is still
+  charged nothing — `checkBeforeCall` rejected it, so it never ran. The full contract is now
+  written on `Budget.addToolCall`: succeeded `1x`, dispatched-and-threw `1x`, memoized duplicate
+  `1x`, refused-by-gate `0x`. Closes #254.
+
+- **`cambium mcp` refuses an over-length private socket path instead of misbinding.** The private
+  socket is built under `TMPDIR`, and a unix socket path has to fit `sockaddr_un.sun_path` — 104
+  bytes on macOS and the BSDs, 108 on Linux. A long `TMPDIR` pushed it over, and what happened next
+  depended on the Node version: `>=23` failed the `listen` with a bare `EINVAL` naming no cause,
+  while `<23` silently **truncated** the path. Truncation is the dangerous half. At best `listen`
+  succeeds at an address that is not the one handed to the HTTP client, and every `tools/call` then
+  fails to reach a server that is demonstrably running. At worst the cut falls *past* the
+  freshly-created `0700` `mkdtemp` directory, and the socket lands directly under a shared ancestor
+  — `TMPDIR` itself — where it is connectable by any co-resident local user, because a unix
+  socket's access control is nothing but the filesystem permissions on its path. That turns a
+  private, same-user-only transport into a local one, silently. `makePrivateBind` now measures the
+  path before binding and refuses with the byte count, the platform's limit, and the fact that
+  `TMPDIR` is the knob — fail-closed on every Node version and platform, never dependent on kernel
+  truncation behavior, and it removes the version probe the test for this had to carry.
+
+- **Single-sourced "is this schema exported?" across the JS/Ruby boundary, and two remaining scaffolder fail-opens closed (#210, #212).** Five independent regex definitions of "exported" — the scaffolder, two `cambium lint` sites, and the Ruby compiler's `returns`/`input schema:` validation — disagreed with each other, so `cambium new schema` could correctly skip an already-exported name (e.g. `const X = …; export { X }`) and the very next `cambium compile` would then die with `Unknown schema 'X'` and an empty "Available schemas" list, misdirecting the user toward a typo that didn't exist (#210 / AUD-206-01). Separately, the scaffolder's own detection still missed `export function`/`class`/`enum`/`let`/`var`/`namespace <Name>` (appending a colliding declaration that broke the next `tsc`) and couldn't see a barrel `export * from './domain'` at all (silently shadowing the re-exported name with no build error) (#212 / AUD-206-02/03). Both are now one definition, expressed twice: `cli/schema-export.mjs` (canonical) and `ruby/cambium/schema_export.rb` (mirror), answering a tri-state `classify(content, name) → 'exported' | 'absent' | 'unknowable'` — `unknowable` covers a file whose export set a regex genuinely cannot resolve (`export *`), and each of the five call sites maps it to its own non-destructive direction: the scaffolder skips rather than risks corrupting or shadowing a file, the compiler and lint accept and defer to the runtime's own-property lookup rather than raise a dead end. A checked-in corpus (`packages/cambium/tests/fixtures/schema-export-corpus.json`) plus a parity test (`schema_export_parity.test.ts`) run both implementations over the same fixtures and fail CI on any divergence between them.
+
+- **`enrich` gens no longer require the Cambium monorepo as the working directory (#219).**
+  Two independent lookups inside the Enrich step assumed it. The sub-agent compile spawned
+  `ruby ruby/cambium/compile.rb …` **relative to `process.cwd()`**, and the sub-agent's own
+  `.cmb.rb` was searched for at a **relative, hardcoded** `packages/cambium/app/gens/…`.
+  Either one is fatal outside the monorepo, so a gen declaring `enrich` failed from an
+  external `[package]` workspace, from an engine-mode host, and under `cambium serve`
+  (whose cwd is the workspace) — the first with `No such file or directory —
+  ruby/cambium/compile.rb`, the second with `Agent file not found`. The RED-380 note in
+  `N - App Mode vs Engine Mode` claiming no spawn site depended on cwd had missed both.
+
+  The compile path now resolves through the same precedence chain the two existing
+  resolvers use — explicit option → `CAMBIUM_COMPILE_RB` → `createRequire` sibling lookup
+  → in-tree fallback — with no `process.cwd()` at any link. The agent-file lookup now
+  anchors on the `appPkgRoot` `runGen` already resolves from `ir.entry.source`, the same
+  root tool, action, provider and log-sink discovery use, so it is correct for **both**
+  project shapes (RED-286): `<root>/packages/cambium/app/gens/` for a `[workspace]`
+  Genfile and `<root>/app/gens/` for a flat `[package]` one.
+
+  The spawn also moved from `execSync` with the agent path interpolated into a shell
+  string to `spawnSync` with an argv array and no shell.
+
+  Found while planning #195, which sidesteps the whole area by refusing `enrich` gens on
+  the precompiled-artifact path.
+
+- **Memory tests skip, rather than fail, when the optional native SQLite deps aren't
+  installed.** `better-sqlite3` and `sqlite-vec` are `optionalDependencies` of
+  `@redwood-labs/cambium-runner`; the test suite now honors that on a box without the
+  native build instead of reporting 20 failures for a dependency the framework never
+  required in the first place. A genuine resolvability probe gates the affected tests
+  with `describe.skipIf` / `it.skipIf` — they still run (and must still pass) wherever
+  the native deps are present.
+
+- **CI Review reads the same diff a human reviews (#235).** `.forgejo/workflows/ci-review.yml` computed `git diff <base.sha>..HEAD` — a tip-to-tip diff, not a merge-base diff — so a branch forked before an unrelated `main` change got that change folded into its own review, and the review read a different diff than the one the Forgejo/GitHub PR page renders. Now `git diff <base.sha>...HEAD` (three-dot), matching what a human reviewer sees.
+
+- **`runGen` no longer leaks a `process` `"exit"` listener per call (#250).** The memory-cleanup hook was registered with `process.once('exit', ...)` unconditionally, before the code even knew whether the gen declared memory — and it was never released. `cambium serve` calls `runGenFromIr` once per HTTP request in a long-lived process, so listeners grew without bound and Node emitted `MaxListenersExceededWarning` from the 11th request on. The hook now registers only when the gen actually declares memory, and is released (`process.off`) at every path that reaches the end of memory handling — the normal post-run `closeBackends` call and the `BudgetParseFailed` early return, which now also closes the backends synchronously there since it returns before `main()`'s `process.exit(1)` bailout would otherwise trigger the deferred flush.
+
+- **One resolver for `ruby/cambium/compile.rb`, replacing three independently-maintained copies that had drifted (#242).** `enrich.ts`, `pipeline.ts`, and `serve.ts` each carried their own version of the same explicit → `CAMBIUM_COMPILE_RB` → `createRequire` sibling → in-tree fallback chain, and the three had drifted apart. All three now call `resolveCompileRb` from a single new module (`packages/cambium-runner/src/compile-rb.ts`); a source-scanning test (`compile-rb-divergence.test.ts`) fails if a fourth divergent copy reappears. Two observable behavior deltas: `pipeline.ts` now honors the `CAMBIUM_COMPILE_RB` env var and the explicit `compileRb` option (it previously had neither escape hatch, only the sibling + in-tree links); `serve.ts` gains the `createRequire` sibling lookup, fixing resolution under a real npm/pnpm/yarn install — previously it fell straight from the env var to a bare monorepo-relative path with no existence check, silently wrong outside the cambium repo and deferred to an opaque ruby `LoadError` at first gen compile (RED-376).
+
+### Upgrade from 0.11.0
+
+Nothing in the DSL, the IR, or the serve wire requires a change. `describe`, `GET /v1/gens`, and
+`cambium mcp` are all additive: a gen that declares no `describe` compiles byte-identically, no
+existing route's response changed, and no `error.kind` moved. Two behaviors differ.
+
+**`budget per_run: { max_calls: N }` now actually means N (#254).** Agentic tool calls were charged
+at two sites, so the cap was really enforcing about `N/2` — and the tighter the budget, the sooner a
+healthy run died on it. Charging now happens once, at dispatch. If you tuned `max_calls` against the
+doubled accounting, your effective allowance roughly doubles on upgrade; halve the declared number
+to keep the behavior you had. Paired with the inverse fix in the same change: a tool that dispatched
+and *threw* used to be charged nothing, so a deterministically failing tool could be retried for
+free until `maxToolCalls` ran out. It is charged now. A call refused by the gate is still charged
+nothing, because it never ran.
+
+**`cambium_ci_review.pipeline.rb` takes a JSON object (#233).** The shipped CI-review pipeline
+gained a second `input :surfaces` slot, making it multi-slot, and 0.11.0's #226 requires every
+declared slot be supplied as a JSON object. A caller still passing a raw diff string or file path to
+`--arg` gets #226's "must be a JSON object" error instead of a review. `.forgejo/workflows/ci-review.yml`
+already builds the object via `scripts/ci-review-input.mjs`; if you forked that workflow, take the
+same change. Scoped to this one shipped example — the multi-slot mechanism itself is unchanged.
+
+**`cambium mcp` on macOS, if you hit it.** The private socket is built under `TMPDIR` and must fit
+`sockaddr_un.sun_path` — 104 bytes on macOS, where `os.tmpdir()` is already ~49 chars. An
+over-length path now gets a clear refusal at boot naming the byte count, the limit, and `TMPDIR`,
+where it previously failed with a bare `EINVAL` or, on Node <23, silently bound at a truncated path.
+Set `TMPDIR` to something shorter.
+
 ## [0.11.0] — 2026-09-07 — The Meter
 
 An agentic run died at 39 turns. A quantized 35B model got an unsatisfying

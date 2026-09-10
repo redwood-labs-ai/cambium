@@ -119,6 +119,9 @@ output.json + trace.json
 │   │   ├── actions/       # App trigger actions — paired .action.json + .action.ts
 │   │   ├── correctors/    # App corrector plugins (.corrector.ts) — auto-discovered
 │   │   │                  #   in app-mode, override built-ins by name (RED-275)
+│   │   │                  #   vendor/<upstream>/ — non-corrector third-party support
+│   │   │                  #   code (e.g. a real parser to verify against); inert to
+│   │   │                  #   discovery, which is non-recursive + suffix-filtered (#201)
 │   │   ├── providers/     # App model providers (<name>.ts, export default) —
 │   │   │                  #   filename = model-id prefix; shadow built-ins (RED-393)
 │   │   ├── policies/      # Named policy packs (.policy.rb) for security + budget
@@ -145,6 +148,9 @@ output.json + trace.json
 │   │   │                      #   + app-loader.ts for RED-275 plugin discovery
 │   │   ├── inspect/           # `cambium inspect` trace viewer (RED-313): trace→graph
 │   │   │                      #   projection, runs index, node:http+SSE, SVG viewer
+│   │   ├── serve/             # `cambium serve` HTTP core (RED-360): /v1 routes, gen
+│   │   │                      #   catalog (#197), bind targets
+│   │   ├── mcp/               # `cambium mcp` — MCP-stdio ↔ /v1-HTTP adapter (#198)
 │   │   ├── signals.ts         # Signal extraction
 │   │   ├── triggers.ts        # Trigger evaluation (tool_call + action_call)
 │   │   ├── compound.ts        # Review + consensus
@@ -158,7 +164,8 @@ output.json + trace.json
 ├── ruby/cambium/
 │   ├── runtime.rb         # GenModel DSL primitives
 │   ├── compile.rb         # Ruby → JSON IR compiler
-│   └── cron.rb            # Cron DSL primitive + crontab parsing (RED-305)
+│   ├── cron.rb            # Cron DSL primitive + crontab parsing (RED-305)
+│   └── schema_export.rb   # "is this schema exported?" tri-state — Ruby mirror of cli/schema-export.mjs (#210/#212)
 ├── cli/
 │   ├── cambium.mjs        # CLI dispatch
 │   ├── compile.mjs        # `cambium compile` subcommand (RED-244)
@@ -168,6 +175,7 @@ output.json + trace.json
 │   ├── init.mjs           # `cambium init` workspace bootstrap
 │   ├── lint.mjs           # `cambium lint` package validation
 │   ├── scaffold-tool.mjs  # `cambium new tool --describe ...` agentic scaffolder (RED-216)
+│   ├── schema-export.mjs  # "is this schema exported?" tri-state — canonical JS impl, Ruby-mirrored (#210/#212)
 │   ├── runner-freshness.mjs # Stale-dist/ guard + loadRunner() — the only sanctioned runner import
 │   ├── schedule.mjs       # `cambium schedule preview|list|compile` (RED-305)
 │   ├── schedule-targets/  # Compile targets: k8s-cronjob, crontab, systemd, github-actions, render-cron
@@ -215,6 +223,23 @@ commit `dist/` was built from (stamped into `dist/build-info.json` at build
 time). Set `CAMBIUM_SKIP_BUILD_CHECK=1` to run the existing `dist/` anyway.
 The guard is a no-op outside a source checkout, so installed users never see
 it.
+
+### Working in a second worktree (#243)
+
+Don't hand-roll a `git worktree add` + symlink `node_modules` in to skip
+the install — npm workspaces self-link `@redwood-labs/cambium-runner` into
+`node_modules` as a *relative* symlink, so resolved from a borrowed
+`node_modules` it lands back in the checkout it was borrowed from. An edit
+to `packages/cambium-runner/src/*` in such a worktree is invisible to
+`npm test`: green output, unmodified code. Use:
+
+```bash
+node scripts/new-worktree.mjs <branch-name> [path]
+```
+
+It creates the worktree off `main`, runs a real `npm ci` inside it, and
+asserts the workspace symlink resolves inside the new worktree before
+declaring success.
 
 ## Docs
 

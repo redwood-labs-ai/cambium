@@ -20,6 +20,14 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { betterSqlite3Available } from './helpers/native-deps.js';
+
+// `better-sqlite3` is an optionalDependency of @redwood-labs/cambium-runner
+// — a box without the native build must SKIP the one test below whose
+// assertions depend on a real memory write landing, not fail. See
+// helpers/native-deps.test.ts for the two-way proof this is a genuine
+// probe, not a hardcoded skip.
+const DB_OK = await betterSqlite3Available();
 
 const REPO_ROOT = process.cwd();
 const CLI = join(REPO_ROOT, 'cli/cambium.mjs');
@@ -77,7 +85,7 @@ end
 }
 
 describe('cron primitive E2E (RED-305)', () => {
-  it('scheduled fire writes memory to the schedule bucket; trace carries fired_by', async () => {
+  it.skipIf(!DB_OK)('scheduled fire writes memory to the schedule bucket; trace carries fired_by', async () => {
     const genPath = setupGen();
     const traceOut = join(scratch, 'trace.json');
     const runsRoot = join(scratch, 'runs');

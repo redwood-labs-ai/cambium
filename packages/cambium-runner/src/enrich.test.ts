@@ -181,6 +181,10 @@ end
       {},                   // contractsMod: intentionally empty (block form needs no entry)
       generateText as any,
       extractJson as any,
+      tmpDir,               // #219 DEV-005: appPkgRoot is now required — a real
+                             // scratch dir stands in for it; findProbe below
+                             // overrides agent-file lookup entirely, so its
+                             // value never actually gets read.
       findProbe,            // AUD-F1: injected resolver, keeps probe out of live gens dir
     );
 

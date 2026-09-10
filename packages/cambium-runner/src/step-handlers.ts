@@ -1392,8 +1392,13 @@ export async function handleAgenticGenerate(
               meta: { tool: fnName, input: fnArgs },
             });
             // Budget violations are terminal for the loop — the limit won't
-            // change no matter how many times the model retries.
+            // change no matter how many times the model retries. They are also
+            // the one failure that must not be charged: the gate refused the
+            // call before it ran. Every other failure dispatched and is
+            // charged, so a deterministically failing tool cannot be retried
+            // for free.
             if (e.budgetViolation) budgetExhausted = true;
+            else env.budget?.addToolCall(fnName);
           }
         }
 

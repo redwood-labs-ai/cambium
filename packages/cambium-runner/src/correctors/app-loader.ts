@@ -18,6 +18,16 @@
 // additionally `realpath`-check each resolved file and verify it still
 // lives under `appCorrectorsDir` after symlink resolution, matching the
 // `resolveGenfileContracts` stance in RED-274.
+//
+// Non-recursion note (#201 audit): the scan below is a single flat
+// `readdirSync` — it never descends into subdirectories. That's WHY a
+// nested `app/correctors/vendor/<upstream>/` tree (support code for a
+// corrector, e.g. a vendored third-party parser — see `P - corrects
+// (correctors).md` § "Vendoring third-party support code") is inert
+// here: a directory entry never reaches the `.corrector.ts` suffix
+// check below, let alone the name-regex or realpath checks. If this
+// scan is ever made recursive, re-derive that analysis first — don't
+// assume vendored trees stay silently skipped.
 
 import { existsSync, readdirSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';

@@ -1,0 +1,102 @@
+{
+  "propose_entry": {
+    "version": "0.2",
+    "entry": {
+      "class": "MenuEntry",
+      "method": "propose_entry",
+      "source": "packages/cambium/app/gens/menu_entry.cmb.rb"
+    },
+    "model": {
+      "id": "omlx:orinth-1.0-35b@q8_0",
+      "temperature": 0.2,
+      "max_tokens": 500
+    },
+    "repairModel": {
+      "id": "omlx:nvidia/nemotron-3-nano-4b",
+      "max_tokens": 16000,
+      "temperature": 0
+    },
+    "system": "You are an Omarchy menu-entry author. You turn one sentence describing a\nmenu customization into a single typed entry for\n`~/.config/omarchy/extensions/omarchy-menu.jsonc`.\n\n## What you receive\n\nA JSON document:\n\n```json\n{\n  \"request\": \"Add a menu entry that opens my notes in Obsidian.\",\n  \"overlay\": \"{\\n  // Bookmarks the user already added by hand.\\n  \\\"projects\\\": { \\\"label\\\": \\\"Projects\\\", \\\"target\\\": \\\"https://github.com/me/projects\\\" },\\n}\\n\"\n}\n```\n\n`overlay` is the CURRENT content of the user's overlay file — JSONC (`//`\nline comments and trailing commas are allowed), one key per existing\nentry. Read it to see what ids and labels already exist so your proposal\ndoesn't collide with one.\n\n## The entry vocabulary\n\nEvery entry has:\n\n- `id` — a short, unique, kebab-case identifier (e.g. `\"obsidian-notes\"`).\n  Dot it (`\"parent.child\"`) only if the request is clearly asking to\n  nest under an existing entry's id from the overlay; otherwise a\n  top-level id is correct.\n- `label` — the display text for the row.\n\nThen **exactly one** of:\n\n- `action` — a shell command to run (e.g. `\"obsidian ~/notes\"`).\n- `target` — a URL or filesystem path to open (e.g. an `obsidian://`\n  URI, or a plain path the desktop knows how to open).\n\n**Never set both `action` and `target` on the same entry.** Omarchy's\nmenu infers the entry's *kind* from which of these two fields is\npresent — `action` set means \"action\", `target` set (and no `action`)\nmeans \"link\", neither set means \"submenu container\". If you set both,\nthe parser picks `action` and the `target` you wrote is silently\nignored — the request only asked for one behavior, so give it one\nfield, not two. Leaving BOTH unset is only correct when the request is\nasking for a bare submenu/category with no behavior of its own — that's\nrare; most requests want exactly one of `action`/`target`.\n\nOptionally, only if the request specifies a condition:\n\n- `when` — a bash condition; the row is hidden unless it exits 0.\n- `checked` — a bash condition; the row shows a checkmark when it exits 0.\n- `disabled` — a bash condition; the row is disabled when it exits 0.\n\nLeave `when` / `checked` / `disabled` unset unless the request actually\ndescribes a condition — do not invent one.\n\n## Example\n\nRequest: \"Add a menu entry that opens my notes in Obsidian.\"\n\nA reasonable proposal opens Obsidian on a notes vault via a shell\ncommand:\n\n```json\n{\n  \"id\": \"obsidian-notes\",\n  \"label\": \"Notes (Obsidian)\",\n  \"action\": \"obsidian ~/notes\"\n}\n```\n\n`target` is left unset — the request describes running an application,\nnot opening a bare URL/path, so `action` alone is the correct, single\nfield to set.\n\n## A note on what happens to your output\n\n`action`, `when`, `checked`, and `disabled` are not just text fields —\nOmarchy runs them as real bash on the user's machine. Only ever write a\ncommand you would be comfortable running yourself; never construct one\nthat reaches outside what the request actually asked for.",
+    "mode": null,
+    "policies": {
+      "tools_allowed": [],
+      "correctors": [
+        {
+          "name": "menu_model_check",
+          "max_attempts": 1
+        }
+      ],
+      "constraints": {},
+      "grounding": null,
+      "security": null,
+      "budget": {
+        "per_run": {
+          "max_tokens": 800
+        }
+      },
+      "memory": [],
+      "memory_pools": {},
+      "memory_write_via": null,
+      "log": [],
+      "log_profiles": [],
+      "schedules": []
+    },
+    "reads_trace_of": null,
+    "returnSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "unique entry id; dotted (e.g. \"parent.child\") to nest under an existing parent id"
+        },
+        "label": {
+          "type": "string",
+          "description": "display text for the menu row"
+        },
+        "action": {
+          "type": "string",
+          "description": "a shell command to run — set this XOR target, never both"
+        },
+        "target": {
+          "type": "string",
+          "description": "a URL or filesystem path to open — set this XOR action, never both"
+        },
+        "when": {
+          "type": "string",
+          "description": "bash condition; row is hidden unless it exits 0"
+        },
+        "checked": {
+          "type": "string",
+          "description": "bash condition; row shows a checkmark when it exits 0"
+        },
+        "disabled": {
+          "type": "string",
+          "description": "bash condition; row is disabled when it exits 0"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "additionalProperties": false,
+      "$id": "MenuEntryOutput"
+    },
+    "context": {
+      "document": ""
+    },
+    "enrichments": [],
+    "signals": [],
+    "triggers": [],
+    "steps": [
+      {
+        "id": "generate_1",
+        "type": "Generate",
+        "prompt": "propose a single omarchy-menu.jsonc entry for the request",
+        "with": {
+          "context": ""
+        },
+        "returns": null
+      }
+    ]
+  }
+}

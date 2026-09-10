@@ -57,6 +57,18 @@ export class Budget {
    * Record a single tool invocation.
    * Increments both the per-run `tool_calls_used` counter and the per-tool
    * `calls` counter so both limits are checked on the same event.
+   *
+   * Charging contract for an agentic tool call — each is charged exactly once,
+   * at the point of dispatch:
+   *
+   *   succeeded            1x  (handleToolCall, after the handler returns)
+   *   dispatched and threw 1x  (the loop's catch — a broken tool must not be
+   *                             retryable for free)
+   *   memoized duplicate   1x  (skipped re-dispatch still consumes budget)
+   *   refused by the gate  0x  (checkBeforeCall rejected it; it never ran)
+   *
+   * Nothing charges an agentic call a second time from its trace step — see
+   * trackBudgetFromTraceStep.
    */
   addToolCall(tool?: string): void {
     this.state.tool_calls_used += 1;
@@ -179,10 +191,9 @@ export class Budget {
 /**
  * Apply usage + tool-call accounting from a trace step.
  *
- * - Adds tokens from step.meta.usage.total_tokens when present.
- * - Increments tool calls for:
- *   - ToolCall steps (1, tagged with step.meta.tool)
- *   - AgenticTurn steps (meta.tool_calls.length)
+ * AgenticTurn tool calls are not charged here: the agentic loop already
+ * charges each dispatch as it happens, so charging its traceSteps again
+ * bills every agentic call twice. Token usage is still counted.
  */
 export function trackBudgetFromTraceStep(budget: Budget, step: any): void {
   const usage = step?.meta?.usage;
@@ -190,15 +201,6 @@ export function trackBudgetFromTraceStep(budget: Budget, step: any): void {
 
   if (step?.type === 'ToolCall' && step?.ok) {
     budget.addToolCall(step?.meta?.tool);
-  }
-
-  if (step?.type === 'AgenticTurn') {
-    const calls = Array.isArray(step?.meta?.tool_calls) ? step.meta.tool_calls : [];
-    for (const c of calls) {
-      // Tool name may live under c.tool or c.function.name depending on turn shape.
-      const name = c?.tool ?? c?.function?.name;
-      budget.addToolCall(name);
-    }
   }
 }
 

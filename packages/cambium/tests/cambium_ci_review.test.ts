@@ -12,28 +12,51 @@
  * with a real-ish Cambium diff fixture to verify the wiring: 2-step
  * trace shape, sub-gen IR resolution, bind() flow from input → analyze
  * → review, output validation against CambiumCiReview.
+ *
+ * #233: the pipeline is now MULTI-SLOT (`diff` + `surfaces`), which #226
+ * enforces fail-closed — `--arg` must be a JSON object supplying both
+ * slots, matching what `scripts/ci-review-input.mjs` builds for the real
+ * workflow. `runReview` writes that object to a scratch file per call.
  */
 import { describe, it, expect } from 'vitest';
-import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { spawnSync, spawn } from 'node:child_process';
+import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tryReadRunDir, cleanupRunDir } from './helpers/run-dir.js';
+import { classifyTouchedSurfaces } from '../src/contracts.js';
 
 const REPO_ROOT = process.cwd();
 const CLI = join(REPO_ROOT, 'cli/cambium.mjs');
 const PIPELINE = 'packages/cambium/app/pipelines/cambium_ci_review.pipeline.rb';
 const FIXTURE = 'packages/cambium/examples/fixtures/cambium_pr_diff.txt';
 
+// The fixture diff touches ruby/cambium/pipeline.rb — one real deterministic
+// surface, matching what the workflow would actually compute for a diff
+// shaped like this one.
+const FIXTURE_CHANGED_PATHS = ['ruby/cambium/pipeline.rb'];
+
 function runReview(extraArgs: string[] = []) {
-  return spawnSync(
-    'node',
-    [CLI, 'run', PIPELINE, '--method', 'review', '--arg', FIXTURE, '--mock', ...extraArgs],
-    {
-      cwd: REPO_ROOT,
-      encoding: 'utf8',
-      maxBuffer: 50 * 1024 * 1024,
-    },
-  );
+  const diff = readFileSync(join(REPO_ROOT, FIXTURE), 'utf8');
+  const surfaces = classifyTouchedSurfaces(FIXTURE_CHANGED_PATHS);
+  const scratch = mkdtempSync(join(tmpdir(), 'cambium-ci-review-arg-'));
+  const argPath = join(scratch, 'pipeline-input.json');
+  writeFileSync(argPath, JSON.stringify({ diff, surfaces }));
+  try {
+    return spawnSync(
+      'node',
+      [CLI, 'run', PIPELINE, '--method', 'review', '--arg', argPath, '--mock', ...extraArgs],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        maxBuffer: 50 * 1024 * 1024,
+      },
+    );
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 }
 
 describe('Cambium CI Review pipeline (real two-stage POC)', () => {
@@ -47,7 +70,12 @@ describe('Cambium CI Review pipeline (real two-stage POC)', () => {
     const ir = JSON.parse(result.stdout);
     expect(ir.kind).toBe('Pipeline');
     expect(ir.name).toBe('CambiumCiReview');
-    expect(ir.input).toEqual({ diff: { schema: 'PullRequestDiff' } });
+    // #233: second declared input slot — the deterministic touched-surface
+    // floor, threaded to Stage 2 alongside Stage 1's analysis.
+    expect(ir.input).toEqual({
+      diff: { schema: 'PullRequestDiff' },
+      surfaces: { schema: 'CambiumTouchedSurfaces' },
+    });
     expect(ir.operators).toHaveLength(2);
     expect(ir.operators[0]).toMatchObject({
       kind: 'Step',
@@ -63,9 +91,11 @@ describe('Cambium CI Review pipeline (real two-stage POC)', () => {
     });
     // Stage 2 binds to Stage 1's full output (no chained field — passes
     // the whole CambiumDiffAnalysis object so the reviewer sees the
-    // structured classification.)
+    // structured classification) PLUS the deterministic surfaces floor
+    // from the pipeline's second input slot.
     expect(ir.operators[1].with).toEqual([
       { param: 'analysis', from: { step: 'analyze' } },
+      { param: 'surfaces', from: { input: 'surfaces' } },
     ]);
   });
 
@@ -152,5 +182,80 @@ describe('Cambium CI Review pipeline (real two-stage POC)', () => {
     } finally {
       cleanupRunDir(runDir);
     }
+  });
+
+  // #233: `--mock` never builds a real prompt, so the tests above can't see
+  // whether `surfaces` actually reaches Stage 2's rendered prompt (as
+  // opposed to just resolving in the IR, which the first test already
+  // pins). Drives a real dispatch against a local stub oMLX-compatible
+  // server and reads the `SURFACES:` section back out of the captured
+  // request.
+  //
+  // Uses `spawn` (async), NOT `spawnSync`: `spawnSync` blocks this
+  // process's entire event loop until the child exits, so the in-process
+  // stub server below would never get to run its request handler — the
+  // child's TCP connection completes at the kernel level (visible in
+  // `ss -tnp`) but the parent's JS never wakes up to service it, and the
+  // child hangs until spawnSync's own timeout kills it. Confirmed by
+  // reproducing the hang standalone before writing this test this way.
+  it('Stage 2s rendered prompt carries a SURFACES: section with the deterministic floor', async () => {
+    const capturedPrompts: string[] = [];
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        const parsed = JSON.parse(body || '{}');
+        const userMsg = (parsed.messages ?? []).find((m: any) => m.role === 'user');
+        capturedPrompts.push(typeof userMsg?.content === 'string' ? userMsg.content : '');
+        // Stage 1 gets the first request, Stage 2 the second — return the
+        // right canned shape for whichever schema is being asked for.
+        const isStage1 = capturedPrompts.length === 1;
+        const responseBody = isStage1
+          ? { touched_surfaces: [], risk_categories: ['none'], magnitude: 'small', files_changed: 1, key_excerpts: [], summary: 'stub analysis' }
+          : { summary: 'stub review', concerns: [], overall_verdict: 'approve' };
+        res.statusCode = 200;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify(responseBody) } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+
+    const diff = readFileSync(join(REPO_ROOT, FIXTURE), 'utf8');
+    const surfaces = classifyTouchedSurfaces(FIXTURE_CHANGED_PATHS); // ['ruby_dsl']
+    const scratch = mkdtempSync(join(tmpdir(), 'cambium-ci-review-real-'));
+    const argPath = join(scratch, 'pipeline-input.json');
+    writeFileSync(argPath, JSON.stringify({ diff, surfaces }));
+
+    let status: number | null;
+    let stdout = '';
+    let stderr = '';
+    try {
+      const child = spawn(
+        'node',
+        [CLI, 'run', PIPELINE, '--method', 'review', '--arg', argPath],
+        { cwd: REPO_ROOT, env: { ...process.env, CAMBIUM_OMLX_BASEURL: `http://127.0.0.1:${port}` } },
+      );
+      child.stdout.on('data', (c) => { stdout += c; });
+      child.stderr.on('data', (c) => { stderr += c; });
+      status = await new Promise<number | null>((resolve) => child.on('close', resolve));
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(scratch, { recursive: true, force: true });
+      // AUD-007 (round 3 audit): this test's real dispatch creates a
+      // runs/run_* directory like every sibling test in this file — clean
+      // it up the same way they do (helpers/run-dir.ts), in `finally` so
+      // a failing assertion below still doesn't leak one.
+      cleanupRunDir(tryReadRunDir(stderr));
+    }
+
+    expect(status, stderr + stdout).toBe(0);
+    expect(capturedPrompts).toHaveLength(2);
+    const reviewPrompt = capturedPrompts[1];
+    expect(reviewPrompt).toContain('SURFACES:');
+    expect(reviewPrompt).toMatch(/SURFACES:\n\[\s*"ruby_dsl"\s*\]/);
   });
 });

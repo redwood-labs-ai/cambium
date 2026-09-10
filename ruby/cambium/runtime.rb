@@ -1418,6 +1418,15 @@ module Cambium
         _cambium_defaults[:system] = prompt_or_name
       end
 
+      # #196: machine-readable description of what the gen does — a capability
+      # surface (`/v1/gens`, MCP `tools/list`, a shim `--catalog`) reads this
+      # instead of the gen's source. Class-level only (per-method descriptions
+      # are a v1 non-goal); one string, optional. Metadata only — the runner
+      # must never fold this into prompt assembly.
+      def describe(text)
+        _cambium_defaults[:description] = text.to_s
+      end
+
       def temperature(v)
         _cambium_defaults[:temperature] = v
       end

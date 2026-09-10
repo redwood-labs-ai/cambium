@@ -73,6 +73,43 @@ describe('#206: cambium new schema engine-mode write/skip (shared schemaNameAlre
     expect(body.match(/export const Existing\b/g) ?? []).toHaveLength(1);
   });
 
+  it('AUD-206-02 repro: `export function <Name>` already present skips instead of duplicating', () => {
+    // Verbatim reproduction from records/AUDIT-206-round1-2026-09-03.md
+    // § AUD-206-02: pattern 3's `^\s*` anchor meant `export function
+    // Widget` never matched, and the scaffolder appended a colliding
+    // `export const Widget` — confirmed live to raise `TS2300: Duplicate
+    // identifier 'Widget'` at the next `tsc --noEmit --strict`.
+    const original = `import { Type } from '@sinclair/typebox';\nexport function Widget() { return Type.Object({}); }\n`;
+    writeFileSync(join(scratch, 'schemas.ts'), original);
+
+    const r = runCli(['new', 'schema', 'Widget']);
+    expect(r.status, (r.stderr ?? '') + (r.stdout ?? '')).toBe(0);
+    expect((r.stdout ?? '') + (r.stderr ?? '')).toMatch(/already exported.*\(skipped\)/);
+    expect((r.stdout ?? '') + (r.stderr ?? '')).not.toMatch(/appended:/);
+
+    const body = readFileSync(join(scratch, 'schemas.ts'), 'utf8');
+    expect(body).toBe(original);
+  });
+
+  it('AUD-206-03 repro: a barrel `schemas.ts` using `export * from` refuses to append instead of silently shadowing the real export', () => {
+    // Verbatim reproduction from records/AUDIT-206-round1-2026-09-03.md
+    // § AUD-206-03: `export * from './other'` makes the file's export
+    // set unknowable by regex; appending anyway silently shadows the
+    // re-exported name with the scaffolded stub, with no tsc diagnostic
+    // at all. Refusing to append (same "skipped" branch, verdict
+    // 'unknowable') is the fail-safe fix.
+    const original = `export * from './domain';\n`;
+    writeFileSync(join(scratch, 'schemas.ts'), original);
+
+    const r = runCli(['new', 'schema', 'Widget']);
+    expect(r.status, (r.stderr ?? '') + (r.stdout ?? '')).toBe(0);
+    expect((r.stdout ?? '') + (r.stderr ?? '')).toMatch(/already exported.*\(skipped\)/);
+    expect((r.stdout ?? '') + (r.stderr ?? '')).not.toMatch(/appended:/);
+
+    const body = readFileSync(join(scratch, 'schemas.ts'), 'utf8');
+    expect(body).toBe(original);
+  });
+
   it('AUD-158-01-equivalent repro: `export { X }`-idiom already present skips instead of corrupting the file', () => {
     // Engine-mode analogue of the AUD-158-01 repro from
     // records/AUDIT-158-round1-2026-09-01.md: a hand-authored schemas.ts

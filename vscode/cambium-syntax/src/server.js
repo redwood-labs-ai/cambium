@@ -386,6 +386,10 @@ const PRIMITIVE_DOCS = {
     detail: 'Declares the system prompt.',
     doc: 'Symbol resolves to `app/systems/<name>.system.md`.\nString is used inline.\n\n```ruby\nsystem :analyst      # loads from file\nsystem "You are..." # inline\n```',
   },
+  describe: {
+    detail: 'Machine-readable description of what the gen does (#196).',
+    doc: 'A one-line, class-level statement of what the gen does — read by a self-description surface (`/v1/gens`, MCP `tools/list`, a shim `--catalog`) instead of the gen\'s source.\n\n```ruby\ndescribe "Extracts a 26-key semantic palette from wallpaper swatches"\n```\n\nMetadata only — never reaches the model or contributes to the prompt. Class-level only in v1 (per-method descriptions can come later, additively). Absent from the IR entirely when undeclared, so an existing gen compiles byte-identically.\n\nNot the same field as the per-field `description:` kwarg inside a `returns do … end` block, which lands nested under `returnSchema.properties.<field>.description` (JSON Schema docs) — same name, different nesting.\n\nSee [[P - GenModel]] § `describe`.',
+  },
   temperature: {
     detail: 'Sets the sampling temperature.',
     doc: 'Lower = more deterministic, higher = more creative.\nTypical range: 0.0 - 1.0.',

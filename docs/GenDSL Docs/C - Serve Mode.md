@@ -130,6 +130,50 @@ and retry — and a caller can branch on a kind but not on a message string.
 Adding a new kind is a v2 break. `output_ceiling` was added in the 0.10 window
 precisely because that was the last release before the promise binds. The Python client (`cambium-client`) maps each 1:1 to an exception subclass.
 
+## Catalog
+
+`GET /v1/gens` (#197) is a self-describing catalog for consumers that want to *discover and compose* capabilities — agents, shims, generated skills — without reading source. It is additive on the `/v1` surface (see [`COMPATIBILITY.md`](../../COMPATIBILITY.md) § Serve `/v1` wire format) and introduces NO new `error.kind` values.
+
+```http
+GET /v1/gens
+→ 200 { "version": "v1", "gens": [ { ...GenCatalogWireEntry }, ... ] }
+```
+
+Per entry:
+
+```json
+{
+  "name": "ResumeParser",
+  "kind": "gen",
+  "description": "Extracts structured resume data from a document.",
+  "methods": ["analyze"],
+  "returns": {
+    "analyze": { "$id": "ResumeParserOutput", "type": "object", "properties": { "...": "..." } }
+  },
+  "model": { "id": "anthropic:claude-...", "fallbacks": null },
+  "budget": { "per_run": { "max_tokens": 4000 }, "per_tool": null },
+  "egress": { "network": "allowlist", "allowlist": ["api.tavily.com"] },
+  "exec": null,
+  "example": { "gen": "ResumeParser", "method": "analyze", "input": "<document>" }
+}
+```
+
+Field notes:
+
+- **`kind`** — `"gen"` or `"pipeline"`, mirroring the Genfile section (`[exports.gens]` / `[exports.pipelines]`) the entry was declared in.
+- **`description`** — the `describe "…"` IR field (#196, shipped in #248); `null` when the gen never declared it, or for any pipeline (pipelines have no `describe` primitive).
+- **`methods`** — every method the catalog compiled for this entry (bare-mode `compile.rb` output, or the artifact's method map in precompiled boot). Pipelines are 1:1 (RED-374) — always exactly one.
+- **`returns`** — a Draft-07 JSON Schema per method: the inline `returnSchema` (RED-419) when the gen declares one, or the schema resolved from `[types].contracts` for a `returns :Symbol` gen. Resolution reuses the exact functions serve boot's precompiled-mode contract preload already uses (`resolveGenfileContracts` + `loadContractsFromGenfile`) — no second contracts-discovery path. Resolution is best-effort: a missing `[types].contracts` declaration or a renamed export resolves to `null` for that method rather than failing the request (or boot) — the catalog is a read-only convenience surface. Pipeline IRs carry no `returnSchemaId`/`returnSchema` at all, so every pipeline method's entry is `null`.
+- **`model`** — `null` for pipelines (a Pipeline IR has no single top-level model; each step's sub-gen declares its own). For a gen, `{ id, fallbacks }` — `fallbacks` is `null` when the gen declares a single model (RED-421).
+- **`budget`** — `ir.policies.budget`, verbatim, `null` when undeclared. Gen-level and pipeline-level budgets are genuinely different shapes (`{per_run?, per_tool?}` per-slot ceilings for a gen vs. a flat `{tokens?, tool_calls?}` pipeline-level cap, RED-381) and are passed through as-is rather than unified — unifying them would invent a ceiling-semantics mapping the IR itself doesn't make. `_packs` (trace-only policy-pack provenance, not a ceiling) is stripped, whether the slot came from an inline declaration or a named pack (`security :pack_name` / `budget :pack_name`) — the wire entry never carries a `_packs` key.
+- **`egress`** — a `none` / `allowlist` summary of `ir.policies.security.network` (RED-137), keyed on effective permissiveness rather than slot presence: no declared network slot, OR a declared slot whose allowlist is empty (an empty, non-wildcard allowlist is enforced deny-all by `network-guard.ts`), both report `{ "network": "none", "allowlist": null }` (AUD-197-3). A non-empty allowlist reports `{ "network": "allowlist", "allowlist": [...] }`. **Scope note (AUD-197-1):** this field reflects only the top-level `network:` slot — a gen or pipeline with `security exec: { network: ... }` or `unsafe_native: true` may have execution/network capability this field does not report; see `exec` below.
+- **`exec`** — the `security exec:` slot (RED-213/RED-248), verbatim per-runtime; `null` when no `exec:` slot is declared. Pipelines can carry this too — `security` on a `Pipeline` inherits into sub-gens by default and routes through the same slot normalizer as a gen (RED-214) — so `exec` is not kind-gated the way `model` is. Shape: `{ runtime: string | null, unsafe_native: boolean, network: "none" | "allowlist" | "inherit" }`. `runtime` is the literal declared runtime (`"wasm"`, `"firecracker"`, `"native"`) or `null` when undeclared — never collapsed into a boolean. `unsafe_native` is the explicit sharp-knife opt-in flag. `network` mirrors the exec slot's OWN scoped `network:` sub-key — `"inherit"` when declared `:inherit`, `"allowlist"` when it grants at least one host, `"none"` when declared `:none`, undeclared, or declared with an empty allowlist (same effective-permissiveness rule as `egress`) — and is independent of, never folded into, the top-level `egress` field.
+- **`example`** — one example `/v1/run` body using the entry's first method. Gen IRs carry exactly one context key (the `grounded_in` source, or `document`); the example's `input` is a placeholder string naming it. Pipeline IRs carry named `input` slots: a single slot mirrors the CLI's single-slot string convenience, multiple slots produce a placeholder object keyed by slot name (the multi-slot JSON-object convention `parsePipelineInputs` expects), and zero slots produce `""`.
+
+**Never gated by `--max-inflight`, healthz-style.** `/v1/gens` is a cheap read over the catalog built once at boot from the same cached IRs `/v1/run` dispatches against — no new Ruby spawn, no per-request work. It sits in `handleRequest` above the `/v1/run` branch's inflight-cap check, exactly where `/v1/healthz` sits, so a server saturated at its `--max-inflight` cap still answers `/v1/gens` with 200. It is subject to the same boot gate as every other route (`503` + `error.kind: "booting"` while `compile.rb` bare-mode compilation is still running) — this is unchanged, existing behavior, not a new gate introduced for this route.
+
+Out of scope for this route (non-goals): auth (serve's unauthenticated-in-v1 posture, unchanged), pagination, filtering. A CLI shim consuming this route (e.g. a `--catalog` flag) is downstream tooling, not part of this route's contract.
+
 ## Bind URI taxonomy
 
 | Scheme | Form | Platforms |
@@ -166,6 +210,10 @@ boot:
   3. Bind the HTTP listener (parseBind) and resolve `handle.ready`.
 
 per-request:
+  /v1/healthz: return catalog (or booting if pre-compile still running).
+     The `gens` field contains the union of all gen + pipeline names.
+  /v1/gens: return the catalog built once at boot (see "Catalog" above)
+     — never gated by `--max-inflight`, same as healthz.
   /v1/run:
     a. validate body (`gen`, `method` strings; `input` JSON-coercible).
     b. look up cached IR by (gen, method); 400 with unknown_gen /
@@ -183,8 +231,6 @@ per-request:
     e. map result.failureKind → wire error.kind; serialize JSON. Both
        paths return RunGenResult-shaped objects, so error envelope
        construction is shared.
-  /v1/healthz: return catalog (or booting if pre-compile still running).
-     The `gens` field contains the union of all gen + pipeline names.
   other: 404 + not_found.
 
 shutdown (SIGTERM/SIGINT):
@@ -217,7 +263,7 @@ runServe({
 });
 ```
 
-Precedence chain: `opts.compileRb` → `process.env.CAMBIUM_COMPILE_RB` → a monorepo-relative fallback used for in-tree tests. The env var is a deployment-time escape hatch for operators who unpack the CLI and the runner in non-standard layouts; production callers should prefer the explicit option (RED-376).
+Precedence chain (#242: shared with `runGenFromIr`'s `enrich` sub-agent spawn and `runPipelineFromIr`, see `compile-rb.ts#resolveCompileRb`): `opts.compileRb` → `process.env.CAMBIUM_COMPILE_RB` → a `createRequire` sibling lookup of the `@redwood-labs/cambium` package (the link that makes this work under a standard npm/pnpm/yarn install) → a monorepo-relative fallback used for in-tree tests. The env var is a deployment-time escape hatch for operators who unpack the CLI and the runner in non-standard layouts; production callers should prefer the explicit option (RED-376).
 
 ## Boot fail-fast
 
@@ -332,3 +378,4 @@ Items the original RFC said we'd ship but that didn't pull their weight on close
 - [[N - App Mode vs Engine Mode (RED-220)]] — engine-mode embedding context this builds on.
 - [[N - Engine-Mode Corrector Registry Isolation (RED-281)]] — per-`runGen` isolation that makes serve mode's "many calls, one process" safe.
 - [[N - Precompiled IR Distribution (#195)]] — the full producer↔consumer symmetry, the shipped-workspace layout contract, and `cambium run --ir`'s equivalent boot.
+- [[C - MCP Mode]] — `cambium mcp`: an MCP-stdio adapter that boots this HTTP core in-process on a private socket and relays `/v1/gens` + `/v1/run` into MCP's `tools/list` / `tools/call` shape (#198).

@@ -4,26 +4,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SqliteMemoryBackend } from './backend.js';
 import { mockEmbed, MOCK_DIM } from '../providers/embed.js';
+import { betterSqlite3Available, sqliteVecAvailable } from './native-deps.js';
 
-// RED-378/RED-408: sqlite-vec ships no musl prebuilt, so its native extension
-// can't load on Alpine. Skip the semantic tests when the extension won't load
-// (it's an optional native dep) rather than hard-fail — keeps the Ruby-3.x
-// docker gate (test-on-ruby) green. On glibc/macOS it loads and they run.
-async function sqliteVecLoadable(): Promise<boolean> {
-  try {
-    const { default: Database } = await import('better-sqlite3');
-    const sqliteVec: any = await import('sqlite-vec');
-    const db = new Database(':memory:');
-    sqliteVec.load(db);
-    db.close();
-    return true;
-  } catch {
-    return false;
-  }
-}
-const VEC_OK = await sqliteVecLoadable();
+// `better-sqlite3` and `sqlite-vec` are optionalDependencies (this
+// package's package.json) — a box without the native build must SKIP
+// every test that opens a real backend, not fail. RED-378/RED-408 also
+// covers sqlite-vec having no musl prebuilt (Alpine): DB_OK gates the
+// plain-SQLite tests, VEC_OK (which implies DB_OK) additionally gates
+// the semantic-search tests. See native-deps.test.ts for the two-way
+// proof these are genuine probes, not a hardcoded skip.
+const DB_OK = await betterSqlite3Available();
+const VEC_OK = await sqliteVecAvailable();
 
-describe('SqliteMemoryBackend (RED-215 phase 3+5)', () => {
+describe.skipIf(!DB_OK)('SqliteMemoryBackend (RED-215 phase 3+5)', () => {
   function freshBucket(): string {
     const dir = mkdtempSync(join(tmpdir(), 'cambium-memory-'));
     return join(dir, 'test.sqlite');
@@ -100,7 +93,7 @@ describe('SqliteMemoryBackend (RED-215 phase 3+5)', () => {
   });
 });
 
-describe('SqliteMemoryBackend.prune (RED-239)', () => {
+describe.skipIf(!DB_OK)('SqliteMemoryBackend.prune (RED-239)', () => {
   function freshBucket(): string {
     const dir = mkdtempSync(join(tmpdir(), 'cambium-prune-'));
     return join(dir, 'p.sqlite');
@@ -174,7 +167,7 @@ describe('SqliteMemoryBackend.prune (RED-239)', () => {
   });
 });
 
-describe('SqliteMemoryBackend.initSemantic musl error (RED-408)', () => {
+describe.skipIf(!DB_OK)('SqliteMemoryBackend.initSemantic musl error (RED-408)', () => {
   function freshBucket(): string {
     const dir = mkdtempSync(join(tmpdir(), 'cambium-musl-'));
     return join(dir, 'musl.sqlite');
