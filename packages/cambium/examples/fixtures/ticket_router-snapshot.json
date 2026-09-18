@@ -1,0 +1,17 @@
+{
+  "department": "billing",
+  "is_urgent": false,
+  "_decision": {
+    "department": {
+      "confidence": 1,
+      "probabilities": {
+        "billing": 1,
+        "technical": 0,
+        "sales": 0
+      }
+    },
+    "is_urgent": {
+      "probability": 0
+    }
+  }
+}

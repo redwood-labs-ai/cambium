@@ -14,13 +14,30 @@ If no `provider:` prefix is given, the bare string is treated as `"ollama:<name>
 
 ## Supported providers (current)
 
-| Provider    | Agentic mode | Embed | Prompt caching | Config |
-|---|---|---|---|---|
-| `omlx`      | ✅ | ✅ (`POST /v1/embeddings`) | n/a | `CAMBIUM_OMLX_BASEURL`, optional `CAMBIUM_OMLX_API_KEY` |
-| `ollama`    | ✅ | ✅ (`POST /api/embed`) | n/a | `CAMBIUM_OLLAMA_BASEURL` (default `http://localhost:11434`) |
-| `anthropic` | ✅ | ❌ (no native embeddings API) | ✅ system + last tool + last doc + grounded user-prefix | `ANTHROPIC_API_KEY` (or `CAMBIUM_ANTHROPIC_API_KEY`), optional `CAMBIUM_ANTHROPIC_BASEURL` (default `https://api.anthropic.com`) |
+| Provider    | Agentic mode | Embed | Prompt caching | `mode :decision` | Config |
+|---|---|---|---|---|---|
+| `omlx`      | ✅ | ✅ (`POST /v1/embeddings`) | n/a | ❌ | `CAMBIUM_OMLX_BASEURL`, optional `CAMBIUM_OMLX_API_KEY` |
+| `ollama`    | ✅ | ✅ (`POST /api/embed`) | n/a | ❌ | `CAMBIUM_OLLAMA_BASEURL` (default `http://localhost:11434`) |
+| `anthropic` | ✅ | ❌ (no native embeddings API) | ✅ system + last tool + last doc + grounded user-prefix | ❌ | `ANTHROPIC_API_KEY` (or `CAMBIUM_ANTHROPIC_API_KEY`), optional `CAMBIUM_ANTHROPIC_BASEURL` (default `https://api.anthropic.com`) |
+| `typesafe`  | ❌ (`generateText`/`generateWithTools` throw a deterministic pointer — Jev does not generate text) | ❌ | n/a | ✅ (#275, the `mode :decision` built-in — Jev by TypeSafe AI) | `CAMBIUM_TYPESAFE_API_KEY` (or bare `TYPESAFE_API_KEY`), optional `CAMBIUM_TYPESAFE_BASEURL` (default `https://api.typesafe.ai`) |
 
-Agentic mode is the tool-use loop (`mode :agentic`). Single-turn `generate` works for all three providers.
+Agentic mode is the tool-use loop (`mode :agentic`). Single-turn `generate` works for `omlx`/`ollama`/`anthropic`; `typesafe` works only under `mode :decision` — see [[P - mode]] § `mode :decision` semantics.
+
+> **`typesafe` has not yet been exercised against the live vendor API (#275).** The request
+> and response shapes are built from TypeSafe AI's published documentation and pinned by
+> tests against stubbed `fetch` calls; the runtime path is covered with fake providers and
+> `--mock`. Jev is early access (waitlist key) and the vendor is new. If the live response
+> shape differs from its docs, a run fails as a **named validation failure in the trace** —
+> the `decide()` contract below is checked on every response — never as a silently wrong
+> answer. But it fails. Treat the first real `cambium run` against `typesafe:jev-latest` as
+> the integration test this table cannot stand in for, and report drift as an issue.
+>
+> Two known v1 edges, by design: a 429 / 529 walks a declared `fallbacks` chain but there is
+> no in-provider backoff, so a `fan_out` burst past the vendor's rate limit fails those runs
+> ([#280](https://source.deerlarch.net/sbkeider/cambium/issues/280)); and the library API
+> (`runGen` with a hand-built IR) trusts its caller's IR — the artifact reader's
+> decision-mode guards cover `--ir` and `serve --precompiled`, not an embedding host that
+> constructs IRs itself.
 
 ## How the prefix resolves to a provider (RED-393)
 
@@ -61,6 +78,35 @@ The `modelName` knob maps Cambium's clean name → the wire id the API wants (fu
 **Tier 2 — `defineProvider({...})`** when the API isn't OpenAI/Anthropic-shaped (full control over build/fetch/normalize). This is how the built-in `ollama` provider is written. With full control comes full responsibility: **a Tier-2 provider must call `validateProviderBaseUrl(label, url)` itself before each `fetch`** — the SSRF guard that blocks private/metadata ranges is applied automatically by the Tier-1 factories, but `defineProvider` does no fetching on your behalf, so the check is yours to make.
 
 The in-repo example is `packages/cambium/app/providers/gateway.ts` — a no-SDK OpenAI-compatible gateway.
+
+**Optional: `decide` (#275, `mode :decision`).** `CambiumProvider` carries one more optional method, `decide(opts: DecideOpts): Promise<DecideResult>` — a typed-question request/response shape (`DecisionQuestion`/`DecideAnswer`, all exported from `@redwood-labs/cambium-runner`), parallel to `generateText`, not an extension of it. Absent means the provider cannot serve `mode :decision` gens; the runner's dispatcher (`makeDecide`) throws a deterministic `Provider "<prefix>" does not support mode :decision (no decide())` naming the prefix, rather than falling back to `generateText` with no probabilities (a silent downgrade). A custom decision-only provider stubs `generateText`/`generateWithTools` with a thrown `Error` (mirroring how the built-in `typesafe` provider does it) — the `loadFromDir` shape guard still requires both methods to exist, it just never expects them to succeed:
+
+```ts
+// app/providers/myvendor.ts  →  model "myvendor:decide-v1", mode :decision
+import { defineProvider } from '@redwood-labs/cambium-runner';
+
+export default defineProvider({
+  name: 'myvendor',
+  supportsDocuments: false,
+  async generateText() { throw new Error('myvendor: text generation not supported — use mode :decision.'); },
+  async generateWithTools() { throw new Error('myvendor: text generation not supported — use mode :decision.'); },
+  async decide(opts) {
+    // opts.model (prefix-stripped), opts.state ({ system?, task, context }),
+    // opts.questions ({ <field>: DecisionQuestion }) → { answers, usage? }
+  },
+});
+```
+
+**The runtime contract `DecideResult` must satisfy (#275, DEC-009b).** The runner (`handleDecisionGenerate`, `packages/cambium-runner/src/step-handlers.ts`) checks every response it gets back from `decide()`, whether built-in or custom, against this contract *after* the call has already returned successfully:
+
+- Every declared question (every key of `opts.questions`) MUST appear in `answers`, keyed by the same field name.
+- A `choice` question's answer MUST carry a string `choice` that is one of the declared `options` keys (AJV is the final judge of set-membership; the runner does not pre-check it) and an object `probabilities`.
+- A `boolean` question's answer MUST carry a numeric `probability`.
+- `confidence` on a choice answer is OPTIONAL — include it when you have one, omit the key entirely when you don't. Never send `null` or a placeholder.
+- Every number the contract requires (`probability`, `confidence` when present, and each **declared** option's `probabilities` value) MUST be finite — no `NaN`, no `Infinity`. An undeclared `probabilities` key is unchecked — no schema constrains it, so pass through whatever the vendor sends. One consequence: a non-finite value under an undeclared key still serialises as `null` in `output.json` (`JSON.stringify` turns `NaN`/`Infinity` into `null`), so send finite numbers for anything you want to survive.
+- `usage`, if you return it, is best-effort telemetry, not part of the answer: a partial or non-finite `usage` is silently dropped (no budget accounting for that call) rather than failing the run — the same posture `log` sinks take on sink failures.
+
+A response that violates any of the first four rules pushes a `Generate { ok: false }` trace row and the run falls through the normal decision-mode validation tail (see [`P - mode`](docs/GenDSL%20Docs/P%20-%20mode.md) § `mode :decision` semantics) — it does NOT throw. The one exception is the `decide()` call itself throwing (a transport/connection failure, an HTTP error, or the runner's own "does not support mode :decision (no decide())" check) — that still propagates unhandled, exactly like a `generateText` throw does.
 
 ### Conventions + guards
 
@@ -431,4 +477,5 @@ Profile-scoped aliases shadow globals of the same name. Both `:dev` and `:prod` 
 ## See also
 - [[P - GenModel]]
 - [[P - Memory]]
+- [[P - mode]] — `mode :decision` semantics, the `typesafe` (Jev) built-in
 - [[C - Runner (TS runtime)]]

@@ -4,7 +4,7 @@ import { testOverrideHandlers } from './tools/index.js';
 import { runCorrectorPipeline } from './correctors/index.js';
 import type { CorrectorContext, CorrectorFn } from './correctors/types.js';
 import type { CorrectorResult } from './correctors/types.js';
-import { schemaPromptBlock } from './schema-describe.js';
+import { schemaPromptBlock, additionalPropertiesState } from './schema-describe.js';
 import { parseInlineToolCalls, stripInlineToolCalls } from './inline-tool-calls.js';
 import type { SecurityPolicy } from './tools/permissions.js';
 import type { Budget } from './budget.js';
@@ -217,6 +217,20 @@ export const MIN_CACHE_PREFIX_CHARS = 4096;
  *  the second assembly pass allocates nothing. */
 const EMPTY_EXCLUDE_SET: ReadonlySet<string> = new Set<string>();
 
+/** The extra-keys clause OUTPUT_JSON_TEMPLATE appends, agreeing with the
+ *  same three-state judgment `schemaPromptBlock`'s SCHEMA-block closing
+ *  renders (#230) — so the template and the SCHEMA block never tell the
+ *  model opposite things. 'closed' (today's in-tree norm — every level
+ *  `additionalProperties: false`) keeps the exact clause every existing
+ *  prompt already ships, so those bytes — and the prompt-cache key they
+ *  feed (C-1/#228) — are unchanged. */
+function extraKeysClause(schema: any): string {
+  const { state, openPaths } = additionalPropertiesState(schema);
+  if (state === 'open') return '; extra keys are allowed';
+  if (state === 'mixed') return `; extra keys allowed at: ${openPaths.join(', ')} only`;
+  return '; no extra keys';
+}
+
 export type ExtractJsonFn = (text: string) => any;
 
 // ── Shared prompt assemblers ───────────────────────────────────────────
@@ -399,7 +413,7 @@ export function buildCacheablePrefix(
       }
       sharedParts.push(
         '',
-        'OUTPUT_JSON_TEMPLATE (fill this; keep keys the same; no extra keys):',
+        `OUTPUT_JSON_TEMPLATE (fill this; keep keys the same${extraKeysClause(schema)}):`,
         JSON.stringify(jsonTemplate),
       );
     }
@@ -617,6 +631,225 @@ export async function handleGenerate(
       },
     },
   };
+}
+
+// ── Decision Generate (#275 mode :decision) ────────────────────────────
+
+export type DecideFn = (opts: {
+  model: string;
+  state: unknown;
+  questions: Record<string, any>;
+  documents?: any[];
+  fallbacks?: string[];
+}) => Promise<{ answers: Record<string, any>; usage?: TokenUsage; modelUsed?: string }>;
+
+/** DEC-008: the nested JSON `state` object a decision-mode provider
+ *  receives. `system` present only when `ir.system` is a non-empty
+ *  string; `task = step.prompt ?? ''`; `context` = every `ir.context`
+ *  key not starting with `_` (framework-internal), in `ir.context`
+ *  insertion order, values passed through as-is — no labels, no
+ *  stringification, no OUTPUT_JSON_TEMPLATE, no cacheable prefix. None
+ *  of the free-text prompt-assembly helpers above apply here; a
+ *  decision provider is handed structured state, not a prompt. */
+function buildDecisionState(ir: any, step: any): { system?: string; task: string; context: Record<string, unknown> } {
+  const context: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(ir.context ?? {})) {
+    if (key.startsWith('_')) continue;
+    context[key] = value;
+  }
+  return {
+    ...(typeof ir.system === 'string' && ir.system.length > 0 ? { system: ir.system } : {}),
+    task: step.prompt ?? '',
+    context,
+  };
+}
+
+// #275 AUD-003/004: `decide` is a third-party trust boundary (any custom
+// provider, per DEC-006/DEC-017) — TypeScript gives no runtime guarantee
+// on what crosses it. One predicate covers both the type check and the
+// NaN/Infinity check for every number the envelope carries.
+function finiteDecisionNumber(n: unknown, what: string): number {
+  if (typeof n !== 'number' || !Number.isFinite(n)) {
+    throw new Error(`decide(): ${what} must be a finite number, got ${String(n)}.`);
+  }
+  return n;
+}
+
+/**
+ * #275: the `mode :decision` counterpart to `handleGenerate`. Builds
+ * `state` (DEC-008), dispatches through `decide` (the fallback-walking
+ * dispatcher `makeDecide` builds in runner.ts), and assembles the output
+ * per DEC-009/DEC-009a/DEC-009b — answers at the top level, plus a
+ * compiler-schema-matched `_decision` envelope (boolean threshold `>= 0.5`
+ * → `true`; the boolean entry is the vendor's own `{ probability }`, no
+ * synthesized complement) — and the `Generate` trace step per DEC-010.
+ *
+ * Failure shape (#275 DEC-009b, supersedes Amendment 1's STEP-003.2
+ * resolution for the post-return class): a `decide()` call that itself
+ * throws — a transport/provider error, including "no decide()" — still
+ * propagates unhandled, the same way a `generateText` throw does out of
+ * `handleGenerate`. But once `decide()` has returned, every guard failure
+ * below (a missing answer, `answers` not a map, a wrong `kind`, a
+ * non-string choice, a non-finite number where one is required) is a
+ * malformed ENVELOPE, not a transport failure — if `decide()` returned,
+ * the run gets a `Generate` row. These land as `Generate { ok: false,
+ * errors: [{ message }] }` with `parsed: undefined`, so the run falls
+ * through the same Validate ("No data to validate") → terminal
+ * `Repair { reason: "decision_mode" }` tail an out-of-set choice already
+ * takes, instead of escaping `runGen` as a bare throw with zero trace
+ * rows.
+ */
+export async function handleDecisionGenerate(
+  step: any,
+  ir: any,
+  schema: any,
+  decide: DecideFn,
+  /** RED-323 parity: pre-extracted docs, supplied by the runner (extracted
+   *  once per run). Optional so external callers keep working without
+   *  threading the extraction. */
+  docInput?: { documents: DocumentBlock[] },
+): Promise<{ raw: string; parsed: any; result: StepResult }> {
+  const { documents } = docInput ?? await extractDocuments(ir);
+  const state = buildDecisionState(ir, step);
+  const questions: Record<string, any> = ir.decision.questions;
+  const started = Date.now();
+
+  const decideResult = await decide({
+    model: ir.model.id,
+    state,
+    questions,
+    documents,
+    fallbacks: ir.model.fallbacks,
+  });
+
+  const modelUsed = decideResult.modelUsed ?? ir.model.id;
+
+  // #275 AUD-275-016: usage is best-effort telemetry, not part of the
+  // answer contract — the same posture `handleGenerate` already takes on
+  // `GenerateResult.usage` (never validated) and `log` sinks take on sink
+  // failures ("never fail the run"). A malformed usage object is dropped
+  // (no budget accounting for this step) rather than failing a run whose
+  // answers are otherwise fine.
+  const rawUsage = decideResult.usage;
+  const usageOk = !!rawUsage && typeof rawUsage === 'object' && !Array.isArray(rawUsage)
+    && [rawUsage.prompt_tokens, rawUsage.completion_tokens, rawUsage.total_tokens]
+      .every(n => typeof n === 'number' && Number.isFinite(n));
+  const usage = usageOk ? rawUsage : undefined;
+
+  try {
+    const parsed: Record<string, any> = {};
+    // DEC-009/DEC-009a/DEC-009b: the `_decision` envelope — probabilities
+    // for a choice (required), confidence for a choice (present when the
+    // vendor supplies it, omitted — never defaulted — when absent, DEC-009b),
+    // the vendor's own `{ probability }` for a boolean (no synthesized
+    // complement — the vendor emits no boolean confidence and no second
+    // number; DEC-009a removed the `{ true, false }` pair AUD-010 found
+    // producing an IEEE residue). The `probabilities` map itself is passed
+    // through untouched — no filling of missing keys, no dropping of
+    // unknown ones (DEC-009a) — only checked for finiteness below.
+    const decisionEnvelope: Record<string, any> = {};
+    // DEC-010: the trace's per-answer view additionally carries `value`.
+    const traceAnswers: Record<string, any> = {};
+
+    for (const field of Object.keys(questions)) {
+      const q = questions[field];
+      // #275 AUD-003: a missing answer, or `answers` shaped as an array
+      // instead of a map, must fail loudly here — not three lines down as
+      // an opaque "Cannot read properties of undefined".
+      const answer = decideResult.answers?.[field];
+      if (!answer || typeof answer !== 'object') {
+        throw new Error(
+          `decide(): provider "${modelUsed}" returned no answer for question '${field}'. ` +
+          `Every declared question must appear in DecideResult.answers.`
+        );
+      }
+      if (q.kind === 'choice') {
+        if (typeof (answer as any).choice !== 'string') {
+          throw new Error(`decide(): question '${field}' expects { kind: 'choice', choice: string, … }.`);
+        }
+        const a = answer as { choice: string; confidence?: number; probabilities: Record<string, number> };
+        if (!a.probabilities || typeof a.probabilities !== 'object') {
+          throw new Error(`decide(): question '${field}' expects { kind: 'choice', …, probabilities: object }.`);
+        }
+        // #275 AUD-275-015/DEC-009b: `confidence` is optional — present
+        // when the vendor returns it, finiteness-checked when present,
+        // never defaulted or synthesized when absent.
+        const hasConfidence = a.confidence !== undefined;
+        const confidence = hasConfidence
+          ? finiteDecisionNumber(a.confidence, `question '${field}' confidence`)
+          : undefined;
+        // #275 AUD-275-015/DEC-009b: only the DECLARED option keys get a
+        // finiteness check — an undeclared key is unchecked: no schema
+        // constrains it (the `probabilities` sub-object has no
+        // `additionalProperties: false`, DEC-009a), so pass through
+        // whatever the vendor sends. #275 AUD-275-020: a non-finite value
+        // under an undeclared key still serialises as `null` in
+        // output.json (JSON.stringify), so send finite numbers for
+        // anything you want to survive. A declared key that fails
+        // finiteness still throws, becoming a Generate{ok:false} row.
+        const declaredOptionKeys = new Set(Object.keys(q.options ?? {}));
+        for (const [optionKey, optionValue] of Object.entries(a.probabilities)) {
+          if (declaredOptionKeys.has(optionKey)) {
+            finiteDecisionNumber(optionValue, `question '${field}' probabilities.${optionKey}`);
+          }
+        }
+        parsed[field] = a.choice;
+        decisionEnvelope[field] = { ...(hasConfidence ? { confidence } : {}), probabilities: a.probabilities };
+        traceAnswers[field] = { value: a.choice, ...(hasConfidence ? { confidence } : {}), probabilities: a.probabilities };
+      } else {
+        if (typeof (answer as any).probability !== 'number') {
+          throw new Error(`decide(): question '${field}' expects { kind: 'boolean', probability: number }.`);
+        }
+        const a = answer as { probability: number };
+        const probability = finiteDecisionNumber(a.probability, `question '${field}' probability`);
+        // DEC-009: >= 0.5 → true (pinned at exactly 0.5 by a test).
+        const value = probability >= 0.5;
+        parsed[field] = value;
+        decisionEnvelope[field] = { probability };
+        traceAnswers[field] = { value, probability };
+      }
+    }
+    parsed._decision = decisionEnvelope;
+
+    const raw = JSON.stringify(parsed);
+
+    return {
+      raw,
+      parsed,
+      result: {
+        type: 'Generate',
+        id: step.id,
+        ms: Date.now() - started,
+        ok: true,
+        meta: {
+          model_used: modelUsed,
+          mode: 'decision',
+          usage,
+          raw_preview: raw.slice(0, 400),
+          decision: {
+            questions: Object.keys(questions).length,
+            answers: traceAnswers,
+          },
+        },
+      },
+    };
+  } catch (err: any) {
+    // #275 DEC-009b: see the failure-shape note in this function's doc
+    // comment — a well-formed `decide()` response with a malformed
+    // envelope is a validation outcome, not a transport failure.
+    return {
+      raw: '',
+      parsed: undefined,
+      result: {
+        type: 'Generate',
+        id: step.id,
+        ms: Date.now() - started,
+        ok: false,
+        errors: [{ message: err?.message ?? String(err) }],
+        meta: { model_used: modelUsed, mode: 'decision', ...(usage ? { usage } : {}) },
+      },
+    };
+  }
 }
 
 // ── Validate ──────────────────────────────────────────────────────────
@@ -849,7 +1082,7 @@ export async function handleRepair(
       'VALIDATION_ERRORS:',
       formattedErrors.join('\n'),
       '',
-      'OUTPUT_JSON_TEMPLATE (return this shape; keep keys the same; no extra keys):',
+      `OUTPUT_JSON_TEMPLATE (return this shape; keep keys the same${extraKeysClause(schema)}):`,
       JSON.stringify(jsonTemplate),
       '',
       'Return repaired JSON only.',

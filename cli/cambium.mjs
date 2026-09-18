@@ -52,6 +52,7 @@ Usage:
   cambium run <file.cmb.rb> --method <method> [--arg <path>|-] [--trace <path>] [--out <path>] [--mock] [--memory-key <name>=<value> ...] [--session-id <id>] [--profile <name>] [--fired-by <id>]
   cambium run --ir <file.ir.json> [--method <method>] [--arg <path>|-] [--trace <path>] [--out <path>] [--mock] [--memory-key <name>=<value> ...] [--session-id <id>] [--fired-by <id>]
   cambium replay <run-id|path> [--edit] [--from-step <type>] [--from-op <id>] [--mock]
+  cambium promote <run-id|path> [--source <key>] [--force]
   cambium compile <file.cmb.rb> [--method <method>] [--arg <path>|-] [-o <output>]
   cambium compile [--out-dir <dir>] [--write]   # (no file) recompile every gen/pipeline IR in the workspace
   cambium serve --workspace <path> --bind <uri> [--allow-remote] [--precompiled|--ir-dir <dir>]
@@ -68,6 +69,8 @@ Commands:
   run       Compile and execute a GenModel
   replay    Re-run a prior run's post-Generate tail from its candidate output,
             skipping the expensive Generate. --edit / --from-step <type>.
+  promote   Turn a prior run into a fixture + deterministic --mock golden
+            test in one move (#199). --source <key> / --force.
   compile   Compile a GenModel to IR JSON (no execution; engine-mode build step).
             Without --method, emits a {method → IR} map for every public method.
             With NO file, recompiles every gen/pipeline in the workspace:
@@ -255,6 +258,13 @@ if (cmd === 'inspect') {
 if (cmd === 'replay') {
   const { runReplay } = await import('./replay.mjs');
   await runReplay(args);
+  process.exit(0);
+}
+
+// ── cambium promote (#199) ────────────────────────────────────────────
+if (cmd === 'promote') {
+  const { runPromote } = await import('./promote.mjs');
+  await runPromote(args);
   process.exit(0);
 }
 

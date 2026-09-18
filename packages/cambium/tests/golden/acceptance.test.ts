@@ -30,11 +30,33 @@ const GENS_DIR = join(REPO_ROOT, 'packages/cambium/app/gens')
 const PIPELINES_DIR = join(REPO_ROOT, 'packages/cambium/app/pipelines')
 const SNAPSHOTS_DIR = join(REPO_ROOT, 'packages/cambium/tests/golden/ir')
 
-/** List all files in dir ending with ext, sorted, full absolute paths. */
+// #263: any CLI e2e test that scaffolds a throwaway gen/pipeline into
+// this real, in-tree app/gens/ or app/pipelines/ directory (not an
+// isolated tmpdir scratch workspace) for the duration of its own run,
+// then deletes it, can otherwise race THIS file's collection-time scan
+// — either leaking a committed-looking snapshot for a gen nobody meant
+// to pin, or (worse) getting collected and then failing to compile
+// because the sibling test's cleanup already deleted the file. Closed
+// structurally, not by timing: any basename containing this marker is
+// excluded from collection outright, regardless of when it happens to
+// exist on disk. `promote_e2e.test.ts` is (as of #263) the only test
+// that scaffolds into this real directory, and every filename it uses
+// there carries this marker. See records/PLAN-263-golden-ir-race-2026-09-11.md.
+const TEST_SCAFFOLD_MARKER = '_e2e_probe';
+
+/** True if `basename` is a throwaway artifact a CLI e2e test scaffolds
+ *  into a real app/gens/ or app/pipelines/ directory (#263) — must be
+ *  excluded from the golden-IR corpus regardless of timing. */
+function isScaffoldTestArtifact(basename: string): boolean {
+  return basename.includes(TEST_SCAFFOLD_MARKER);
+}
+
+/** List all files in dir ending with ext, sorted, full absolute paths.
+ *  Excludes scaffold-test artifacts (#263) — see isScaffoldTestArtifact. */
 function listFiles(dir: string, ext: string): string[] {
   try {
     return readdirSync(dir)
-      .filter(f => f.endsWith(ext))
+      .filter(f => f.endsWith(ext) && !isScaffoldTestArtifact(f))
       .sort()
       .map(f => join(dir, f))
   } catch {
@@ -86,3 +108,32 @@ describe('golden IR corpus — acceptance', () => {
     )
   })
 })
+
+describe('#263: scaffold-test artifact exclusion (regression)', () => {
+  it('excludes every filename shape promote_e2e.test.ts currently scaffolds into app/gens/', () => {
+    expect(isScaffoldTestArtifact('promote_e2e_probe.cmb.rb')).toBe(true);
+    expect(isScaffoldTestArtifact('promote_e2e_probe_moved.cmb.rb')).toBe(true);
+    expect(isScaffoldTestArtifact('promote_e2e_probe_aud2_moved.cmb.rb')).toBe(true);
+    expect(isScaffoldTestArtifact("promote_e2e_probe_inject_x`${1}'; const _z='.cmb.rb")).toBe(true);
+  });
+
+  it('does not exclude a real, committed gen', () => {
+    expect(isScaffoldTestArtifact('analyst.cmb.rb')).toBe(false);
+  });
+
+  // AUD-263-1: pins the boundary of what collides with the substring
+  // marker — a future PR renaming a real gen into a shape that merely
+  // resembles it (without the exact `_e2e_probe` compound) has
+  // somewhere to trip. Substring matching over a suffix anchor or a
+  // hardcoded count is DEC-002/DEC-006's deliberate tradeoff, not
+  // closed by this test.
+  it('does not exclude names that merely resemble the marker', () => {
+    expect(isScaffoldTestArtifact('e2e_smoke_test.cmb.rb')).toBe(false);
+    expect(isScaffoldTestArtifact('probe_investigator.cmb.rb')).toBe(false);
+  });
+
+  it('none of the currently-collected gens or pipelines are scaffold-test artifacts', () => {
+    for (const f of genFiles) expect(isScaffoldTestArtifact(basename(f))).toBe(false);
+    for (const f of pipelineFiles) expect(isScaffoldTestArtifact(basename(f))).toBe(false);
+  });
+});

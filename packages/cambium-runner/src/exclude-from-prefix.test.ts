@@ -31,8 +31,13 @@ import {
   MIN_CACHE_PREFIX_CHARS,
 } from './step-handlers.js';
 
+// #230: additionalProperties: false so this schema is 'closed' — the state
+// that keeps OUTPUT_JSON_TEMPLATE's "no extra keys" clause, which every
+// byte-equality assertion below (TEMPLATE_LABEL) depends on. This file is
+// about exclude_from_prefix mechanics, not the extra-keys wording.
 const SCHEMA = {
   type: 'object',
+  additionalProperties: false,
   properties: {
     summary: { type: 'string' },
     tags: { type: 'array', items: { type: 'string' } },

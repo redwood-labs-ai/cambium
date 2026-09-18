@@ -15,6 +15,7 @@ import { ProviderHttpError, ProviderConnectionError, normalizeStopReason } from 
 import { redactErrorBody } from './redact.js';
 import { normalizeOmlxBaseUrl, validateProviderBaseUrl } from './base-url-validator.js';
 import { buildOllamaChatRequest, normalizeOllamaChatResponse } from './ollama.js';
+import { TYPESAFE_DEFAULT_BASEURL, buildTypesafeRequest, normalizeTypesafeResponse } from './typesafe.js';
 
 /** oMLX server (OpenAI-compatible), with the vLLM/Qwen quirks the bare
  *  OpenAI shape doesn't need. */
@@ -146,6 +147,60 @@ export const ollamaProvider = defineProvider({
   },
 });
 
+/** TypeSafe AI (Jev) — the `mode :decision` provider (#275). Bespoke like
+ *  Ollama: not OpenAI- or Anthropic-shaped (RESEARCH-275). `decide` is its
+ *  only working method — Jev does not generate text, so
+ *  `generateText`/`generateWithTools` throw a plain, deterministic Error
+ *  naming the fix (and never fan out — a plain Error is DEC-A's
+ *  deterministic class). Request/response shaping lives in ./typesafe.js,
+ *  pure and unit-testable without a live server, mirroring the ollama.ts
+ *  split. Ships as a built-in so `mode :decision` works in a fresh
+ *  `cambium new` workspace with no app provider; an `app/providers/typesafe.ts`
+ *  still shadows it (the standard override hook). */
+export const typesafeProvider = defineProvider({
+  name: 'typesafe',
+  supportsDocuments: false,
+  fetchFailureHint: 'TypeSafe fetch failed. Check CAMBIUM_TYPESAFE_BASEURL and TYPESAFE_API_KEY.',
+
+  async generateText() {
+    throw new Error('typesafe: Jev does not generate text — declare `mode :decision` on this gen.');
+  },
+
+  async generateWithTools() {
+    throw new Error('typesafe: Jev does not generate text — declare `mode :decision` on this gen.');
+  },
+
+  async decide(opts) {
+    const key = process.env.CAMBIUM_TYPESAFE_API_KEY ?? process.env.TYPESAFE_API_KEY;
+    if (!key) {
+      throw new Error('TypeSafe: TYPESAFE_API_KEY (or CAMBIUM_TYPESAFE_API_KEY) is required.');
+    }
+    const baseUrl = process.env.CAMBIUM_TYPESAFE_BASEURL ?? TYPESAFE_DEFAULT_BASEURL;
+    validateProviderBaseUrl('TypeSafe (CAMBIUM_TYPESAFE_BASEURL)', baseUrl);
+    const url = `${baseUrl.replace(/\/$/, '')}/v1/systemone`;
+    const body = buildTypesafeRequest(opts);
+
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
+        body: JSON.stringify(body),
+      });
+    } catch (fetchErr) {
+      throw new ProviderConnectionError(
+        `TypeSafe connection failed: ${(fetchErr as Error).message ?? String(fetchErr)}`,
+      );
+    }
+    if (!res.ok) {
+      const errBody = redactErrorBody(await res.text().catch(() => ''));
+      throw new ProviderHttpError(res.status, `TypeSafe error: HTTP ${res.status}${errBody ? ` — ${errBody}` : ''}`);
+    }
+    const json: any = await res.json();
+    return normalizeTypesafeResponse(json, opts.questions);
+  },
+});
+
 /**
  * Build a registry pre-loaded with the framework built-ins. Register order
  * doesn't matter among built-ins (distinct names); app providers register
@@ -156,5 +211,6 @@ export function buildBuiltinRegistry(): ProviderRegistry {
   reg.register(anthropicProvider);
   reg.register(omlxProvider);
   reg.register(ollamaProvider);
+  reg.register(typesafeProvider);
   return reg;
 }

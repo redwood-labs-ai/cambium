@@ -330,6 +330,59 @@ end
   // injection payloads must be escaped by the emitter so the generated TS is
   // a single inert quoted literal — the injected code does not execute.
 
+  // #276: a field name that IS a bare identifier but carries object-literal
+  // meaning. `__proto__` unquoted sets the literal's prototype rather than
+  // defining a property, so the emitted type silently lacks the field — a
+  // schema/type divergence with no error anywhere. Pre-existing RED-419
+  // behaviour; #275's decision-mode option keys widen the reachable string
+  // set (they become property names under `_decision.<field>.probabilities`,
+  // and option keys are far more likely to be data-derived than field names).
+  it('emitter quotes __proto__, constructor and prototype as property keys (#276)', async () => {
+    const { emitContractsFile } = await import(join(REPO_ROOT, 'cli/contracts-emitter.mjs'));
+
+    // Built via JSON.parse, not an object literal — deliberately, and it is
+    // the faithful repro: in a literal, `__proto__:` sets the prototype and
+    // never becomes an own property, so the emitter would never see the key
+    // at all. JSON.parse creates a real own property, which is exactly how a
+    // schema reaches the emitter in production (parsed out of the IR).
+    const schema = JSON.parse(
+      JSON.stringify({
+        type: 'object',
+        properties: {},
+        required: ['__proto__', 'constructor', 'prototype', 'ordinary'],
+        additionalProperties: false,
+        $id: 'ProtoKeysOutput',
+      }).replace(
+        '"properties":{}',
+        '"properties":{"__proto__":{"type":"number"},"constructor":{"type":"string"},' +
+          '"prototype":{"type":"boolean"},"ordinary":{"type":"string"}}',
+      ),
+    );
+    // Guard the guard: if this ever stops being an own property the test
+    // below would pass vacuously.
+    expect(Object.prototype.hasOwnProperty.call(schema.properties, '__proto__')).toBe(true);
+
+    const src = emitContractsFile({ ProtoKeys: schema });
+
+    // Each special name is emitted as a quoted key...
+    expect(src).toContain('"__proto__": Type.Number()');
+    expect(src).toContain('"constructor": Type.String()');
+    expect(src).toContain('"prototype": Type.Boolean()');
+    // ...and never as a bare one.
+    expect(src).not.toMatch(/^\s*__proto__:/m);
+    expect(src).not.toMatch(/^\s*constructor:/m);
+    expect(src).not.toMatch(/^\s*prototype:/m);
+    // An ordinary identifier is still emitted bare (no gratuitous quoting).
+    expect(src).toContain('ordinary: Type.String()');
+
+    // The property actually survives into the evaluated object. Without the
+    // fix the literal's own-property set omits __proto__ entirely, which is
+    // the whole defect — assert the shape, not just the generated text.
+    const literal = src.slice(src.indexOf('Type.Object({'));
+    const keys = [...literal.matchAll(/^\s*"?([A-Za-z_$][\w$]*)"?: Type\./gm)].map((m) => m[1]);
+    expect(keys).toEqual(['__proto__', 'constructor', 'prototype', 'ordinary']);
+  });
+
   it('emitter escapes adversarial field names, enum values, and description strings (SEC-LOW-2)', async () => {
     const { emitContractsFile } = await import(join(REPO_ROOT, 'cli/contracts-emitter.mjs'));
 

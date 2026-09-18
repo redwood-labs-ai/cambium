@@ -224,12 +224,16 @@ The `cambium` verbs and their flags are a promised surface — scripts and CI th
 call the CLI keep working across a major line.
 
 - **Promised verbs:** `init`, `new`, `run`, `replay`, `compile`, `schedule`,
-  `serve`, `mcp`, `inspect`, `doctor`, `test`, `lint`.
+  `serve`, `mcp`, `promote`, `inspect`, `doctor`, `test`, `lint`.
 - `mcp` (#198) is additive CLI surface — an MCP-stdio adapter over the same
   `/v1` wire `serve` exposes. Its `<GenName>__<method>` tool-naming scheme
   and `{ input }` argument wrapper are governed by this same CLI promise:
   once shipped, a tool name or argument shape does not change meaning within
   a major line.
+- `promote` (#199) is additive CLI surface; its flags (`--source`, `--force`)
+  and its refusal semantics (untrusted-run-dir validation, gens-only) are
+  governed by the same CLI promise — flags keep their meaning, no removal
+  within a major line.
 - **Additive:** new verbs, new subcommands, new flags, new `--arg` input forms.
 - **Breaking (MAJOR):** removing a verb or flag, or changing a flag's meaning.
   There are **no CLI surface removals** within a major line.

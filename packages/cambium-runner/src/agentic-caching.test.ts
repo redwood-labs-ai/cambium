@@ -70,8 +70,13 @@ testOverrideHandlers['probe'] = async (input: any) => ({
   findings: 'F'.repeat(1200),
 });
 
+// #230: additionalProperties: false so this schema is 'closed' — the state
+// that keeps OUTPUT_JSON_TEMPLATE's "no extra keys" clause, which the
+// hardcoded template-text assertions below depend on. This file is about
+// agentic prompt-caching mechanics, not the extra-keys wording.
 const SCHEMA = {
   type: 'object',
+  additionalProperties: false,
   required: ['answer'],
   properties: {
     answer: { type: 'string' },

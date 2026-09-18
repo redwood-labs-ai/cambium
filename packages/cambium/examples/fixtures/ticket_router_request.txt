@@ -1,0 +1,15 @@
+Subject: Stripe webhook failing since this morning — payments not confirming
+
+We updated our billing plan yesterday and since then our Stripe webhook
+endpoint has been returning 500s on every `payment_intent.succeeded`
+event. Customers are being charged but their orders never move out of
+"pending" because our system isn't hearing back from Stripe. We've
+checked our webhook signing secret and it matches what's in the Stripe
+dashboard, so I don't think it's a config issue on our end.
+
+This has been going on for about six hours now and we have a backlog of
+roughly 40 unconfirmed payments piling up. Can someone take a look at
+our Stripe connection today? We're losing customer trust every hour this
+stays broken.
+
+Account: acct_9f21kd (Pro plan, upgraded yesterday)

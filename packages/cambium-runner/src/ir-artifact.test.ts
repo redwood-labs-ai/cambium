@@ -206,6 +206,95 @@ describe('assertGenIr — structural defects (#195 DEC-003)', () => {
   });
 });
 
+describe('assertGenIr — mode "decision" requires "decision.questions" (#275 AUD-275-008)', () => {
+  it('rejects mode: "decision" with no "decision" key at all', () => {
+    const ir = baseIr({ mode: 'decision' });
+    expect(() => assertGenIr(ir, 'x.ir.json')).toThrow(
+      /mode "decision" requires a "decision\.questions" object/,
+    );
+  });
+
+  it('rejects mode: "decision" with "decision" present but no "questions"', () => {
+    const ir = baseIr({ mode: 'decision', decision: {} });
+    expect(() => assertGenIr(ir, 'x.ir.json')).toThrow(
+      /mode "decision" requires a "decision\.questions" object/,
+    );
+  });
+
+  // #275 AUD-275-013: typeof null === 'object' and typeof [] === 'object',
+  // so both need an explicit carve-out — the original AUD-008 clause let
+  // `null` walk past it into the exact TypeError the clause was written
+  // to prevent.
+  it('rejects mode: "decision" with "decision.questions" set to null', () => {
+    const ir = baseIr({ mode: 'decision', decision: { questions: null } });
+    expect(() => assertGenIr(ir, 'x.ir.json')).toThrow(
+      /mode "decision" requires a "decision\.questions" object/,
+    );
+  });
+
+  it('rejects mode: "decision" with "decision.questions" set to an array', () => {
+    const ir = baseIr({ mode: 'decision', decision: { questions: [] } });
+    expect(() => assertGenIr(ir, 'x.ir.json')).toThrow(
+      /mode "decision" requires a "decision\.questions" object/,
+    );
+  });
+
+  it('accepts mode: "decision" with a well-formed "decision.questions" object', () => {
+    const ir = baseIr({ mode: 'decision', decision: { questions: { x: { kind: 'boolean', instructions: 'x?' } } } });
+    expect(() => assertGenIr(ir, 'x.ir.json')).not.toThrow();
+  });
+
+  it('a "decision" key with mode not "decision" is harmless — falls through to handleGenerate', () => {
+    const ir = baseIr({ decision: { questions: {} } }); // mode: null from baseIr()
+    expect(() => assertGenIr(ir, 'x.ir.json')).not.toThrow();
+  });
+});
+
+describe('assertGenIr — mode "decision" refuses memory/writes_memory_via/reads_trace_of artifacts (#275 AUD-275-014, DEC-012a)', () => {
+  const questions = { x: { kind: 'boolean', instructions: 'x?' } };
+
+  it('rejects a non-empty policies.memory', () => {
+    const ir = baseIr({
+      mode: 'decision',
+      decision: { questions },
+      policies: { ...baseIr().policies, memory: [{ name: 'recent', scope: 'session' }] },
+    });
+    expect(() => assertGenIr(ir, 'x.ir.json')).toThrow(
+      /"memory" is not available in mode "decision"/,
+    );
+  });
+
+  it('accepts an empty policies.memory array', () => {
+    const ir = baseIr({
+      mode: 'decision',
+      decision: { questions },
+      policies: { ...baseIr().policies, memory: [] },
+    });
+    expect(() => assertGenIr(ir, 'x.ir.json')).not.toThrow();
+  });
+
+  // `writes_memory_via` gets no decision-specific case here: it's already
+  // refused unconditionally of mode by the pre-existing `runtimeCompileSites`
+  // check above (#195 DEC-001 — a retro memory-write agent always needs
+  // Ruby at run time), so a decision-specific clause for it would never
+  // fire — see "names every offending site" above for that coverage.
+
+  it('rejects a set reads_trace_of', () => {
+    const ir = baseIr({ mode: 'decision', decision: { questions }, reads_trace_of: 'SomeGen' });
+    expect(() => assertGenIr(ir, 'x.ir.json')).toThrow(
+      /"reads_trace_of" is not available in mode "decision"/,
+    );
+  });
+
+  it('a non-decision gen with memory and reads_trace_of set is unaffected', () => {
+    const ir = baseIr({
+      policies: { ...baseIr().policies, memory: [{ name: 'recent', scope: 'session' }] },
+      reads_trace_of: 'SomeGen',
+    }); // mode: null from baseIr()
+    expect(() => assertGenIr(ir, 'x.ir.json')).not.toThrow();
+  });
+});
+
 describe('runtimeCompileSites (#195 DEC-001)', () => {
   it('returns an empty list for a closed gen IR', () => {
     expect(runtimeCompileSites(baseIr() as IR)).toEqual([]);
