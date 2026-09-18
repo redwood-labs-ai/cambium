@@ -194,6 +194,54 @@ export function assertGenIr(ir: unknown, label: string): asserts ir is IR {
       }
     });
   }
+
+  // #275 AUD-008/AUD-275-013: a precompiled artifact declaring
+  // `mode: "decision"` with no (or malformed) `decision.questions` would
+  // otherwise crash with a raw TypeError at first dispatch
+  // (`handleDecisionGenerate` reads `ir.decision.questions`
+  // unconditionally) — #195's whole point is that a malformed artifact is
+  // refused here, before any run starts. `typeof null === 'object'` and
+  // `typeof [] === 'object'`, so both need an explicit carve-out — AUD-013
+  // found `decision.questions: null` walking straight past a bare
+  // `typeof !== 'object'` check into the exact crash this clause exists
+  // to prevent.
+  const decisionQuestions = (irInternal as any).decision?.questions;
+  if (
+    irInternal.mode === 'decision' &&
+    (decisionQuestions === null || typeof decisionQuestions !== 'object' || Array.isArray(decisionQuestions))
+  ) {
+    throw new IrArtifactError(`${label}: mode "decision" requires a "decision.questions" object.`);
+  }
+
+  // #275 AUD-275-014: DEC-012a refuses `memory` / `writes_memory_via` /
+  // `reads_trace_of` on a `mode: "decision"` gen in the Ruby compiler
+  // (compile.rb) — but a precompiled artifact never passes through the
+  // compiler. The runner appends the recall block to `ir.system`
+  // unconditionally of mode (runner.ts), so a hand-built or
+  // third-party-produced decision IR carrying `policies.memory` would
+  // flatten untrusted recalled text into the decision model's
+  // `state.system` — on a vendor documented as not adversarially robust
+  // and subject to a distractor effect. `reads_trace_of` gets the same
+  // enforcement for the same "closed declaration set" reason.
+  // `writes_memory_via` needs no clause here: the `runtimeCompileSites`
+  // check above already refuses it unconditionally of mode (#195 DEC-001
+  // — a retro memory-write agent always needs Ruby at run time), so this
+  // block would be unreachable dead code for that one.
+  if (irInternal.mode === 'decision') {
+    const memory = (irInternal as any).policies?.memory;
+    if (Array.isArray(memory) && memory.length > 0) {
+      throw new IrArtifactError(
+        `${label}: "memory" is not available in mode "decision" (recalled entries would be ` +
+          `flattened into the decision model's state; see #275 DEC-012a).`,
+      );
+    }
+    if ((irInternal as any).reads_trace_of) {
+      throw new IrArtifactError(
+        `${label}: "reads_trace_of" is not available in mode "decision" (retro-agent machinery ` +
+          `assumes a text-generating gen; see #275 DEC-012a).`,
+      );
+    }
+  }
 }
 
 /**

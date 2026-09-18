@@ -76,6 +76,25 @@
     ],
     "description": "Multi-turn agentic generation with tools"
   },
+  "Decision mode": {
+    "prefix": "decision",
+    "body": [
+      "model \"typesafe:${1:jev-latest}\"",
+      "mode :decision",
+      "",
+      "returns do",
+      "  field :${2:choice_field}, String,",
+      "    description: \"${3:Which option applies?}\",",
+      "    enum: {",
+      "      ${4:option_a}: \"${5:description of option_a}\",",
+      "      ${6:option_b}: \"${7:description of option_b}\",",
+      "    }",
+      "  field :${8:bool_field}, Boolean,",
+      "    description: \"${9:the yes/no question}\"",
+      "end"
+    ],
+    "description": "Forced-choice/yes-no generation via a lightweight decision model (Jev, #275)"
+  },
   "Repair model slot": {
     "prefix": "repair",
     "body": [

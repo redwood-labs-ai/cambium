@@ -365,9 +365,19 @@ describe('corrector multi-attempt + correctness fix (RED-298)', () => {
     expect(result.finalOk ?? result.trace?.final?.ok).toBe(false);
   });
 
-  it('two correctors with different max_attempts run independently', async () => {
+  it('two correctors with different max_attempts run independently, plus #214 cross-corrector reverify of the always-failing earlier corrector', async () => {
     // :a fails always with max_attempts:1 → 1 iteration + terminal step.
     // :b fails always with max_attempts:2 → 2 iterations + terminal step.
+    //
+    // #214: `fail_a` is stateless (always errors regardless of input)
+    // and is declared BEFORE `fail_b`. Every repair `fail_b`'s loop
+    // accepts now also re-verifies `fail_a` (DEC-001) — it finds the
+    // same error again every time, folds into `fail_b`'s own attempt
+    // budget (DEC-002), and never heals, so at loop exit `fail_a` picks
+    // up a SECOND terminal row (`regressed_during: 'fail_b'`, DEC-005)
+    // in addition to the row its own loop already emitted. This is a
+    // legitimate behavior change from the fix, not a bug in the test —
+    // pre-#214, `fail_b`'s repairs never looked at `fail_a` again.
     const fail_a: CorrectorFn = (data) => ({
       corrected: false,
       output: data,
@@ -391,17 +401,274 @@ describe('corrector multi-attempt + correctness fix (RED-298)', () => {
     const stepTypes = result.trace.steps.map((s: any) => s.type);
     const count = (t: string) => stepTypes.filter((x: string) => x === t).length;
 
-    expect(count('Correct')).toBe(2); // one per corrector
-    expect(count('Repair')).toBe(3); // 1 for a + 2 for b
-    expect(count('CorrectAfterRepair')).toBe(3); // same
-    expect(count('CorrectAcceptedWithErrors')).toBe(2); // both exhausted
+    expect(count('Correct')).toBe(6); // 3 declaration-order passes × 2 correctors (#266)
+    expect(count('Repair')).toBe(9); // bounded: 3 passes × (1 for a + 2 for b) — DEC-002 still folds, never re-enters
+    expect(count('CorrectAfterRepair')).toBe(9); // same shape as Repair
+
+    // #214 + #266: each of fail_b's 2 accepted repairs re-verifies fail_a
+    // (the one earlier corrector) once, in each of the 3 passes — 6
+    // CorrectReverifyEarlier rows, all ok:false (fail_a is stateless and
+    // always errors). Pre-#266 this was 2 rows: only the first pass existed.
+    expect(count('CorrectReverifyEarlier')).toBe(6);
+    const reverifyRows = result.trace.steps.filter((s: any) => s.type === 'CorrectReverifyEarlier');
+    expect(reverifyRows.every((s: any) => s.meta?.corrector === 'fail_a')).toBe(true);
+    expect(reverifyRows.every((s: any) => s.meta?.reverify_for === 'fail_b')).toBe(true);
+    expect(reverifyRows.every((s: any) => s.ok === false)).toBe(true);
+
+    // Terminal rows: fail_a's own (from its own loop, unaffected),
+    // fail_b's own (unaffected), PLUS fail_a's #214 regressed-during row
+    // — now 3 per declaration-order pass × 3 passes = 9, still bounded.
+    expect(count('CorrectAcceptedWithErrors')).toBe(9);
+    expect(count('CorrectSweepExhausted')).toBe(1); // cap hit: they never converge
 
     const terminals = result.trace.steps.filter(
       (s: any) => s.type === 'CorrectAcceptedWithErrors',
     );
-    const byName = Object.fromEntries(terminals.map((t: any) => [t.meta.corrector, t]));
+    const ownRows = terminals.filter((t: any) => t.meta.regressed_during === undefined);
+    const regressedRows = terminals.filter((t: any) => t.meta.regressed_during !== undefined);
+
+    const byName = Object.fromEntries(ownRows.map((t: any) => [t.meta.corrector, t]));
     expect(byName.fail_a.meta.attempts_made).toBe(1);
     expect(byName.fail_b.meta.attempts_made).toBe(2);
+
+    // #214: fail_a's regressed row is attributed to fail_a, but carries
+    // fail_b's budget numbers — the budget that governed the fold
+    // (DEC-002/DEC-005). One such row per pass (#266).
+    expect(regressedRows).toHaveLength(3);
+    expect(regressedRows[0].meta.corrector).toBe('fail_a');
+    expect(regressedRows[0].meta.regressed_during).toBe('fail_b');
+    expect(regressedRows[0].meta.attempts_made).toBe(2);
+    expect(regressedRows[0].meta.max_attempts).toBe(2);
+  });
+
+  it('#214 (DEC-002): termination — an earlier corrector that mutates AND keeps erroring every pass still bounds the loop at the current corrector\'s own max_attempts (no cascade)', async () => {
+    // Pathological pair: `mutates_and_fails` (earlier) rewrites a field
+    // on every call AND always reports its own error-severity issue;
+    // `fights` (current) also always errors. Both simultaneously "fight"
+    // the repair loop — DEC-002's fold-into-current-budget contract must
+    // still bound TOTAL iterations at `fights`'s own max_attempts (the
+    // ceiling, 3) — never cascade unboundedly, and never re-enter
+    // `mutates_and_fails`'s own (exhausted, max_attempts:1) loop.
+    let mutateCalls = 0;
+    const mutates_and_fails: CorrectorFn = (data) => {
+      mutateCalls += 1;
+      return {
+        corrected: true,
+        output: { ...data, flips: mutateCalls },
+        issues: [{ path: '.a', message: 'a-always-wrong', severity: 'error' }],
+      };
+    };
+    const fights: CorrectorFn = (data) => ({
+      corrected: false,
+      output: data,
+      issues: [{ path: '.b', message: 'b-always-wrong', severity: 'error' }],
+    });
+
+    const result = await runGen({
+      ir: baseIR([
+        { name: 'mutates_and_fails', max_attempts: 1 },
+        { name: 'fights', max_attempts: 3 },
+      ]),
+      schemas: { MockOutput: MockSchema },
+      correctors: { ...builtinCorrectors, mutates_and_fails, fights },
+    });
+
+    const stepTypes = result.trace.steps.map((s: any) => s.type);
+    const count = (t: string) => stepTypes.filter((x: string) => x === t).length;
+
+    // mutates_and_fails's own loop (1) + fights's own loop, bounded at
+    // exactly its max_attempts ceiling (3), never more — the perpetual
+    // regression from mutates_and_fails does not grow the bound.
+    // #266 multiplies that same bound by the fixed 3-pass cap: 3 × (1 + 3)
+    // repairs — the cap is the termination argument, not convergence.
+    expect(count('Repair')).toBe(3 * (1 + 3));
+    expect(count('CorrectAfterRepair')).toBe(3 * (1 + 3));
+    expect(count('CorrectReverifyEarlier')).toBe(3 * 3); // once per fights attempt, per pass
+
+    const terminals = result.trace.steps.filter((s: any) => s.type === 'CorrectAcceptedWithErrors');
+    // mutates_and_fails's own + fights's own + mutates_and_fails
+    // regressed_during fights = 3 terminal rows per pass, never more —
+    // 9 total, and CorrectSweepExhausted is the one flag row saying the
+    // fixed point was cut off at the cap (#266).
+    expect(terminals).toHaveLength(9);
+    expect(count('CorrectSweepExhausted')).toBe(1);
+    for (const t of terminals) {
+      // No row's attempt count ever exceeds the RED-296 ceiling (3),
+      // regardless of which corrector's budget it was folded into.
+      expect(t.meta.attempts_made).toBeLessThanOrEqual(3);
+      expect(t.meta.max_attempts).toBeLessThanOrEqual(3);
+    }
+    const regressed = terminals.find((t: any) => t.meta.regressed_during === 'fights');
+    expect(regressed?.meta?.corrector).toBe('mutates_and_fails');
+    expect(regressed?.meta?.attempts_made).toBe(3); // fights's budget, per DEC-002/DEC-005
+  });
+});
+
+/**
+ * #266 — sequential-approval staleness, FIXED. The declaration-order
+ * corrector pass now repeats until no corrector mutates (hard cap 3), so
+ * every corrector gets a verdict on the bytes that actually ship — at BOTH
+ * sites #214 left open: the initial pass AND #214's own re-verify pass
+ * (DEC-013's "design it once for both sites" instruction).
+ *
+ * These were the AUD-214-001 / DEC-007-ii shapes pinned as a KNOWN
+ * LIMITATION (drift alarm, not endorsement). Flipping them is the ticket's
+ * acceptance criterion #1 — updated deliberately, not silently re-broken.
+ * Termination is a fixed cap, not convergence; the third test pins what
+ * happens when correctors fight past it.
+ */
+describe('#266: corrector passes iterate to a bounded fixed point', () => {
+  beforeEach(() => {
+    process.env.CAMBIUM_ALLOW_MOCK = '1';
+  });
+  afterEach(() => {
+    delete process.env.CAMBIUM_ALLOW_MOCK;
+  });
+
+  it('re-checks an earlier corrector after a repair-triggered mutation (AUD-214-001 repro, now closed)', async () => {
+    const corrector_a: CorrectorFn = (data: any) => ({
+      corrected: false,
+      output: data,
+      issues: data?.a === 'REGRESSED'
+        ? [{ path: '.a', message: 'a is regressed', severity: 'error' }]
+        : [],
+    });
+    const corrector_b: CorrectorFn = (data: any) => ({
+      corrected: true,
+      output: { ...data, a: 'REGRESSED', b: 'fixed_b' },
+      issues: [],
+    });
+    let cCalls = 0;
+    const corrector_c: CorrectorFn = (data: any) => {
+      cCalls += 1;
+      return {
+        corrected: false,
+        output: data,
+        issues: cCalls === 1
+          ? [{ path: '.c', message: 'c-err', severity: 'error' }]
+          : [],
+      };
+    };
+
+    const result = await runGen({
+      ir: baseIR([
+        { name: 'corrector_a', max_attempts: 1 },
+        { name: 'corrector_b', max_attempts: 1 },
+        { name: 'corrector_c', max_attempts: 1 },
+      ]),
+      schemas: { MockOutput: MockSchema },
+      correctors: { ...builtinCorrectors, corrector_a, corrector_b, corrector_c },
+    });
+
+    const steps = result.trace.steps;
+    const types = steps.map((s: any) => s.type);
+    const count = (t: string) => types.filter((x: string) => x === t).length;
+
+    // Three declaration-order passes instead of one: `corrector_b` mutates
+    // `a`, so pass 2 and pass 3 both go back and ask `corrector_a`.
+    expect(count('Correct')).toBe(9);                        // 3 passes × 3 correctors
+    expect(count('CorrectReverifyEarlier')).toBe(2);         // #214's within-pass pair, shape unchanged
+
+    // The fingerprint `corrector_a` exists to catch is now FLAGGED twice
+    // (once per re-check pass). Pre-#266 the count was 0 — that was the bug.
+    const flagged = steps.filter((s: any) =>
+      (s.meta?.issues ?? []).some((i: any) => i.message === 'a is regressed'),
+    );
+    expect(flagged.length).toBe(2);
+
+    // Still accepted: "refuse on unhealed errors" stays the caller's job.
+    // What changed is that the caller can now see it — `jq '.steps[] |
+    // select(.ok == false)'` returns rows, where it returned none before.
+    expect(result.ok).toBe(true);
+    expect(steps.some((s: any) => s.ok === false)).toBe(true);
+  });
+
+  it('re-checks an earlier corrector after a deterministic initial-pass mutation (DEC-007-ii, no repair involved)', async () => {
+    // No repair loop at all: `b` mutates `a` deterministically on its first
+    // and only turn. Pre-#266 nothing ever looked at `a` again — this is the
+    // half of the class DEC-007-ii deferred and DEC-013 refused to split.
+    const a: CorrectorFn = (data: any) => ({
+      corrected: false,
+      output: data,
+      issues: data?.a === 'REGRESSED'
+        ? [{ path: '.a', message: 'a is regressed', severity: 'error' }]
+        : [],
+    });
+    const b: CorrectorFn = (data: any) => ({
+      corrected: true,
+      output: { ...data, a: 'REGRESSED' },
+      issues: [],
+    });
+    const c: CorrectorFn = (data: any) => ({ corrected: false, output: data, issues: [] });
+
+    const result = await runGen({
+      ir: baseIR([
+        { name: 'a', max_attempts: 1 },
+        { name: 'b', max_attempts: 1 },
+        { name: 'c', max_attempts: 1 },
+      ]),
+      schemas: { MockOutput: MockSchema },
+      correctors: { ...builtinCorrectors, a, b, c },
+    });
+
+    const steps = result.trace.steps;
+    const types = steps.map((s: any) => s.type);
+    const count = (t: string) => types.filter((x: string) => x === t).length;
+
+    // `a` is asked again AFTER `b`'s mutation — the second and third passes
+    // both flag the field `b` stamped. Pre-#266, `a`'s last verdict came
+    // before the mutation existed.
+    expect(count('Correct')).toBe(9);
+    const lastA = steps.length - 1 - [...types].reverse().findIndex(
+      (t: string, i: number) => t === 'Correct' && steps[i].meta?.correctors?.includes('a'),
+    );
+    const firstMutation = types.findIndex(
+      (t: string, i: number) => t === 'Correct' && steps[i].meta?.correctors?.includes('b') && steps[i].meta?.corrected === true,
+    );
+    expect(firstMutation).toBeGreaterThan(0);
+    expect(lastA).toBeGreaterThan(firstMutation);
+    const regressedFlagged = steps.filter((s: any) =>
+      (s.meta?.issues ?? []).some((i: any) => i.message === 'a is regressed'),
+    );
+    expect(regressedFlagged.length).toBe(2);
+    expect(result.ok).toBe(true);
+    expect(result.output?.a).toBe('REGRESSED'); // ships, but flagged — never silently
+  });
+
+  it('caps the fixed point at three passes: fighting correctors terminate and emit one flag row', async () => {
+    // `fighter` re-stamps the bad value every turn and never reports it;
+    // `checker` flags it every turn. The fixed point can never converge, so
+    // the bound must come from the cap: 3 passes, one `CorrectSweepExhausted`
+    // row, and no unbounded cascade of repair calls.
+    let n = 0;
+    const fighter: CorrectorFn = (data: any) => {
+      n += 1;
+      return { corrected: true, output: { ...data, a: n % 2 ? 'x' : 'REGRESSED' }, issues: [] };
+    };
+    const checker: CorrectorFn = (data: any) => ({
+      corrected: false,
+      output: data,
+      issues: data?.a === 'REGRESSED' ? [{ path: '.a', message: 'a bad', severity: 'error' }] : [],
+    });
+
+    const result = await runGen({
+      ir: baseIR([
+        { name: 'checker', max_attempts: 2 },
+        { name: 'fighter', max_attempts: 1 },
+      ]),
+      schemas: { MockOutput: MockSchema },
+      correctors: { ...builtinCorrectors, checker, fighter },
+    });
+
+    const types = result.trace.steps.map((s: any) => s.type);
+    const count = (t: string) => types.filter((x: string) => x === t).length;
+
+    // 3 passes × 2 correctors of verification, one repair chain — bounded by
+    // construction, whatever the correctors do. `max_attempts` clamp untouched.
+    expect(count('Correct')).toBe(6);
+    expect(count('Repair')).toBeLessThanOrEqual(3 * (2 + 1));
+    expect(count('CorrectSweepExhausted')).toBe(1);
+    expect(result.ok).toBe(true);
   });
 });
 

@@ -1,0 +1,62 @@
+{
+  "triage": {
+    "version": "0.2",
+    "kind": "Pipeline",
+    "name": "TicketTriage",
+    "entry": {
+      "class": "TicketTriage",
+      "method": "triage",
+      "source": "packages/cambium/app/pipelines/ticket_triage.pipeline.rb"
+    },
+    "input": {
+      "ticket": {
+        "schema": "AnalysisReport"
+      }
+    },
+    "policies": {
+      "bind_defaults": "explicit",
+      "memory": [],
+      "schedules": [],
+      "log": [],
+      "log_profiles": []
+    },
+    "operators": [
+      {
+        "kind": "Step",
+        "id": "route",
+        "gen": "TicketRouter",
+        "method": "route",
+        "with": [
+          {
+            "param": "document",
+            "from": {
+              "input": "ticket"
+            }
+          }
+        ]
+      }
+    ],
+    "output": {
+      "kind": "compose",
+      "fields": [
+        {
+          "name": "department",
+          "from": {
+            "step": "route",
+            "field": "department"
+          }
+        },
+        {
+          "name": "confidence",
+          "from": {
+            "step": "route",
+            "field": "_decision.department.confidence"
+          }
+        }
+      ]
+    },
+    "context": {
+      "_pipeline_arg": ""
+    }
+  }
+}

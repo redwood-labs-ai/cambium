@@ -14,6 +14,7 @@ import { ToolRegistry } from './tools/registry.js';
 import {
   handleGenerate,
   handleAgenticGenerate,
+  handleDecisionGenerate,
   handleValidate,
   handleRepair,
   handleCorrect,
@@ -565,6 +566,156 @@ export function makeGenerateWithTools(providerRegistry: ProviderRegistry, traceS
  };
 }
 
+// #275 DEC-007: makeDecide mirrors makeGenerateText's skeleton (primary-
+// provider document gate before the --mock short-circuit, fallback walk,
+// ModelFallback trace step) for the mode :decision request/response shape
+// (`DecideOpts`/`DecideResult`, providers/types.ts DEC-006). No separate
+// startup check — this dispatch is the first thing the Generate step does
+// in decision mode.
+export function makeDecide(providerRegistry: ProviderRegistry, traceSteps: any[]) {
+ return async function decide(opts: {
+  model: string;
+  state: unknown;
+  questions: Record<string, any>;
+  documents?: any[];
+  fallbacks?: string[];
+ }): Promise<{ answers: Record<string, any>; usage?: TokenUsage; modelUsed?: string }> {
+  const documents = opts.documents ?? [];
+
+  // Same posture as generateText/generateWithTools (DEC-B): the PRIMARY
+  // provider's document gate runs before the --mock short-circuit, so
+  // --mock can't green-light a document-bearing config that would fail
+  // in production. Jev is text-only (supportsDocuments: false).
+  if (documents.length > 0) {
+    const { provider: primaryPrefix } = parseModelId(opts.model);
+    const primaryProvider = providerRegistry.get(primaryPrefix);
+    if (primaryProvider && !primaryProvider.supportsDocuments) {
+      const kinds = [...new Set(documents.map((d) => d.kind))].join(', ');
+      throw new Error(
+        `Provider "${primaryPrefix}" does not support native document input (kinds: ${kinds}). ` +
+        `Switch to an anthropic: model, or pre-extract text and pass it as a plain string.`
+      );
+    }
+  }
+
+  // #275 AUD-001/DEC-007a: primary-provider capability gate — same posture
+  // as the document gate above. --mock must not green-light a config that
+  // cannot run in production: a decision gen wired to a provider with no
+  // decide() (e.g. an `omlx:`/`ollama:`/`anthropic:` text model) would
+  // otherwise pass its golden and fail every real run, defeating the only
+  // safety net decision mode has. Gate only a *resolvable* provider — an
+  // unknown prefix keeps today's behaviour and optsTestProviders fakes are
+  // unaffected — matching DEC-017's "runtime dispatch is the gate" now that
+  // the gate also runs under mock.
+  const { provider: decisionPrimaryPrefix } = parseModelId(opts.model);
+  const decisionPrimaryProvider = providerRegistry.get(decisionPrimaryPrefix);
+  if (decisionPrimaryProvider && !decisionPrimaryProvider.decide) {
+    throw new Error(
+      `Provider "${decisionPrimaryPrefix}" does not support mode :decision (no decide()). ` +
+      `Declare mode :decision with a provider that implements decide (built-in: "typesafe").`
+    );
+  }
+
+  // DEC-014: --mock is question-derived, deterministic, and schema-
+  // consistent — never calls mockGenerate/mockOutputText. Per question:
+  // choice → the first declared option key (confidence 1, that option's
+  // probability 1, every other 0); boolean → probability 0 (→ false).
+  // This is byte-identical to what deriveMockFromSchema(returnSchema)
+  // would derive for the same fields (enum[0], boolean → false), so a
+  // golden minted under mock reads as the schema mock would.
+  if (process.env.CAMBIUM_ALLOW_MOCK === '1') {
+    const answers: Record<string, any> = {};
+    for (const [name, q] of Object.entries(opts.questions)) {
+      if ((q as any).kind === 'choice') {
+        const optionKeys = Object.keys((q as any).options ?? {});
+        // #275 AUD-006: build on a null-prototype object so an option key
+        // named "__proto__" becomes a real own property instead of a
+        // silent no-op assignment to the prototype (which AJV's `required`
+        // check then reads through, reporting ok:true on an output that
+        // violates its own returnSchema).
+        const probabilities: Record<string, number> = Object.create(null);
+        optionKeys.forEach((k, i) => { probabilities[k] = i === 0 ? 1 : 0; });
+        answers[name] = { kind: 'choice', choice: optionKeys[0], confidence: 1, probabilities };
+      } else {
+        answers[name] = { kind: 'boolean', probability: 0 };
+      }
+    }
+    return { answers, modelUsed: opts.model };
+  }
+
+  // RED-421-style fallback walk: primary first, then fallbacks in order,
+  // through the same per-run ProviderRegistry. No stickiness.
+  const candidates = [opts.model, ...(opts.fallbacks ?? [])];
+  let lastErr: unknown;
+
+  for (let i = 0; i < candidates.length; i++) {
+    const modelId = candidates[i];
+    const { provider: prefix, name } = parseModelId(modelId);
+
+    const provider = providerRegistry.get(prefix);
+    if (!provider) {
+      throw new Error(
+        `Unknown model provider "${prefix}". Known providers: ${providerRegistry.names().join(', ')}.`,
+      );
+    }
+
+    // Per-candidate document gate — covers fallback providers (the primary
+    // is gated above, before the mock short-circuit).
+    if (documents.length > 0 && !provider.supportsDocuments) {
+      const kinds = [...new Set(documents.map((d) => d.kind))].join(', ');
+      throw new Error(
+        `Provider "${prefix}" does not support native document input (kinds: ${kinds}). ` +
+        `Switch to an anthropic: model, or pre-extract text and pass it as a plain string.`
+      );
+    }
+
+    // DEC-007: a provider that doesn't implement `decide` cannot serve
+    // mode :decision at all. A plain Error is deterministic (DEC-A) — it
+    // stops the walk here, same as the unknown-provider/document-gate
+    // checks above, rather than trying further candidates.
+    if (!provider.decide) {
+      throw new Error(
+        `Provider "${prefix}" does not support mode :decision (no decide()). ` +
+        `Declare mode :decision with a provider that implements decide (built-in: "typesafe").`
+      );
+    }
+
+    // Emit a ModelFallback trace step BEFORE trying a fallback, same
+    // ordering as makeGenerateText/makeGenerateWithTools.
+    if (i > 0) {
+      traceSteps.push({
+        type: 'ModelFallback',
+        ok: true,
+        meta: {
+          attempted: candidates[i - 1],
+          fallback_to: modelId,
+          error_class: isTransientProviderError(lastErr) ? 'transient' : 'deterministic',
+          reason: lastErr instanceof Error ? lastErr.message.slice(0, 300) : String(lastErr),
+        },
+      });
+    }
+
+    try {
+      const result = await provider.decide({
+        model: name,
+        state: opts.state,
+        questions: opts.questions as any,
+      });
+      return { ...result, modelUsed: modelId };
+    } catch (err: any) {
+      lastErr = err;
+      if (i < candidates.length - 1 && isTransientProviderError(err)) {
+        continue;
+      }
+      const hint = provider.fetchFailureHint ?? `${prefix} fetch failed.`;
+      throw new Error(`${hint}\nOriginal error: ${err?.message ?? String(err)}`, { cause: err });
+    }
+  }
+
+  throw new Error('[cambium] decide: exhausted all model candidates without returning');
+ };
+}
+
 // #205: the deterministic --mock text generator. Schema-derivation logic
 // (canned framework ids → default-if-it-fits → schema-derived) lives in
 // mock-output.ts, which is unit-tested in isolation; this stays a
@@ -1006,6 +1157,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
   // inline (the array reference is stable for the lifetime of this runGen call).
   const generateText = makeGenerateText(providerRegistry, trace.steps);
   const generateWithTools = makeGenerateWithTools(providerRegistry, trace.steps);
+  const decide = makeDecide(providerRegistry, trace.steps);
 
   // ── Build per-`runGen` corrector map (RED-275, RED-287, RED-299) ─────
   // Precedence (low → high; later entries win on name collision):
@@ -1578,6 +1730,12 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
 
       raw = agenticResult.raw;
       parsed = agenticResult.parsed;
+    } else if (ir.mode === 'decision') {
+      const gen = await handleDecisionGenerate(step, ir, schema, decide, { documents });
+      trace.steps.push(gen.result);
+      budgetTrack(gen.result);
+      raw = gen.raw;
+      parsed = gen.parsed;
     } else {
       const gen = await handleGenerate(step, ir, schema, generateText, extractJsonObject, { documents, groundingTextByKey });
       trace.steps.push(gen.result);
@@ -1611,6 +1769,24 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
         errors = [];
         // Only push validate step on success if it wasn't first attempt (show the win after repair)
         if (attempt > 0) trace.steps.push(vResult);
+        break;
+      }
+
+      // #275 DEC-011: a decision-mode output that fails AJV is a provider
+      // or normalization bug, not a text-repair opportunity — by
+      // construction the provider's answer is in-set, so handing a
+      // choice-among-declared-keys to a text model re-opens the
+      // invented-value hazard #273 closed. Terminal: push Validate, push
+      // a deterministic no-op Repair step (#273 precedent — `ok: false`,
+      // `meta.deterministic: true`, no budget spend, `handleRepair` never
+      // called), and stop. `finalOk` stays false → `failureKind: 'validation'`.
+      if (ir.mode === 'decision') {
+        trace.steps.push(vResult);
+        trace.steps.push({
+          type: 'Repair',
+          ok: false,
+          meta: { reason: 'decision_mode', deterministic: true, attempt: 1 },
+        });
         break;
       }
 
@@ -1802,6 +1978,10 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
 
     // 4. Correctors (deterministic post-validation transforms + verification)
     //
+    // #266: the declaration-order pass below runs 1–2 times — a second pass
+    // fires only when the first moved bytes, so no approval is ever stale
+    // w.r.t. what ships (regression and its flag land in the same trace).
+    //
     // RED-298 reworked this block from "run all correctors in one pass,
     // one repair attempt on combined issues" to a per-corrector loop with
     // per-corrector `max_attempts`. Two reasons:
@@ -1828,116 +2008,265 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     // We can't use it to detect "schema broke inside THIS corrector
     // loop," so track that with a local variable.
     let correctorSchemaBroke = false;
-    for (const decl of correctorDecls) {
-      const correctorName = decl.name;
-      const maxAttempts = decl.max_attempts;
+    // #266 (bounded fixed point): the declaration-order pass below runs
+    // 1–3 times. A repeat fires only when the last pass moved bytes, so no
+    // corrector's approval is stale w.r.t. what ships — at BOTH sites: the
+    // initial pass and #214's re-verify pass live inside one declaration-order
+    // sweep, so one loop closes both (DEC-013's "design it once" instruction).
+    //
+    // Termination: fixed cap, no convergence claim — 3 passes × N correctors ×
+    // (1 verify + ≤3 repairs each, `max_attempts` still clamped [1,3]). Every
+    // repair still routes through pushRepairStep → budgetTrack, so the per_run
+    // token cap stays the backstop. Honest correctors (each touches only its
+    // own field) converge on pass 2: pass 2 re-verifies everything the last
+    // mutation touched, finds nothing, and the loop exits — one extra
+    // verification sweep of cost, zero extra repairs.
+    // ponytail: single-corrector gens keep byte-identical traces — with no
+    // earlier peer there is nothing to regress. Ceiling = correctors that
+    // fight each other past three passes; those end in the flag row below.
+    const maxSweeps = correctorDecls.length > 1 ? 3 : 1;
+    for (let sweep = 0; sweep < maxSweeps && !correctorSchemaBroke; sweep++) {
+      let mutatedThisSweep = false;
 
-      // Initial pass: run just this corrector so the trace distinguishes
-      // it from any peers. Issues from the pipeline drive the repair
-      // loop; a `corrected: true` mutating-corrector result updates
-      // `parsed` and triggers a silent schema revalidate (only the
-      // failure case is loud — matches pre-RED-298 observability).
-      const correctResult = handleCorrect(
-        parsed, [correctorName], groundingVerifyContext(), correctors,
-      );
-      trace.steps.push(correctResult);
+      for (let correctorIndex = 0; correctorIndex < correctorDecls.length; correctorIndex++) {
+        const decl = correctorDecls[correctorIndex];
+        const correctorName = decl.name;
+        const maxAttempts = decl.max_attempts;
 
-      if (correctResult.meta?.corrected) {
-        parsed = correctResult.output;
-        const revalidate = handleValidate(parsed, validate, 'ValidateAfterCorrect');
-        if (!revalidate.ok) {
-          trace.steps.push(revalidate);
-          correctorSchemaBroke = true;
-          break;
-        }
-      }
+        // #214 (DEC-001): correctors that already completed, in declaration
+        // order. After a repair accepted on THIS corrector's behalf, each
+        // of these re-verifies (verification-only — their own repair loops
+        // are never re-entered, DEC-002) before the existing same-corrector
+        // rerun closes the pass. Empty for the first-declared corrector —
+        // nothing earlier exists to regress, so the pass degenerates to
+        // pre-#214 behavior exactly (byte-identical for single-corrector gens).
+        const earlierDecls = correctorDecls.slice(0, correctorIndex);
 
-      let correctorErrors = (correctResult.meta?.issues ?? [])
-        .filter((i: any) => i.severity === 'error');
-      let attemptsMade = 0;
-
-      while (correctorErrors.length > 0 && attemptsMade < maxAttempts) {
-        attemptsMade += 1;
-
-        const repairErrors = correctorErrors.map((i: any) => ({
-          message: `Corrector: ${i.message}`,
-          instancePath: i.path,
-        }));
-        const repair = await handleRepair(
-          JSON.stringify(parsed, null, 2), repairErrors, schema, ir,
-          maxRepairAttempts + 1, generateText, extractJsonObject, ir.model,
-          // RED-175: same document handleCorrect just verified against.
-          { documents, groundingTextByKey, task: step.prompt },
-        );
-        pushRepairStep(repair);
-
-        if (!repair.parsed) break; // Repair produced no usable JSON.
-
-        const revalidate = handleValidate(
-          repair.parsed, validate, 'ValidateAfterCorrectorRepair',
-        );
-        trace.steps.push(revalidate);
-        if (!revalidate.ok) break; // Repair broke schema; keep pre-repair parsed.
-
-        // Accept the repaired output and re-run THIS corrector to see
-        // whether the repair actually healed its concern. This is the
-        // RED-298 correctness fix.
-        parsed = repair.parsed;
-        const rerun = handleCorrect(
+        // Initial pass: run just this corrector so the trace distinguishes
+        // it from any peers. Issues from the pipeline drive the repair
+        // loop; a `corrected: true` mutating-corrector result updates
+        // `parsed` and triggers a silent schema revalidate (only the
+        // failure case is loud — matches pre-RED-298 observability).
+        const correctResult = handleCorrect(
           parsed, [correctorName], groundingVerifyContext(), correctors,
         );
-        const stillErrors = (rerun.meta?.issues ?? [])
-          .filter((i: any) => i.severity === 'error');
-        trace.steps.push({
-          ...rerun,
-          type: 'CorrectAfterRepair',
-          ok: stillErrors.length === 0,
-        });
+        trace.steps.push(correctResult);
 
-        // Mutating corrector on re-run: propagate + silent schema check,
-        // same stance as the initial pass.
-        if (rerun.meta?.corrected) {
-          parsed = rerun.output;
-          const postMutate = handleValidate(parsed, validate, 'ValidateAfterCorrect');
-          if (!postMutate.ok) {
-            trace.steps.push(postMutate);
+        if (correctResult.meta?.corrected) {
+          parsed = correctResult.output;
+          mutatedThisSweep = true;
+          const revalidate = handleValidate(parsed, validate, 'ValidateAfterCorrect');
+          if (!revalidate.ok) {
+            trace.steps.push(revalidate);
             correctorSchemaBroke = true;
             break;
           }
         }
 
-        correctorErrors = stillErrors;
+        let correctorErrors = (correctResult.meta?.issues ?? [])
+          .filter((i: any) => i.severity === 'error');
+        let attemptsMade = 0;
+        // #214 (DEC-002): regressions earlier correctors surface after an
+        // accepted repair fold into THIS corrector's own attempt budget —
+        // no corrector's own loop is ever re-entered. Keyed by corrector
+        // name, overwritten every re-verify pass with that pass's
+        // error-severity issues (healed → deleted), so exhaustion
+        // accounting below always reflects the latest pass, never a stale
+        // one.
+        const regressedEarlier = new Map<string, any[]>();
+
+        while (
+          (correctorErrors.length > 0 || [...regressedEarlier.values()].some(issues => issues.length > 0)) &&
+          attemptsMade < maxAttempts
+        ) {
+          attemptsMade += 1;
+
+          // #214 (DEC-006): this corrector's own lines stay byte-identical
+          // to pre-#214; earlier-corrector regressions get an explicit
+          // attribution label so the repair model can tell the two issue
+          // classes apart. Empty on attempt 1 (a regression can only be
+          // discovered AFTER a repair is accepted, below).
+          const repairErrors = [
+            ...correctorErrors.map((i: any) => ({
+              message: `Corrector: ${i.message}`,
+              instancePath: i.path,
+            })),
+            ...[...regressedEarlier.entries()].flatMap(([name, issues]) =>
+              issues.map((i: any) => ({
+                message: `Corrector ${name} (regressed by repair): ${i.message}`,
+                instancePath: i.path,
+              })),
+            ),
+          ];
+          const repair = await handleRepair(
+            JSON.stringify(parsed, null, 2), repairErrors, schema, ir,
+            maxRepairAttempts + 1, generateText, extractJsonObject, ir.model,
+            // RED-175: same document handleCorrect just verified against.
+            { documents, groundingTextByKey, task: step.prompt },
+          );
+          pushRepairStep(repair);
+
+          if (!repair.parsed) break; // Repair produced no usable JSON.
+
+          const revalidate = handleValidate(
+            repair.parsed, validate, 'ValidateAfterCorrectorRepair',
+          );
+          trace.steps.push(revalidate);
+          if (!revalidate.ok) break; // Repair broke schema; keep pre-repair parsed.
+
+          parsed = repair.parsed;
+          mutatedThisSweep = true;
+
+          // #214 (DEC-001/DEC-003/DEC-004): re-verify every earlier
+          // corrector, in declaration order, BEFORE this corrector's own
+          // rerun below — each sees its predecessors' output, exactly like
+          // the initial pass. Mutations propagate exactly like the two
+          // existing sites in this loop (silent revalidate; failure aborts
+          // the whole corrector block).
+          for (const earlierDecl of earlierDecls) {
+            const earlierName = earlierDecl.name;
+            const earlierRerun = handleCorrect(
+              parsed, [earlierName], groundingVerifyContext(), correctors,
+            );
+            const earlierStillErrors = (earlierRerun.meta?.issues ?? [])
+              .filter((i: any) => i.severity === 'error');
+            trace.steps.push({
+              type: 'CorrectReverifyEarlier',
+              ok: earlierStillErrors.length === 0,
+              // Sweep 0 rows are byte-identical to pre-#266; later sweeps are
+              // the same check on later bytes, so say which sweep it belongs to
+              // and keep `id` unique across them.
+              id: `correct_reverify_earlier_${earlierName}_${correctorName}_${attemptsMade}${sweep > 0 ? `_s${sweep + 1}` : ''}`,
+              meta: {
+                corrector: earlierName,
+                reverify_for: correctorName,
+                attempt: attemptsMade,
+                corrected: earlierRerun.meta?.corrected ?? false,
+                issues: earlierRerun.meta?.issues ?? [],
+                ...(sweep > 0 ? { sweep: sweep + 1 } : {}),
+              },
+            });
+
+            if (earlierRerun.meta?.corrected) {
+              parsed = earlierRerun.output;
+              mutatedThisSweep = true;
+              const postMutate = handleValidate(parsed, validate, 'ValidateAfterCorrect');
+              if (!postMutate.ok) {
+                trace.steps.push(postMutate);
+                correctorSchemaBroke = true;
+                break;
+              }
+            }
+
+            if (earlierStillErrors.length > 0) {
+              regressedEarlier.set(earlierName, earlierStillErrors);
+            } else {
+              regressedEarlier.delete(earlierName);
+            }
+          }
+          if (correctorSchemaBroke) break;
+
+          // Accept the repaired output and re-run THIS corrector to see
+          // whether the repair actually healed its concern. This is the
+          // RED-298 correctness fix — now running LAST (DEC-001) so its
+          // verdict refers to bytes the earlier-corrector pass above may
+          // have already mutated.
+          const rerun = handleCorrect(
+            parsed, [correctorName], groundingVerifyContext(), correctors,
+          );
+          const stillErrors = (rerun.meta?.issues ?? [])
+            .filter((i: any) => i.severity === 'error');
+          trace.steps.push({
+            ...rerun,
+            type: 'CorrectAfterRepair',
+            ok: stillErrors.length === 0,
+          });
+
+          // Mutating corrector on re-run: propagate + silent schema check,
+          // same stance as the initial pass.
+          if (rerun.meta?.corrected) {
+            parsed = rerun.output;
+            mutatedThisSweep = true;
+            const postMutate = handleValidate(parsed, validate, 'ValidateAfterCorrect');
+            if (!postMutate.ok) {
+              trace.steps.push(postMutate);
+              correctorSchemaBroke = true;
+              break;
+            }
+          }
+
+          correctorErrors = stillErrors;
+        }
+
+        // Loop exhausted with errors still pending — emit the terminal
+        // observability step so downstream consumers (and `jq .steps[] |
+        // select(.ok == false)`) can see the framework gave up. Does not
+        // fail the run; the output is still schema-valid. Policy "refuse
+        // on unhealed errors" is the caller's job, not the runner's.
+        //
+        // Gated on !correctorSchemaBroke: if a mutating corrector on re-run
+        // broke schema, the loop exits via `break` without updating
+        // `correctorErrors`, which would otherwise spuriously emit
+        // CorrectAcceptedWithErrors on a run that's about to finalOk:false
+        // via the outer step loop. That would pollute the trace with a
+        // "corrector gave up" signal for a run that actually failed on a
+        // different axis.
+        if (!correctorSchemaBroke) {
+          if (correctorErrors.length > 0) {
+            trace.steps.push({
+              type: 'CorrectAcceptedWithErrors',
+              ok: false,
+              id: `correct_accepted_with_errors_${correctorName}`,
+              meta: {
+                corrector: correctorName,
+                attempts_made: attemptsMade,
+                max_attempts: maxAttempts,
+                unhealed_issues: correctorErrors,
+                ...(sweep > 0 ? { sweep: sweep + 1 } : {}),
+              },
+            });
+          }
+
+          // #214 (DEC-005): an earlier corrector regressed by this
+          // corrector's repair and never healed by loop exit gets its own
+          // terminal row — same shape as the row above, plus
+          // `regressed_during`, carrying THIS corrector's attempt numbers
+          // (the budget that governed the fold, DEC-002).
+          for (const [regressedName, issues] of regressedEarlier) {
+            if (issues.length === 0) continue;
+            trace.steps.push({
+              type: 'CorrectAcceptedWithErrors',
+              ok: false,
+              id: `correct_accepted_with_errors_${regressedName}_regressed_during_${correctorName}`,
+              meta: {
+                corrector: regressedName,
+                attempts_made: attemptsMade,
+                max_attempts: maxAttempts,
+                unhealed_issues: issues,
+                regressed_during: correctorName,
+                ...(sweep > 0 ? { sweep: sweep + 1 } : {}),
+              },
+            });
+          }
+        }
+
+        if (correctorSchemaBroke) break; // Schema broke inside this iteration.
       }
 
-      // Loop exhausted with errors still pending — emit the terminal
-      // observability step so downstream consumers (and `jq .steps[] |
-      // select(.ok == false)`) can see the framework gave up. Does not
-      // fail the run; the output is still schema-valid. Policy "refuse
-      // on unhealed errors" is the caller's job, not the runner's.
-      //
-      // Gated on !correctorSchemaBroke: if a mutating corrector on re-run
-      // broke schema, the loop exits via `break` without updating
-      // `correctorErrors`, which would otherwise spuriously emit
-      // CorrectAcceptedWithErrors on a run that's about to finalOk:false
-      // via the outer step loop. That would pollute the trace with a
-      // "corrector gave up" signal for a run that actually failed on a
-      // different axis.
-      if (correctorErrors.length > 0 && !correctorSchemaBroke) {
+      // Converged → every corrector has now spoken on the bytes that ship.
+      // Stopped with bytes still moving → flag it, never ship the stale
+      // approval silently (#266 acceptance: "unflagged" is the bug).
+      if (!mutatedThisSweep) break;
+      if (sweep === maxSweeps - 1 && maxSweeps > 1) {
         trace.steps.push({
-          type: 'CorrectAcceptedWithErrors',
+          type: 'CorrectSweepExhausted',
           ok: false,
-          id: `correct_accepted_with_errors_${correctorName}`,
-          meta: {
-            corrector: correctorName,
-            attempts_made: attemptsMade,
-            max_attempts: maxAttempts,
-            unhealed_issues: correctorErrors,
-          },
+          id: 'correct_sweep_exhausted',
+          meta: { sweeps: maxSweeps, correctors: correctorDecls.map((d: any) => d.name) },
         });
       }
-
-      if (correctorSchemaBroke) break; // Schema broke inside this iteration.
     }
+
     if (correctorSchemaBroke) {
       // Propagate to the outer step loop — matches pre-RED-298 behavior
       // where a schema-breaking corrector aborted the whole run.

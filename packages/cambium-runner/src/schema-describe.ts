@@ -95,6 +95,23 @@ export function collectAdditionalProperties(
     for (const [k, p] of Object.entries<any>(schema.properties)) {
       out.push(...collectAdditionalProperties(p, `${path}/${k}`));
     }
+  } else if (
+    schema.type === 'object' &&
+    (schema.patternProperties || schema.additionalProperties !== false)
+  ) {
+    // AUD-230-003: a properties-less "open map" node — TypeBox's
+    // `Type.Record(...)` (compiles to `patternProperties`, no `properties`
+    // key), or a hand-written `{ type: 'object', additionalProperties: true }`
+    // — has the identical blind spot as the root-level case (AUD-230-001)
+    // when it's buried inside an otherwise-closed schema: no `properties`
+    // key means the old code never pushed an entry for it, so a genuinely
+    // open nested level silently vanished from `objects[]` instead of
+    // counting toward 'mixed'. Report it the same way a properties-bearing
+    // node reports itself, just with nothing to recurse into. A properties-
+    // less object that IS fully closed (`additionalProperties: false`, no
+    // `patternProperties`) has nothing open to report and is correctly left
+    // out, same as before.
+    out.push({ path: path || '/', value: schema.additionalProperties });
   }
   if (schema.type === 'array' && schema.items) {
     out.push(...collectAdditionalProperties(schema.items, `${path}[]`));
@@ -109,6 +126,62 @@ export function collectAdditionalProperties(
     }
   }
   return out;
+}
+
+export type AdditionalPropertiesState = 'closed' | 'open' | 'mixed';
+
+/**
+ * Classify a schema's additionalProperties across every object level into
+ * the same three states `schemaPromptBlock`'s closing branches on below —
+ * 'closed' (every level `additionalProperties: false`), 'open' (no level is
+ * strict), or 'mixed' (some are, some aren't). Extracted so other
+ * prompt-assembly call sites (OUTPUT_JSON_TEMPLATE, #230) can agree with the
+ * SCHEMA block's judgment instead of re-deriving — and possibly
+ * contradicting — it.
+ *
+ * AUD-230-001 named a properties-less "open map" at the ROOT — a
+ * hand-written `{ type: 'object', additionalProperties: true }`, or
+ * TypeBox's `Type.Record(...)` — collecting zero levels from
+ * `collectAdditionalProperties` and silently classifying 'closed'.
+ * AUD-230-003 found the same blind spot one level deeper: the identical
+ * shape NESTED inside an otherwise-closed schema (`ToolScaffoldResult`'s
+ * `input_schema.properties` / `output_schema.properties`, both
+ * `Type.Record`-compiled dictionaries) was invisible to the walker at ANY
+ * depth, not just the root — so a schema with real closed levels AND a
+ * buried open map classified 'closed' instead of 'mixed', wrong at both
+ * this function and `schemaPromptBlock`'s own SCHEMA-block rendering, which
+ * calls `collectAdditionalProperties` directly. Both are now fixed at the
+ * root cause: `collectAdditionalProperties` itself visits and reports a
+ * properties-less object node (open map or `patternProperties` dict) at
+ * every path, not only nodes that declare `properties`. That makes the
+ * `objects.length === 0` branch below unreachable for any schema that
+ * really does have something open to report — `collectAdditionalProperties`
+ * no longer returns an empty array for one — so its own root-only
+ * `isOpenMap` check is now live only for the two cases that were always
+ * meant to fall through to 'closed': a non-object schema, or a genuinely
+ * empty closed object (no `properties`, no `patternProperties`,
+ * `additionalProperties: false`). Kept for that fallback rather than
+ * removed, per the audit's own note that it's harmless to keep.
+ */
+export function additionalPropertiesState(
+  schema: any,
+): { state: AdditionalPropertiesState; openPaths: string[] } {
+  const objects = collectAdditionalProperties(schema);
+  if (objects.length === 0) {
+    const isOpenMap =
+      schema &&
+      typeof schema === 'object' &&
+      schema.type === 'object' &&
+      schema.additionalProperties !== false;
+    return isOpenMap ? { state: 'open', openPaths: [] } : { state: 'closed', openPaths: [] };
+  }
+
+  const closed = objects.filter(o => o.value === false);
+  const openOrDefault = objects.filter(o => o.value !== false);
+
+  if (openOrDefault.length === 0) return { state: 'closed', openPaths: [] };
+  if (closed.length === 0) return { state: 'open', openPaths: [] };
+  return { state: 'mixed', openPaths: openOrDefault.map(o => o.path) };
 }
 
 /**
@@ -126,16 +199,14 @@ export function schemaPromptBlock(schema: any): string {
   if (objects.length === 0) {
     closing = '';
   } else {
-    const closed = objects.filter(o => o.value === false);
-    const openOrDefault = objects.filter(o => o.value !== false);
+    const { state, openPaths } = additionalPropertiesState(schema);
 
-    if (openOrDefault.length === 0) {
+    if (state === 'closed') {
       closing = 'No extra keys. additionalProperties is false at every level.';
-    } else if (closed.length === 0) {
+    } else if (state === 'open') {
       closing = 'Extra keys are allowed. Add fields the schema doesn\'t list if they are genuinely useful for the task.';
     } else {
-      const openPaths = openOrDefault.map(o => o.path).join(', ');
-      closing = `Extra keys allowed at: ${openPaths}. All other object levels are strict (additionalProperties: false).`;
+      closing = `Extra keys allowed at: ${openPaths.join(', ')}. All other object levels are strict (additionalProperties: false).`;
     }
   }
 

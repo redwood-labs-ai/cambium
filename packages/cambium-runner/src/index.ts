@@ -77,6 +77,10 @@ export type {
   GenerateWithToolsResult,
   StopReason,
 } from './providers/types.js';
+// #275 DEC-006: mode :decision provider-author contract. A provider that
+// implements the optional `decide` method on CambiumProvider (above) can
+// serve `mode :decision` gens; these are its typed request/response shapes.
+export type { DecisionQuestion, DecideOpts, DecideAnswer, DecideResult } from './providers/types.js';
 
 // RED-360 serve mode: long-lived runner over HTTP. Exposed so the CLI
 // (`cambium serve`) and engine-mode hosts that want to embed the server

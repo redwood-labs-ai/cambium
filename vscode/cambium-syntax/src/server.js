@@ -8,6 +8,7 @@ const {
 const { TextDocument } = require('vscode-languageserver-textdocument');
 const fs = require('fs');
 const path = require('path');
+const { listSchemaNames } = require('./schema-names'); // #255
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
@@ -103,7 +104,7 @@ function findEngineFolders(root) {
 // that app-mode scans write to, so hover/goto works on engine siblings
 // without caring about mode. Name collisions: engine siblings win
 // (scanned after app-mode), matching "most-local source of truth".
-function scanEngineFolder(engineDir) {
+async function scanEngineFolder(engineDir) {
   let entries;
   try { entries = fs.readdirSync(engineDir); } catch { return; }
 
@@ -161,21 +162,21 @@ function scanEngineFolder(engineDir) {
     }
   }
 
-  // Parse schemas.ts for top-level `export const <Name>` lines —
-  // engine-mode equivalent of app-mode's src/contracts.ts parsing.
+  // Schema exports from schemas.ts — engine-mode equivalent of
+  // app-mode's src/contracts.ts scan below. Routed through the shared
+  // classifier's export listing (#255) rather than an inline regex.
   const schemasPath = path.join(engineDir, 'schemas.ts');
   if (fs.existsSync(schemasPath)) {
     try {
-      const lines = fs.readFileSync(schemasPath, 'utf8').split('\n');
-      for (let i = 0; i < lines.length; i++) {
-        const m = lines[i].match(/^export const (\w+)\s*=/);
-        if (m) schemaExports[m[1]] = { path: schemasPath, line: i };
+      const content = fs.readFileSync(schemasPath, 'utf8');
+      for (const { name, line } of await listSchemaNames(workspaceRoot, content)) {
+        schemaExports[name] = { path: schemasPath, line };
       }
     } catch {}
   }
 }
 
-function scanWorkspace() {
+async function scanWorkspace() {
   if (!workspaceRoot) return;
   const shape = detectAppPkgRoot(workspaceRoot);
   const engineFolders = findEngineFolders(workspaceRoot);
@@ -205,7 +206,7 @@ function scanWorkspace() {
   // are skipped — engine scans below handle everything.
   if (!appPkgRoot) {
     // Skip to engine scans.
-    for (const engineDir of engineFolders) scanEngineFolder(engineDir);
+    for (const engineDir of engineFolders) await scanEngineFolder(engineDir);
     return;
   }
 
@@ -338,15 +339,13 @@ function scanWorkspace() {
     }
   }
 
-  // Scan schema exports from contracts.ts
+  // Scan schema exports from contracts.ts — routed through the shared
+  // classifier's export listing (#255) rather than an inline regex.
   const contractsPath = path.join(appPkgRoot, 'src/contracts.ts');
   if (fs.existsSync(contractsPath)) {
-    const lines = fs.readFileSync(contractsPath, 'utf8').split('\n');
-    for (let i = 0; i < lines.length; i++) {
-      const m = lines[i].match(/^export const (\w+)\s*=/);
-      if (m) {
-        schemaExports[m[1]] = { path: contractsPath, line: i };
-      }
+    const content = fs.readFileSync(contractsPath, 'utf8');
+    for (const { name, line } of await listSchemaNames(workspaceRoot, content)) {
+      schemaExports[name] = { path: contractsPath, line };
     }
   }
 
@@ -371,7 +370,7 @@ function scanWorkspace() {
   // source of truth. Covers the "host project with engines under
   // cambium/" layout from the RED-220 design note.
   for (const engineDir of engineFolders) {
-    scanEngineFolder(engineDir);
+    await scanEngineFolder(engineDir);
   }
 }
 
@@ -404,7 +403,7 @@ const PRIMITIVE_DOCS = {
   },
   returns: {
     detail: 'Declares the return schema for AJV validation.',
-    doc: 'Two forms (RED-419):\n\n**Block form (default)** — define the schema inline; no hand-written TypeScript needed:\n\n```ruby\nreturns do\n  field :name, String\n  field :tags, [String]\n  field :status, String, enum: %w[active archived]\n  field :score, Float, optional: true\nend\n```\n\nThe schema compiles to Draft-07 JSON inline in the IR and is self-sufficient at runtime.\n\n**Symbol form (escape hatch)** — reference a hand-written TypeBox export in `src/contracts.ts`:\n\n```ruby\nreturns AnalysisReport\n```\n\nUse this when the block vocabulary (String/Integer/Float/Boolean, arrays, nested objects, enum on String) doesn\'t cover your schema.\n\nSee [[P - returns]].',
+    doc: 'Two forms (RED-419):\n\n**Block form (default)** — define the schema inline; no hand-written TypeScript needed:\n\n```ruby\nreturns do\n  field :name, String\n  field :tags, [String]\n  field :status, String, enum: %w[active archived]\n  field :score, Float, optional: true\nend\n```\n\nThe schema compiles to Draft-07 JSON inline in the IR and is self-sufficient at runtime.\n\n`enum:` also accepts a Hash (`{ billing: "Payment issues", technical: "Bugs" }`) to carry a per-option description — `mode :decision` only (#275); everywhere else it\'s a compile error. On a `mode :decision` gen the compiler also appends a `_decision` property (confidence + probabilities per choice field, `probability` per boolean field) that the author never declared in the block. See [[P - mode]] § `mode :decision` semantics.\n\n**Symbol form (escape hatch)** — reference a hand-written TypeBox export in `src/contracts.ts`:\n\n```ruby\nreturns AnalysisReport\n```\n\nUse this when the block vocabulary (String/Integer/Float/Boolean, arrays, nested objects, enum on String) doesn\'t cover your schema.\n\nSee [[P - returns]].',
   },
   uses: {
     detail: 'Declares allowed tools (deny-by-default).',
@@ -444,7 +443,7 @@ const PRIMITIVE_DOCS = {
   },
   mode: {
     detail: 'Controls the execution strategy for generate.',
-    doc: '`mode :agentic` — multi-turn tool-use loop. Model calls tools, gets results, iterates.\n\n`mode :retro` (RED-215 phase 4) — retro memory agent. Reads a primary gen\'s trace and returns `MemoryWrites` rather than the primary\'s schema. Combined with `reads_trace_of :Primary`.\n\n```ruby\nmode :agentic\nmode :retro\n```',
+    doc: '`mode :agentic` — multi-turn tool-use loop. Model calls tools, gets results, iterates.\n\n`mode :retro` (RED-215 phase 4) — retro memory agent. Reads a primary gen\'s trace and returns `MemoryWrites` rather than the primary\'s schema. Combined with `reads_trace_of :Primary`.\n\n`mode :decision` (#275) — routes a forced-choice/yes-no gen through a lightweight decision model (built-in `typesafe` provider, Jev) instead of a frontier LLM. The `returns do … end` block IS the question set (String + `enum:` → choice, Boolean → yes/no); output carries the answers plus a `_decision` confidence/probabilities envelope. Closed declaration set — no `returns :Symbol`/`corrects`/`constrain`/`grounded_in`/`enrich`/sampling kwargs (`temperature`/`max_tokens`/`effort`)/`exclude_from_prefix`/`memory`/`writes_memory_via`/`reads_trace_of`.\n\n```ruby\nmode :agentic\nmode :retro\nmode :decision\n```',
   },
   repair: {
     detail: 'Workspace repair model slot (RED-176) — declared in app/config/models.rb, not in a gen.',
@@ -844,8 +843,9 @@ connection.onCompletion((params) => {
   // After "mode :" → suggest modes
   if (/mode\s+:/.test(line)) {
     return [
-      { label: 'agentic', kind: CompletionItemKind.EnumMember, detail: 'Multi-turn tool-use loop' },
-      { label: 'retro',   kind: CompletionItemKind.EnumMember, detail: 'Retro memory agent (RED-215 phase 4)' },
+      { label: 'agentic',  kind: CompletionItemKind.EnumMember, detail: 'Multi-turn tool-use loop' },
+      { label: 'retro',    kind: CompletionItemKind.EnumMember, detail: 'Retro memory agent (RED-215 phase 4)' },
+      { label: 'decision', kind: CompletionItemKind.EnumMember, detail: 'Forced-choice/yes-no via a lightweight decision model (#275)' },
     ];
   }
 
@@ -1006,9 +1006,9 @@ function getWordAt(line, pos) {
 
 // ── Initialize ────────────────────────────────────────────────────────
 
-connection.onInitialize((params) => {
+connection.onInitialize(async (params) => {
   workspaceRoot = params.workspaceFolders?.[0]?.uri?.replace('file://', '') ?? '';
-  scanWorkspace();
+  await scanWorkspace();
 
   return {
     capabilities: {
@@ -1024,7 +1024,9 @@ connection.onInitialize((params) => {
 
 // Re-scan when files change
 documents.onDidChangeContent(() => {
-  scanWorkspace();
+  scanWorkspace().catch((err) => {
+    console.error('[cambium-syntax] workspace re-scan failed:', err);
+  });
 });
 
 documents.listen(connection);

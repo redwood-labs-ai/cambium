@@ -37,16 +37,27 @@
  *     error-severity issues on foreground/background and
  *     bright_foreground/background (and a warning on muted/background,
  *     which must never reach Repair) — proving those issues genuinely
- *     feed the repair loop (`Repair` fires). What this scenario does NOT
- *     prove, post-#205 (A-001c): the repair *heal* itself. Repair's mock
- *     reply is now a schema-derived, schema-valid palette of placeholder
- *     strings, so `ValidateAfterCorrectorRepair` passes; `CorrectAfterRepair`
- *     then re-runs only `contrast_floor`, which can't compute a contrast
- *     ratio on a non-hex placeholder and doesn't flag it, so the run ends
- *     clean without ever reaching `CorrectAcceptedWithErrors`. The actual
- *     "error → fixed" heal semantics are proven directly instead at the
- *     corrector-unit level (contrast_floor_corrector.test.ts /
- *     hex_normalize_corrector.test.ts).
+ *     feed the repair loop (`Repair` fires). Repair's mock reply is a
+ *     schema-derived, schema-valid palette of placeholder strings
+ *     (`"mock red"`, etc.), so `ValidateAfterCorrectorRepair` passes —
+ *     and every placeholder is, not coincidentally, unparseable as a
+ *     color. Pre-#214, `CorrectAfterRepair` re-ran only `contrast_floor`
+ *     (which can't compute a ratio on non-hex and doesn't flag it), so
+ *     the run ended clean with placeholder text shipped as colour values
+ *     — the exact regression #214 was filed for (`hex_normalize`, which
+ *     already approved the pre-repair candidate, was never asked again).
+ *     Post-#214, `contrast_floor`'s accepted repair re-verifies every
+ *     EARLIER-declared corrector (`hex_normalize`) before its own rerun
+ *     closes the pass (DEC-001): `hex_normalize` flags all 24 placeholder
+ *     colours as unparseable again (`CorrectReverifyEarlier`, `ok:
+ *     false`), the regression folds into `contrast_floor`'s own attempt
+ *     budget (DEC-002) — exhausted at `max_attempts: 1` — and the run
+ *     ends in a `CorrectAcceptedWithErrors` row attributed to
+ *     `hex_normalize` with `regressed_during: 'contrast_floor'` (DEC-005)
+ *     instead of `ok: true`. This is the ticket's acceptance case
+ *     verbatim. The corrector-unit level (contrast_floor_corrector.test.ts
+ *     / hex_normalize_corrector.test.ts) still proves the underlying
+ *     "error → fixed" heal semantics directly.
  *
  *  3. (AUD-001, round 1) A schema-valid, high-contrast candidate with one
  *     genuinely unparseable color (`red: "not a colour"`) — proving
@@ -248,24 +259,43 @@ describe('#200 (DEC-200-009): ThemePalette post-Generate tail via replay (mock)'
     // "the trace shows the loop").
     expect(types).toContain('Repair');
 
-    // A-001c (#205): `CorrectAcceptedWithErrors` is NOT asserted here
-    // anymore. Before #205, repair's mock reply could never match
-    // ThemePaletteOutput, so ValidateAfterCorrectorRepair always failed,
-    // the pre-repair candidate was kept, and the graceful-degrade step
-    // fired. Now repair's mock reply is schema-derived — a fully-shaped,
-    // schema-valid palette of placeholder strings (`"mock red"`, etc.) —
-    // so ValidateAfterCorrectorRepair passes. `CorrectAfterRepair` then
-    // re-runs only `contrast_floor` (the corrector whose error-severity
-    // issues fed this repair); contrast_floor can't compute a contrast
-    // ratio on a non-hex placeholder string and doesn't raise on it, so
-    // it reports clean and the run finishes ok without ever reaching
-    // `CorrectAcceptedWithErrors` on this path. `hex_normalize` is not
-    // re-run here (see the AUD-001 case below, where it is). This does
-    // NOT mean the placeholder output is desirable — see #205's change
-    // record for the pre-existing, general gap this reveals (a later
-    // corrector's repair can introduce values an earlier corrector would
-    // have rejected, and the earlier corrector isn't re-run) — do not
-    // change `contrast_floor` to "fix" this here.
+    // #214 (the ticket's acceptance case): repair's mock reply is a
+    // fully-shaped, schema-valid palette of placeholder strings
+    // (`"mock red"`, etc.), so `ValidateAfterCorrectorRepair` passes —
+    // but every placeholder is unparseable as a color. Pre-#214,
+    // `CorrectAfterRepair` re-ran only `contrast_floor` (which can't
+    // compute a ratio on non-hex and doesn't raise on it), so the run
+    // finished `ok: true` with placeholder text shipped as colour
+    // values — `hex_normalize`, which had already approved the
+    // pre-repair candidate, was never asked again. Post-#214,
+    // `hex_normalize` (declared BEFORE `contrast_floor`) re-verifies
+    // against the repaired output first (DEC-001): it flags all 24
+    // placeholder colours as unparseable again.
+    const reverify = trace.steps.filter((s: any) => s.type === 'CorrectReverifyEarlier');
+    expect(reverify.length).toBe(1); // one per accepted repair (contrast_floor's single attempt); #266's re-check arrives later, as `hex_normalize`'s own second-pass `Correct`/`Repair` rows
+    expect(reverify.every((s: any) => s.meta?.corrector === 'hex_normalize')).toBe(true);
+    expect(reverify.every((s: any) => s.meta?.reverify_for === 'contrast_floor')).toBe(true);
+    expect(reverify.every((s: any) => s.ok === false)).toBe(true);
+
+    // The regression folds into `contrast_floor`'s own attempt budget
+    // (DEC-002) — exhausted at the gen's default `max_attempts: 1` — so
+    // the run ends in a terminal `CorrectAcceptedWithErrors` row
+    // attributed to `hex_normalize`, not a clean `ok: true` (DEC-005).
+    // #266: the whole declaration order now re-runs until nothing moves
+    // (cap 3). Pass 1 ends with `hex_normalize`'s regressed row; passes 2–3
+    // give `hex_normalize` its OWN terminal rows — the regressed field is
+    // re-checked and re-flagged instead of approved-then-forgotten. Bounded:
+    // 1 regressed row + 2 own-loop rows = 3.
+    // `contrast_floor` itself heals trivially (it can't compute a ratio
+    // on non-hex placeholders either, so it reports nothing wrong) —
+    // its own row is correctly NOT emitted; only the regressed corrector
+    // gets one.
+    const accepted = trace.steps.filter((s: any) => s.type === 'CorrectAcceptedWithErrors');
+    expect(accepted).toHaveLength(3);
+    expect(accepted[0].ok).toBe(false);
+    expect(accepted[0].meta?.corrector).toBe('hex_normalize');
+    expect(accepted[0].meta?.regressed_during).toBe('contrast_floor');
+    expect(accepted[0].meta?.unhealed_issues?.length).toBeGreaterThan(0);
   });
 
   it('(AUD-001) an unparseable color triggers hex_normalize errors that feed Repair (trace shows the loop)', () => {
@@ -290,11 +320,16 @@ describe('#200 (DEC-200-009): ThemePalette post-Generate tail via replay (mock)'
     expect(types).not.toContain('Generate');
 
     // The initial Correct step for hex_normalize recorded the error...
+    // #266: `hex_normalize` is now asked again on every later pass (the
+    // regressed field is re-checked), so this is "flagged more than once"
+    // instead of exactly once — the first row is still the single
+    // unparseable `.red`, later rows are the placeholder palette repair
+    // brought back.
     const hexIssues = trace.steps
       .filter((s: any) => s.type === 'Correct' && s.meta?.correctors?.includes('hex_normalize'))
       .flatMap((s: any) => s.meta?.issues ?? []);
     const errorIssues = hexIssues.filter((i: any) => i.severity === 'error');
-    expect(errorIssues).toHaveLength(1);
+    expect(errorIssues.length).toBeGreaterThan(1);
     expect(errorIssues[0].path).toBe('.red');
     expect(errorIssues[0].message).toMatch(/not a colour/);
 

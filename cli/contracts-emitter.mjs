@@ -111,8 +111,19 @@ function emitObject(schema, indent) {
   return `Type.Object({\n${lines.join('\n')}\n${indent}}, ${optionsObj})`;
 }
 
-/** Quote a property key only when it isn't a safe bare identifier. */
+// #276: names that are valid bare identifiers but carry object-literal or
+// prototype-chain meaning. `__proto__` is the dangerous one — unquoted, it
+// sets the literal's prototype instead of defining a property, so the
+// emitted TypeBox type silently LACKS the field the schema declared.
+// `constructor` and `prototype` define ordinary own properties in a literal
+// and are correct unquoted, but quoting them costs nothing and keeps the
+// rule "a special name is always quoted" instead of one the next reader has
+// to re-derive per name.
+const UNSAFE_BARE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/** Quote a property key only when it isn't a safe bare identifier (#276). */
 function tsKey(name) {
+  if (UNSAFE_BARE_KEYS.has(name)) return jsString(name);
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? name : jsString(name);
 }
 

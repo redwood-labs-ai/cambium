@@ -1,13 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-
-// NOTE: we cannot use `os.tmpdir()` as the scratch base: on macOS it
-// lives under `/var/folders/...`, which collides with the rootfs-owned
-// `/var` prefix and fails the validator before we get to the assertion
-// we actually want to make. Place the scratch dir under the repo root
-// instead, which is outside every FORBIDDEN_GUEST_PREFIXES entry.
-const SCRATCH_BASE = process.cwd();
 import {
   MAX_ALLOWLIST_ENTRIES,
   validateAllowlistPath,
@@ -20,6 +14,30 @@ import {
   formatAllowlistError,
   type AllowlistDrive,
 } from './firecracker-allowlist.js';
+
+// The scratch base for these tests must sit outside every
+// FORBIDDEN_GUEST_PREFIXES entry, or the "accepts a valid directory"
+// assertions collide with the very guard they're meant to exercise.
+// Neither `os.tmpdir()` (deep-forbidden `/tmp` on Linux; `/var/folders/...`
+// on macOS collides with the `/var` EXACT prefix's sibling reasoning) nor
+// a fixed "repo root" assumption is safe on every machine this suite
+// runs on: an agent-dispatched `git worktree` commonly lands under
+// `/tmp/.../scratchpad/...`, so `process.cwd()` can itself be
+// deep-forbidden. Ask the validator under test rather than guess — try
+// `cwd()`, `homedir()`, then `tmpdir()` in that order and take the first
+// one it doesn't reject as a `rootfs_collision`. Self-verifying against
+// whatever FORBIDDEN_GUEST_PREFIXES actually contains, so this stays
+// correct if that list ever changes, and independent of where the
+// checkout on disk happens to be.
+function pickScratchBase(): string {
+  for (const candidate of [process.cwd(), homedir(), tmpdir()]) {
+    if (validateAllowlistPath(candidate)?.kind !== 'rootfs_collision') return candidate;
+  }
+  throw new Error(
+    'firecracker-allowlist.test.ts: no candidate scratch base (cwd/home/tmp) is outside FORBIDDEN_GUEST_PREFIXES',
+  );
+}
+const SCRATCH_BASE = pickScratchBase();
 
 /**
  * Unit tests for the pure-TS allowlist helpers (RED-258). The

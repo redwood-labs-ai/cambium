@@ -305,6 +305,131 @@ if defs[:effort]
   end
 end
 
+# #275 DEC-012: mode :decision is a closed declaration surface — every
+# entry below is a category error under a decision model (no sampling,
+# no generated text, no retro-agent machinery). Checked here, in the
+# same spot and shape as the RED-325 effort check above, because both
+# need the fully-populated `defs` for this gen.
+if defs[:mode] == 'decision'
+  decision_refusals = {
+    returnSchema:        ['`returns :Symbol`', 'mode :decision derives its questions from a `returns do … end` block'],
+    correctors:          ['`corrects`', 'there is nothing to correct on an answer drawn from an already-valid, declared set'],
+    constraints:         ['`constrain`', 'review/consistency/tone are text-model passes and a decision model does not generate text'],
+    grounding:           ['`grounded_in`', 'citation verification requires generated text'],
+    enrichments:         ['`enrich`', 'there is no prompt to enrich'],
+    temperature:         ['`temperature`', 'there is no sampling on a decision model'],
+    max_tokens:          ['`max_tokens`', 'there is no sampling on a decision model'],
+    effort:              ['`effort`', 'there is no sampling on a decision model'],
+    exclude_from_prefix: ['`exclude_from_prefix`', 'there is no cacheable prefix in decision mode'],
+    writes_memory_via:   ['`writes_memory_via`', 'retro-agent machinery assumes a text-generating gen'],
+    reads_trace_of:      ['`reads_trace_of`', 'retro-agent machinery assumes a text-generating gen'],
+    # #275 DEC-012a: DEC-012 allowed `memory` on the rationale that reads
+    # become `state.context` keys — false. The runner appends the recall
+    # block to `ir.system` unconditionally of mode, so it would flatten
+    # into the decision model's `state.system` on a vendor documented as
+    # not adversarially robust and subject to a distractor effect. Refused
+    # until a design routes the recall block to `state.context.memory`.
+    memory:              ['`memory`', 'recalled entries would be flattened into the decision model\'s state; see `P - mode`'],
+  }
+  present = {
+    returnSchema:        !defs[:returnSchema].nil?,
+    correctors:          !!defs[:correctors]&.any?,
+    constraints:         !!defs[:constraints]&.any?,
+    grounding:           !defs[:grounding].nil?,
+    enrichments:         !!defs[:enrichments]&.any?,
+    temperature:         !defs[:temperature].nil?,
+    max_tokens:          !defs[:max_tokens].nil?,
+    effort:              !defs[:effort].nil?,
+    exclude_from_prefix: !!defs[:exclude_from_prefix]&.any?,
+    writes_memory_via:   !defs[:writes_memory_via].nil?,
+    reads_trace_of:      !defs[:reads_trace_of].nil?,
+    memory:              !!defs[:memory]&.any?,
+  }
+  present.each do |decl, is_present|
+    next unless is_present
+    name, why = decision_refusals[decl]
+    raise Cambium::CompileError, "#{name} is not available in `mode :decision` (#{why})."
+  end
+
+  collector = defs[:returnSchemaCollector]
+  unless collector
+    raise Cambium::CompileError, 'mode :decision requires a `returns do … end` block.'
+  end
+  questions = collector.to_decision_questions
+
+  # #275 AUD-007/SEC-001: `_decision` is reserved — the compiler injects it
+  # as the answer envelope below. Without this check a field named
+  # `_decision` compiles to an invalid IR (a duplicated `required` entry,
+  # the author's field silently clobbered) that only surfaces at `runGen`
+  # as an internal AJV "schema is invalid", naming nothing the author wrote.
+  if questions.key?('_decision')
+    raise Cambium::CompileError,
+          "returns: field '_decision' is reserved in `mode :decision` — the compiler adds it " \
+          "as the answer envelope (confidence + probabilities). Rename the field."
+  end
+
+  # DEC-009/DEC-009a/DEC-009b: the compiler adds a closed `_decision`
+  # property to the inline schema (appended after the author's own fields)
+  # so `additionalProperties: false` still holds for the envelope the
+  # runner assembles alongside the model's answers. The option keys under
+  # `probabilities` are Cambium's, but the MAP is the vendor's: pin the
+  # keys we know as `properties` (documentation + typing) without
+  # `required`/`additionalProperties: false` on that sub-object, so a
+  # vendor-side additive bucket or a truncated distribution is not a
+  # terminal, un-repairable, un-fallback-able failure for the whole mode.
+  # `confidence` stays declared (`properties`) but drops out of `required`
+  # (DEC-009b) — the vendor shows it in every documented example but does
+  # not guarantee it in writing, and keeping it required turned "absent"
+  # into the same un-repairable outage class as the `probabilities` map
+  # (AUD-275-015). The boolean entry is the vendor's own single
+  # `{ probability }` number — no synthesized complement (DEC-009a;
+  # AUD-010's `1 - p` IEEE residue).
+  decision_properties = questions.each_with_object({}) do |(field_name, q), props|
+    props[field_name] =
+      if q['kind'] == 'choice'
+        option_keys = q['options'].keys
+        {
+          'type' => 'object',
+          'required' => %w[probabilities],
+          'additionalProperties' => false,
+          'properties' => {
+            'confidence' => { 'type' => 'number' },
+            'probabilities' => {
+              'type' => 'object',
+              'properties' => option_keys.each_with_object({}) { |k, h| h[k] = { 'type' => 'number' } },
+            },
+          },
+        }
+      else
+        {
+          'type' => 'object',
+          'required' => %w[probability],
+          'additionalProperties' => false,
+          'properties' => {
+            'probability' => { 'type' => 'number' },
+          },
+        }
+      end
+  end
+  defs[:returnSchemaInline]['properties']['_decision'] = {
+    'type' => 'object',
+    'required' => questions.keys,
+    'additionalProperties' => false,
+    'properties' => decision_properties,
+  }
+  defs[:returnSchemaInline]['required'] << '_decision'
+
+  defs[:decision] = { 'questions' => questions }
+elsif defs[:returnSchemaCollector]&.hash_enum_fields&.any?
+  # DEC-004 reverse direction: the Hash `enum:` form's descriptions are
+  # only ever read in mode :decision — refuse it everywhere else so the
+  # vocabulary stays closed until a second consumer exists.
+  bad = defs[:returnSchemaCollector].hash_enum_fields.first
+  raise Cambium::CompileError,
+        "returns: field '#{bad}' uses the `enum: { key => description }` form, " \
+        "which is only available in `mode :decision`."
+end
+
 # RED-215: resolve memory declarations against named pools.
 #
 # Each `memory :x, scope: :support_team, top_k: 5` on a gen becomes
@@ -666,6 +791,12 @@ build_ir = lambda do |method_name, steps|
     # existed.
     **(defs[:description] ? { 'description' => defs[:description] } : {}),
     'mode' => defs[:mode],
+    # #275 DEC-005: the derived Jev-shaped question set. Omitted (not
+    # null) on every gen that never declares `mode :decision` — same
+    # omitted-when-unused rule as `effort` and `model.fallbacks` below,
+    # so an existing gen compiles to the bytes it did before this
+    # primitive existed.
+    **(defs[:decision] ? { 'decision' => defs[:decision] } : {}),
     # RED-325: effort is a per-gen steering control for models that dropped
     # sampling params. Passed through the IR as-is; the runner validates
     # it against the provider's actual API surface at runtime.

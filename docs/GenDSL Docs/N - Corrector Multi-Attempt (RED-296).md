@@ -2,7 +2,57 @@
 
 **Doc ID:** gen-dsl/note/corrector-multi-attempt
 **Status:** Shipped — RED-298
-**Last edited:** 2026-04-20
+**Last edited:** 2026-09-10
+
+---
+
+## Addendum (#266, 2026-09-12): the whole declaration-order pass repeats
+
+#214's re-verify closed "repair rewrote a field behind an earlier corrector's back",
+but two verdicts in that pass were still taken on bytes that no longer existed: the
+regressed corrector's own `CorrectAfterRepair` (it ran BEFORE the re-verify pass it
+closes), and — with three or more correctors — every peer between the regressed one
+and the trigger. So the field the corrector fleet exists to police could still ship
+unjudged, which is AUD-214-001 read back as a live defect rather than accepted
+behavior.
+
+The pass is therefore no longer one sweep. Any mutation inside it — `corrected: true`,
+an accepted repair, an earlier corrector mutating during re-verify, or the regressed
+corrector's own rerun — replays the entire declaration-order pass, cap three. Nothing
+about the inner shape moves: order is unchanged, a corrector still enters only its own
+repair loop, `max_attempts` stays clamped `[1, 3]`, and the bounds nest (`passes ×
+per-corrector attempts`) instead of multiplying. `maxSweeps = 1` for single-corrector
+gens, so everything this note originally shipped for — `corrects :math_check`-shaped
+gens, and every gen in-tree — keeps byte-identical traces and IR. Termination is the
+cap plus the existing token ceiling, not convergence: fighting correctors end at
+`CorrectSweepExhausted` (`ok: false`) and the run still completes. Decision record:
+`records/PLAN-266-corrector-fixed-point-2026-09-12.md`; runtime detail:
+[[C - Repair Loop]] § Corrector-feedback repair; trace shape: [[C - Trace (observability)]].
+
+---
+
+## Addendum (#214, 2026-09-10): cross-corrector re-verification
+
+RED-298's re-run (Decision 1 above) checks only that the corrector whose repair this
+was got re-verified. It stayed silent on a sibling gap: a repair that satisfies
+corrector B can rewrite fields corrector A already approved, and nothing re-checks A.
+`ThemePalette` (`corrects :hex_normalize` then `:contrast_floor`) surfaced this under
+`--mock`: `contrast_floor`'s repair returns a schema-valid palette of placeholder
+strings, `CorrectAfterRepair` re-runs only `contrast_floor` (which can't see color
+notation problems by design), and the run ends `ok: true` with unparseable colours
+shipped.
+
+#214 closes it: after an accepted corrector-driven repair, every EARLIER-declared
+corrector re-verifies (verification-only, new `CorrectReverifyEarlier` step type) in
+declaration order, before the existing same-corrector rerun closes the pass — which now
+runs LAST rather than in isolation. Regressions fold into the triggering corrector's own
+`max_attempts` budget (no corrector's own loop is ever re-entered — this note's
+Decision 4 "no new budget axis" stance holds); unhealed regressions get their own
+`CorrectAcceptedWithErrors` row (`regressed_during`). Empty earlier set for the
+first-declared corrector, so single-corrector gens — everything this note originally
+shipped for — are byte-identical. Full decision record:
+`records/PLAN-214-cross-corrector-reverify-2026-09-10.md`; runtime detail:
+[[C - Repair Loop]] § Corrector-feedback repair; trace shape: [[C - Trace (observability)]].
 
 ---
 

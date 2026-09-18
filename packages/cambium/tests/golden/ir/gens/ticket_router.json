@@ -1,0 +1,143 @@
+{
+  "route": {
+    "version": "0.2",
+    "entry": {
+      "class": "TicketRouter",
+      "method": "route",
+      "source": "packages/cambium/app/gens/ticket_router.cmb.rb"
+    },
+    "model": {
+      "id": "typesafe:jev-latest"
+    },
+    "repairModel": {
+      "id": "omlx:nvidia/nemotron-3-nano-4b",
+      "max_tokens": 16000,
+      "temperature": 0
+    },
+    "system": "You are a support-ticket router. You read the raw ticket text handed to you as context and nothing else — no history, no customer record, no prior routing decisions. You decide which team should own the ticket and whether it is urgent; you do not draft a reply, summarize, or write anything back to the customer.",
+    "description": "Routes a support ticket to the team that should handle it and flags urgency.",
+    "mode": "decision",
+    "decision": {
+      "questions": {
+        "department": {
+          "kind": "choice",
+          "instructions": "Which team should handle this ticket?",
+          "options": {
+            "billing": "Payment, invoice, or subscription issues",
+            "technical": "Bugs, errors, or integration failures",
+            "sales": "Pricing, plans, or account questions"
+          }
+        },
+        "is_urgent": {
+          "kind": "boolean",
+          "instructions": "The ticket conveys urgency or time-sensitivity"
+        }
+      }
+    },
+    "policies": {
+      "tools_allowed": [],
+      "correctors": [],
+      "constraints": {},
+      "grounding": null,
+      "security": null,
+      "budget": null,
+      "memory": [],
+      "memory_pools": {},
+      "memory_write_via": null,
+      "log": [],
+      "log_profiles": [],
+      "schedules": []
+    },
+    "reads_trace_of": null,
+    "returnSchema": {
+      "type": "object",
+      "properties": {
+        "department": {
+          "type": "string",
+          "enum": [
+            "billing",
+            "technical",
+            "sales"
+          ],
+          "description": "Which team should handle this ticket?"
+        },
+        "is_urgent": {
+          "type": "boolean",
+          "description": "The ticket conveys urgency or time-sensitivity"
+        },
+        "_decision": {
+          "type": "object",
+          "required": [
+            "department",
+            "is_urgent"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "department": {
+              "type": "object",
+              "required": [
+                "probabilities"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "confidence": {
+                  "type": "number"
+                },
+                "probabilities": {
+                  "type": "object",
+                  "properties": {
+                    "billing": {
+                      "type": "number"
+                    },
+                    "technical": {
+                      "type": "number"
+                    },
+                    "sales": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            },
+            "is_urgent": {
+              "type": "object",
+              "required": [
+                "probability"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "probability": {
+                  "type": "number"
+                }
+              }
+            }
+          }
+        }
+      },
+      "required": [
+        "department",
+        "is_urgent",
+        "_decision"
+      ],
+      "additionalProperties": false,
+      "$id": "TicketRouterOutput"
+    },
+    "context": {
+      "document": ""
+    },
+    "enrichments": [],
+    "signals": [],
+    "triggers": [],
+    "steps": [
+      {
+        "id": "generate_1",
+        "type": "Generate",
+        "prompt": "Route this support ticket",
+        "with": {
+          "context": ""
+        },
+        "returns": null
+      }
+    ]
+  }
+}

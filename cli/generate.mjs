@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { writeFileSync, appendFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
-import { join, dirname, basename } from 'node:path';
+import { join, dirname, basename, relative, isAbsolute, sep } from 'node:path';
 import process from 'node:process';
 import { detectWorkspaceShape } from './workspace-shape.mjs';
 import { isExportedOrUnknowable } from './schema-export.mjs';
@@ -366,6 +366,206 @@ export async function analyze(
 
 // ── Existing scaffolders (mode-aware in RED-246) ──────────────────────
 
+/**
+ * The agent scaffold's golden-test template (RED-140), extracted (#199
+ * STEP-001) so `cambium promote` can reuse it with real values instead of
+ * the TODO placeholder `generateAgent` writes. `generateAgent` calls this
+ * with `method: 'analyze'` and the literal TODO placeholder as
+ * `fixtureRel`, so its own output stays byte-identical to before the
+ * extraction, EXCEPT for the GEN/FIXTURE/SNAPSHOT lines' quoting (see
+ * DEC-012 below — a deliberate, accepted exception to byte-identity).
+ *
+ * `genRel` (#199 DEC-011) overrides the `GEN` const's conventional value.
+ * `generateAgent` never passes it, so its scaffold output keeps the same
+ * conventional VALUE; `cambium promote`'s fresh-test case (DEC-004 case 1)
+ * passes the run's own validated, workspace-relative `entry.source` — the
+ * artifact that actually produced the mint, not a filename convention
+ * that may not hold for a relocated/renamed gen (AUD-002).
+ *
+ * #199 DEC-012: `genRel`/`fixtureRel` both ultimately trace back to
+ * untrusted run-directory input (a promoted run's `entry.source`, or a
+ * fixture path derived from a promoted context value) — raw `'${genRel}'`
+ * string splicing let a quote-bearing value close the literal early and
+ * inject live top-level statements into the generated test, executed on
+ * the next `vitest run`. Every dynamic literal in the template below is
+ * emitted via `JSON.stringify`, which is safe for arbitrary string
+ * content; this changes `cambium new agent`'s scaffold output quoting on
+ * those lines (accepted — correctness beats aesthetics) but not the
+ * values.
+ */
+export function goldenTestSource({
+  ctx,
+  pascal,
+  snake,
+  method,
+  fixtureRel,
+  genRel = `${ctx.appPkgRoot}/app/gens/${snake}.cmb.rb`,
+}) {
+  const PKG = ctx.appPkgRoot;
+
+  // #282: paths in the generated test are anchored on the test file's own
+  // location, never on the absolute appPkgRoot of whatever machine ran the
+  // scaffolder. `pkgRel` converts a scaffold-time absolute path into the
+  // `<appPkgRoot>`-relative form the emitted `join(PKG_ROOT, …)` expects; a
+  // path that escapes the app package (never produced by `new agent` or
+  // `promote`, but both parameters are caller-supplied) keeps its absolute
+  // literal — the pre-#282 behaviour, still correct on the machine that
+  // produced it.
+  const pkgRel = (abs) => {
+    if (typeof abs !== 'string' || !isAbsolute(abs)) return null;
+    const rel = relative(PKG, abs);
+    if (!rel || rel.startsWith('..') || isAbsolute(rel)) return null;
+    // POSIX separators in the literal: `node:path.join` accepts '/' on win32.
+    return rel.split(sep).join('/');
+  };
+  const genPkgRel = pkgRel(genRel);
+  const fixturePkgRel = pkgRel(fixtureRel);
+  const snapshotPkgRel = `examples/fixtures/${snake}-snapshot.json`;
+  // Display-only, for the header comment's example commands: workspace-relative
+  // so a committed scaffold carries no author-machine path.
+  const PKG_DISPLAY =
+    (ctx.workspaceRoot ? relative(ctx.workspaceRoot, PKG).split(sep).join('/') : '') || '.';
+
+  // Import path for goldenTest: in-tree workspace uses the deep relative;
+  // external [package] apps import from the published runner package.
+  // Two levels, not three: this file lands in `<appPkgRoot>/tests/`, whereas
+  // the tool / action / corrector / provider scaffolds land one level deeper
+  // in `<appPkgRoot>/app/<type>/`. The literal here was a copy of theirs and
+  // resolved to `<workspaceRoot>/cambium-runner/`, which does not exist — so
+  // an in-tree `cambium new agent` produced a test that could not even load.
+  const goldenImport = runnerImport(ctx, '../../cambium-runner/src/golden.js');
+
+  // RED-159: `cli/cambium.mjs` exists only in the Cambium repo. Anywhere
+  // else the CLI is the `@redwood-labs/cambium` dependency — see
+  // scaffoldedCliInvocation for why the generated test resolves it
+  // through Node module resolution and never a bare `npx cambium`.
+  const cli = scaffoldedCliInvocation(ctx);
+
+  return `\
+/**
+ * ${pascal} — golden regression test (RED-140).
+ *
+ * Workflow (token-free after the first run):
+ *
+ *   1. Create a fixture: ${PKG_DISPLAY}/examples/fixtures/<fixture>.txt
+ *   2. Run once to produce a snapshot:
+ *        cambium run ${PKG_DISPLAY}/app/gens/${snake}.cmb.rb --method ${method} \\
+ *          --arg ${PKG_DISPLAY}/examples/fixtures/<fixture>.txt --mock
+ *      Copy the output from the run dir (runs/<id>/output.json) to
+ *        ${PKG_DISPLAY}/examples/fixtures/${snake}-snapshot.json
+ *      Commit both files.
+ *   3. After that, \`npm test\` (--mock path) never burns tokens.
+ *      Replay an old run instead of re-calling the LLM:
+ *        cambium replay <run-id> --mock
+ *
+ * Edit the snapshot file when the expected output legitimately changes;
+ * the test failure is the signal.
+ */
+import { describe, it, expect } from 'vitest'
+import { spawnSync } from 'node:child_process'
+import { readFileSync, existsSync, rmSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { tmpdir } from 'node:os'
+import { goldenTest, normalizeStrings } from '${goldenImport}'
+${cli.imports}
+const REPO_ROOT = process.cwd()
+// #282: this file lives at <appPkgRoot>/tests/<name>.test.ts, so the app
+// package root is two levels up. Deriving it from the file's own URL keeps
+// the test runnable from any checkout; #199 DEC-009 baked the scaffolding
+// machine's absolute appPkgRoot in as a literal, which passes only there.
+const PKG_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
+// How to invoke the CLI from this workspace. ${cli.note}
+const CAMBIUM: string[] = ${cli.expr}
+// GEN/FIXTURE below are emitted via JSON.stringify, never raw
+// string splicing (#199 DEC-012) — genRel and fixtureRel both ultimately
+// trace back to untrusted run-directory input (entry.source, a promoted
+// context value's derived path), and a quote or backtick in either would
+// otherwise close the literal early and splice live statements into this
+// file. JSON.stringify's output is a valid ECMAScript string literal for
+// any string content (Node >= ES2019), so this is safe for arbitrary text.
+const GEN = ${genPkgRel === null ? JSON.stringify(genRel) : `join(PKG_ROOT, ${JSON.stringify(genPkgRel)})`}
+// TODO: replace with your real fixture path
+const FIXTURE = ${fixturePkgRel === null ? JSON.stringify(fixtureRel) : `join(PKG_ROOT, ${JSON.stringify(fixturePkgRel)})`}
+const SNAPSHOT = join(PKG_ROOT, ${JSON.stringify(snapshotPkgRel)})
+
+function runMock() {
+  const [bin, ...pre] = CAMBIUM
+  return spawnSync(
+    bin,
+    [...pre, 'run', GEN, '--method', '${method}', '--arg', FIXTURE, '--mock'],
+    { cwd: REPO_ROOT, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 },
+  )
+}
+
+// Derive the run directory from the "Trace: <path>" line that \`cambium run\`
+// writes to stderr. This is the documented, user-facing CLI output
+// (cambium.mjs: console.error(\`Trace: \${result.tracePath}\`)); taking
+// dirname() of the trace path gives the run dir without parsing internal
+// diagnostic lines whose format may change.
+function runDirFromStderr(stderr: string): string | null {
+  const m = stderr.match(/Trace: (\\S+)/)
+  return m ? dirname(m[1]) : null
+}
+
+describe('${pascal}', () => {
+  it('compiles to valid IR', () => {
+    // Compile via the CLI rather than spawning ruby against a
+    // \`ruby/cambium/compile.rb\` path: only the Cambium repo itself has
+    // that directory. The CLI resolves the compiler relative to its own
+    // install (RED-274), so this works in any workspace.
+    const irOut = join(tmpdir(), \`${snake}-\${process.pid}.ir.json\`)
+    const [bin, ...pre] = CAMBIUM
+    const result = spawnSync(
+      bin,
+      [...pre, 'compile', GEN, '--method', '${method}', '-o', irOut],
+      { encoding: 'utf8', cwd: REPO_ROOT },
+    )
+    expect(result.status, \`Compile failed:\\n\${result.stderr}\`).toBe(0)
+    const ir = JSON.parse(readFileSync(irOut, 'utf8'))
+    try { rmSync(irOut, { force: true }) } catch {}
+    expect(ir.entry.class).toBe('${pascal}')
+    expect(ir.entry.method).toBe('${method}')
+  })
+
+  it('produces output matching the golden snapshot (mock, token-free)', () => {
+    if (!existsSync(FIXTURE)) {
+      // Fixture not yet created — skip rather than fail.
+      // Create examples/fixtures/<fixture>.txt and re-run.
+      console.warn('[${pascal}] fixture not found — skipping golden test')
+      return
+    }
+    if (!existsSync(SNAPSHOT)) {
+      // No snapshot yet. Run once, copy output.json → snapshot, commit.
+      console.warn('[${pascal}] snapshot not found — run once with --mock and commit output.json as ${snake}-snapshot.json')
+      return
+    }
+
+    const result = runMock()
+    expect(result.status, \`Gen failed:\\n\${result.stderr}\`).toBe(0)
+
+    // \`cambium run\` writes the output JSON to stdout (its primary output
+    // channel). Parsing stdout is more robust than reading output.json from
+    // the run dir, because it does not depend on the internal artifact layout.
+    const actual = JSON.parse(result.stdout)
+    const expected = JSON.parse(readFileSync(SNAPSHOT, 'utf8'))
+
+    // normalizeStrings trims and collapses whitespace — the mock generator
+    // can vary in spacing. Add more normalizers (normalizeDates, normalizeNumbers)
+    // or ignoreFields as your schema needs.
+    const { passed, summary } = goldenTest(actual, expected, {
+      normalizers: [normalizeStrings],
+    })
+    expect(passed, summary).toBe(true)
+
+    // Clean up the run dir so the test suite stays idempotent.
+    const runDir = runDirFromStderr(result.stderr)
+    if (runDir) try { rmSync(runDir, { recursive: true, force: true }) } catch {}
+  })
+})
+`;
+}
+
 function generateAgent(name, ctx) {
   validateName(name, 'agent name');
   const snake = snakeCase(name);
@@ -453,131 +653,16 @@ end
   writeFile(join(PKG, 'app/systems', `${snake}.system.md`), `\
 You are a ${pascal.replace(/([A-Z])/g, ' $1').trim().toLowerCase()}. You extract structured data from documents with precision.`);
 
-  // Import path for goldenTest: in-tree workspace uses the deep relative;
-  // external [package] apps import from the published runner package.
-  // Two levels, not three: this file lands in `<appPkgRoot>/tests/`, whereas
-  // the tool / action / corrector / provider scaffolds land one level deeper
-  // in `<appPkgRoot>/app/<type>/`. The literal here was a copy of theirs and
-  // resolved to `<workspaceRoot>/cambium-runner/`, which does not exist — so
-  // an in-tree `cambium new agent` produced a test that could not even load.
-  const goldenImport = runnerImport(ctx, '../../cambium-runner/src/golden.js');
-
-  // RED-159: `cli/cambium.mjs` exists only in the Cambium repo. Anywhere
-  // else the CLI is the `@redwood-labs/cambium` dependency — see
-  // scaffoldedCliInvocation for why the generated test resolves it
-  // through Node module resolution and never a bare `npx cambium`.
-  const cli = scaffoldedCliInvocation(ctx);
-
-  writeFile(join(PKG, 'tests', `${snake}.test.ts`), `\
-/**
- * ${pascal} — golden regression test (RED-140).
- *
- * Workflow (token-free after the first run):
- *
- *   1. Create a fixture: ${PKG}/examples/fixtures/<fixture>.txt
- *   2. Run once to produce a snapshot:
- *        cambium run ${PKG}/app/gens/${snake}.cmb.rb --method analyze \\
- *          --arg ${PKG}/examples/fixtures/<fixture>.txt --mock
- *      Copy the output from the run dir (runs/<id>/output.json) to
- *        ${PKG}/examples/fixtures/${snake}-snapshot.json
- *      Commit both files.
- *   3. After that, \`npm test\` (--mock path) never burns tokens.
- *      Replay an old run instead of re-calling the LLM:
- *        cambium replay <run-id> --mock
- *
- * Edit the snapshot file when the expected output legitimately changes;
- * the test failure is the signal.
- */
-import { describe, it, expect } from 'vitest'
-import { spawnSync } from 'node:child_process'
-import { readFileSync, existsSync, rmSync } from 'node:fs'
-import { join, dirname } from 'node:path'
-import { tmpdir } from 'node:os'
-import { goldenTest, normalizeStrings } from '${goldenImport}'
-${cli.imports}
-const REPO_ROOT = process.cwd()
-// How to invoke the CLI from this workspace. ${cli.note}
-const CAMBIUM: string[] = ${cli.expr}
-const GEN = '${PKG}/app/gens/${snake}.cmb.rb'
-// TODO: replace with your real fixture path
-const FIXTURE = '${PKG}/examples/fixtures/<fixture>.txt'
-const SNAPSHOT = join(REPO_ROOT, '${PKG}/examples/fixtures/${snake}-snapshot.json')
-
-function runMock() {
-  const [bin, ...pre] = CAMBIUM
-  return spawnSync(
-    bin,
-    [...pre, 'run', GEN, '--method', 'analyze', '--arg', FIXTURE, '--mock'],
-    { cwd: REPO_ROOT, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 },
-  )
-}
-
-// Derive the run directory from the "Trace: <path>" line that \`cambium run\`
-// writes to stderr. This is the documented, user-facing CLI output
-// (cambium.mjs: console.error(\`Trace: \${result.tracePath}\`)); taking
-// dirname() of the trace path gives the run dir without parsing internal
-// diagnostic lines whose format may change.
-function runDirFromStderr(stderr: string): string | null {
-  const m = stderr.match(/Trace: (\\S+)/)
-  return m ? dirname(m[1]) : null
-}
-
-describe('${pascal}', () => {
-  it('compiles to valid IR', () => {
-    // Compile via the CLI rather than spawning ruby against a
-    // \`ruby/cambium/compile.rb\` path: only the Cambium repo itself has
-    // that directory. The CLI resolves the compiler relative to its own
-    // install (RED-274), so this works in any workspace.
-    const irOut = join(tmpdir(), \`${snake}-\${process.pid}.ir.json\`)
-    const [bin, ...pre] = CAMBIUM
-    const result = spawnSync(
-      bin,
-      [...pre, 'compile', GEN, '--method', 'analyze', '-o', irOut],
-      { encoding: 'utf8', cwd: REPO_ROOT },
-    )
-    expect(result.status, \`Compile failed:\\n\${result.stderr}\`).toBe(0)
-    const ir = JSON.parse(readFileSync(irOut, 'utf8'))
-    try { rmSync(irOut, { force: true }) } catch {}
-    expect(ir.entry.class).toBe('${pascal}')
-    expect(ir.entry.method).toBe('analyze')
-  })
-
-  it('produces output matching the golden snapshot (mock, token-free)', () => {
-    if (!existsSync(FIXTURE)) {
-      // Fixture not yet created — skip rather than fail.
-      // Create examples/fixtures/<fixture>.txt and re-run.
-      console.warn('[${pascal}] fixture not found — skipping golden test')
-      return
-    }
-    if (!existsSync(SNAPSHOT)) {
-      // No snapshot yet. Run once, copy output.json → snapshot, commit.
-      console.warn('[${pascal}] snapshot not found — run once with --mock and commit output.json as ${snake}-snapshot.json')
-      return
-    }
-
-    const result = runMock()
-    expect(result.status, \`Gen failed:\\n\${result.stderr}\`).toBe(0)
-
-    // \`cambium run\` writes the output JSON to stdout (its primary output
-    // channel). Parsing stdout is more robust than reading output.json from
-    // the run dir, because it does not depend on the internal artifact layout.
-    const actual = JSON.parse(result.stdout)
-    const expected = JSON.parse(readFileSync(SNAPSHOT, 'utf8'))
-
-    // normalizeStrings trims and collapses whitespace — the mock generator
-    // can vary in spacing. Add more normalizers (normalizeDates, normalizeNumbers)
-    // or ignoreFields as your schema needs.
-    const { passed, summary } = goldenTest(actual, expected, {
-      normalizers: [normalizeStrings],
-    })
-    expect(passed, summary).toBe(true)
-
-    // Clean up the run dir so the test suite stays idempotent.
-    const runDir = runDirFromStderr(result.stderr)
-    if (runDir) try { rmSync(runDir, { recursive: true, force: true }) } catch {}
-  })
-})
-`);
+  writeFile(
+    join(PKG, 'tests', `${snake}.test.ts`),
+    goldenTestSource({
+      ctx,
+      pascal,
+      snake,
+      method: 'analyze',
+      fixtureRel: `${PKG}/examples/fixtures/<fixture>.txt`,
+    }),
+  );
 
   console.log(`\nNext steps:`);
   console.log(`  1. Edit the \`returns do … end\` schema in ${PKG}/app/gens/${snake}.cmb.rb`);
@@ -585,6 +670,7 @@ describe('${pascal}', () => {
   console.log(`  3. Create a fixture in ${PKG}/examples/fixtures/`);
   console.log(`  4. Run: cambium run ${PKG}/app/gens/${snake}.cmb.rb --method analyze --arg <fixture>`);
   console.log(`  5. Copy runs/<id>/output.json → ${PKG}/examples/fixtures/${snake}-snapshot.json and commit`);
+  console.log(`     (or run steps 4-5 in one move: cambium promote <run-id> — #199)`);
   console.log(`  6. After that, \`npm test\` uses --mock (token-free). See ${PKG}/tests/${snake}.test.ts`);
   console.log(`  7. (Optional) Generate typed contracts: cambium compile --write`);
 }
@@ -1336,10 +1422,15 @@ end
 import { describe, it, expect } from 'vitest'
 import { spawnSync } from 'node:child_process'
 import { readFileSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 ${cli.imports}
 const REPO_ROOT = process.cwd()
+// #282: anchored on this file's own location (<appPkgRoot>/tests/), never on
+// the absolute appPkgRoot of the machine that ran the scaffolder.
+const PKG_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
+const PIPELINE = join(PKG_ROOT, 'app/pipelines/${snake}.pipeline.rb')
 // How to invoke the CLI from this workspace. ${cli.note}
 const CAMBIUM: string[] = ${cli.expr}
 
@@ -1353,7 +1444,7 @@ describe('${pascal} pipeline', () => {
     const [bin, ...pre] = CAMBIUM
     const result = spawnSync(
       bin,
-      [...pre, 'compile', '${PKG}/app/pipelines/${snake}.pipeline.rb', '--method', 'run', '-o', irOut],
+      [...pre, 'compile', PIPELINE, '--method', 'run', '-o', irOut],
       { encoding: 'utf8', cwd: REPO_ROOT },
     )
     expect(result.status, \`Compile failed:\\n\${result.stderr}\`).toBe(0)

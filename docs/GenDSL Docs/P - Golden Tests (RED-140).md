@@ -123,6 +123,16 @@ git commit -m "update <name> golden snapshot — <why>"
 
 The commit message is the approval record.
 
+## Promoting a run
+
+Steps 1–3 above are the manual, first-principles path — write it out once to understand the shape. In practice, when the fixture already exists as a **run** (someone hit a real failure, fixed it, and now wants it as permanent regression armor), `cambium promote <run-id>` does all three steps in one move:
+
+```bash
+cambium promote run_20260910_143902_ab12cd
+```
+
+This writes the run's input document into `examples/fixtures/`, mints a fresh `--mock` snapshot for it, and wires (or extends) the test file — printing exactly what it wrote and the `npx vitest run <test>` command to confirm green. Promote never copies the source run's `output.json` as the snapshot, even when the source run wasn't itself `--mock` — it always re-derives the snapshot from a fresh mock run against the promoted fixture, because the golden always asserts under `--mock` and a real run's output can never equal that. See [[P - cambium promote]] for the full contract, including how it disambiguates a multi-key context (`--source`) and its overwrite-protection rules (`--force`).
+
 ## `cambium replay` and golden tests
 
 `cambium replay <run-id> --mock` re-runs the post-Generate tail (validate → correct → repair → grounding) against a prior run's recorded output, skipping Generate entirely. This is useful when you want to iterate on correctors or grounding rules without touching the snapshot:
@@ -169,6 +179,7 @@ Use `supersetOnly: true` when you only want to assert that the expected keys exi
 
 ## See also
 
+- [[P - cambium promote]] — turn a run into a fixture + snapshot + wired test in one move
 - [[P - cambium replay]] — re-run a prior run's post-Generate tail without re-calling the LLM
 - [[P - returns]] — `returns do … end` block schema; the schema the mock validates against
 - [[C - Trace (observability)]] — `runs/<id>/` artifact layout (ir.json, output.json, trace.json)

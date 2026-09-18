@@ -159,6 +159,68 @@ export type GenerateWithToolsOpts = {
   cachedPrefix?: string;
 };
 
+// #275 DEC-006: mode :decision. A Jev-style provider answers a set of typed
+// questions per call — a "choice" (String + `enum:`) or a "boolean" (Boolean)
+// — with a probability distribution and (for choice) a calibrated
+// confidence. This is a PARALLEL request/response shape to
+// GenerateTextOpts/GenerateResult, not an extension of it: normalizing a
+// typed question set into a prompt + jsonSchema would let a text-generating
+// provider silently "work" in decision mode with no probabilities — a
+// silent downgrade `decide` exists to avoid.
+export type DecisionQuestion =
+  | { kind: 'choice'; instructions: string; options: Record<string, string | null> }
+  | { kind: 'boolean'; instructions: string };
+
+/** Options handed to a provider's `decide`. NOTE: `model`, like
+ *  `GenerateTextOpts.model`, is the model NAME with the provider prefix
+ *  already stripped. `state` is the nested JSON object the runner assembles
+ *  (`{ system?, task, context }`) — opaque to the provider from here on. */
+export type DecideOpts = {
+  model: string;
+  state: unknown;
+  questions: Record<string, DecisionQuestion>;
+};
+
+// #275 DEC-009b: `confidence` on a choice answer is optional. The vendor
+// shows it in every documented example but does not guarantee it in
+// writing (RESEARCH-275) — a required field over an undocumented
+// guarantee is an outage bet the runner no longer takes. Omit the key
+// when your provider has no confidence to report; never synthesize one.
+export type DecideAnswer =
+  | { kind: 'choice'; choice: string; confidence?: number; probabilities: Record<string, number> }
+  | { kind: 'boolean'; probability: number };
+
+/**
+ * What `decide()` must return — checked by the runner
+ * (`handleDecisionGenerate`, step-handlers.ts) AFTER the call has already
+ * returned successfully (#275 DEC-009b). See `N - Model Identifiers` §
+ * `decide` for the worked example; the rules, briefly:
+ *
+ * - `answers` MUST have one entry per question in `DecideOpts.questions`,
+ *   keyed by the same field name.
+ * - A `choice` answer's `choice` MUST be a string; AJV (not this
+ *   contract) is the judge of whether it's one of the declared options.
+ * - A `boolean` answer's `probability` MUST be a number.
+ * - `confidence` on a choice answer is OPTIONAL (see `DecideAnswer`) —
+ *   omit it, don't null it or synthesize one.
+ * - `probability`, `confidence` (when present), and each DECLARED
+ *   option's `probabilities` value MUST be finite (no `NaN`/`Infinity`).
+ *   An undeclared `probabilities` key is unchecked — no schema constrains
+ *   it, so pass through whatever the vendor sends.
+ * - `usage`, when present, is best-effort: a partial or non-finite
+ *   `usage` is silently dropped (no throw, no budget accounting for that
+ *   call) rather than failing the run.
+ *
+ * A violation of the first four rules produces a `Generate { ok: false }`
+ * trace row, not a throw — the run falls through the normal decision-mode
+ * validation tail instead of escaping `runGen`. Only `decide()` itself
+ * throwing (a transport/provider error) still propagates unhandled.
+ */
+export type DecideResult = {
+  answers: Record<string, DecideAnswer>;
+  usage?: TokenUsage;
+};
+
 export interface CambiumProvider {
   /** Registry key = the model-id prefix. `anthropic:claude-...` →
    *  `registry.get("anthropic")`. For app providers this derives from the
@@ -193,4 +255,9 @@ export interface CambiumProvider {
   generateWithTools(
     opts: GenerateWithToolsOpts,
   ): Promise<GenerateWithToolsResult>;
+  /** #275 DEC-006: optional. Absent means this provider cannot serve
+   *  `mode :decision` gens — `makeDecide` (runner.ts) throws a plain Error
+   *  naming the model prefix rather than falling back to `generateText`.
+   *  `model` is prefix-stripped, like the other methods. */
+  decide?(opts: DecideOpts): Promise<DecideResult>;
 }

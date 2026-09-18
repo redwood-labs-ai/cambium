@@ -65,10 +65,25 @@ module Cambium
       collector.to_schema
     end
 
+    # mode :decision (DEC-002): same collection as .build, but returns the
+    # collector itself (not just its schema) so the caller can also derive
+    # decision questions from it (#to_decision_questions) after the block
+    # has run. `returns` stores this alongside the schema; `.build` above
+    # is untouched so every existing caller stays byte-identical.
+    def self.build_collector(&block)
+      collector = new
+      collector.instance_eval(&block)
+      collector
+    end
+
     def initialize
       @properties = {}
       @required = []
       @order = []
+      # mode :decision (DEC-004): per-field metadata recorded only for
+      # fields that declared `enum:` — see #apply_enum!. Keyed by field
+      # name; absence means "this field never declared enum:".
+      @decision_meta = {}
     end
 
     # field :name, String
@@ -84,7 +99,7 @@ module Cambium
       end
 
       @order << key
-      @properties[key] = build_field(key, type, enum, description, &block)
+      @properties[key] = build_field(key, type, optional, enum, description, &block)
       @required << key unless optional
     end
 
@@ -100,10 +115,71 @@ module Cambium
       }
     end
 
+    # mode :decision (DEC-002/003): derive one Jev-shaped question per
+    # declared field, in declaration order. String+`enum:` → a "choice"
+    # question (per-option descriptions come from @decision_meta, recorded
+    # by #apply_enum!); Boolean → a "boolean" question. Everything else —
+    # a non-String/Boolean type, a String without `enum:`, `optional:
+    # true`, or a missing `description:` — is a CompileError naming the
+    # field, per the closed vocabulary DEC-003 draws.
+    def to_decision_questions
+      @order.each_with_object({}) do |key, out|
+        schema = @properties[key]
+        case schema['type']
+        when 'string'
+          meta = @decision_meta[key]
+          unless meta
+            raise CompileError,
+                  "returns: field '#{key}' is a String without `enum:`, which is not " \
+                  "available in `mode :decision` (declare `enum:` to turn it into a choice question)."
+          end
+          check_decision_field!(key, meta['optional'], meta['description'])
+          out[key] = {
+            'kind'         => 'choice',
+            'instructions' => meta['description'].to_s,
+            'options'      => meta['options'],
+          }
+        when 'boolean'
+          check_decision_field!(key, !@required.include?(key), schema['description'])
+          out[key] = {
+            'kind'         => 'boolean',
+            'instructions' => schema['description'].to_s,
+          }
+        else
+          raise CompileError,
+                "returns: field '#{key}' has type '#{schema['type']}', which is not " \
+                "available in `mode :decision` (only String with `enum:` and Boolean " \
+                "fields are supported)."
+        end
+      end
+    end
+
+    # mode :decision reverse check (DEC-004): field names that declared
+    # `enum:` as a Hash (`{ key => description }`) rather than an Array.
+    # Used by compile.rb to refuse the Hash form on a non-decision gen.
+    def hash_enum_fields
+      @decision_meta.select { |_, meta| meta['enum_hash'] }.keys
+    end
+
     private
 
+    # mode :decision (DEC-003): shared `optional:`/`description:` guard for
+    # both field kinds.
+    def check_decision_field!(field_name, optional, description)
+      if optional
+        raise CompileError,
+              "returns: field '#{field_name}' is `optional: true`, which is not " \
+              "available in `mode :decision` (the model answers every declared question)."
+      end
+      if description.nil? || description.to_s.strip.empty?
+        raise CompileError,
+              "returns: field '#{field_name}' has no `description:`, which is required " \
+              "in `mode :decision` (the description becomes the question's instructions)."
+      end
+    end
+
     # Resolve a scalar/array/nested type into a JSON Schema fragment.
-    def build_field(field_name, type, enum, description, &block)
+    def build_field(field_name, type, optional, enum, description, &block)
       schema =
         if block && (type.nil? || (type.is_a?(Array) && type.empty?))
           # Nested object (`field :x do … end`) or array-of-object
@@ -133,7 +209,7 @@ module Cambium
           scalar_schema(field_name, type)
         end
 
-      apply_enum!(field_name, schema, enum) unless enum.nil?
+      apply_enum!(field_name, schema, enum, optional, description) unless enum.nil?
       schema['description'] = description.to_s unless description.nil?
       schema
     end
@@ -151,18 +227,61 @@ module Cambium
       { 'type' => json_type }
     end
 
-    # enum: %w[...] is allowed on String only (DEC-008).
-    def apply_enum!(field_name, schema, enum)
+    # enum: %w[...] is allowed on String only (DEC-008). mode :decision
+    # (DEC-004) widens the accepted shape to a Hash (`{ key => description
+    # }`) alongside the existing Array form — `schema['enum']` is always
+    # the key list either way (byte-identical to pre-DEC-004 output); the
+    # per-option descriptions the Hash form carries travel out-of-band in
+    # @decision_meta, never into the schema, so every existing consumer
+    # (AJV, the mock walker, contracts-emitter.mjs) is untouched.
+    def apply_enum!(field_name, schema, enum, optional, description)
       unless schema['type'] == 'string'
         raise CompileError,
               "returns: field '#{field_name}' uses `enum:` but is not a String. " \
               "`enum:` is supported on String fields only."
       end
-      values = Array(enum).map(&:to_s)
+      is_hash = enum.is_a?(Hash)
+      keys = is_hash ? enum.keys : Array(enum)
+      # #275 AUD-011: Hash enum: keys that collide after `.to_s` (e.g.
+      # "billing" and :billing) would otherwise silently collapse in
+      # `options` (last wins, an author's description discarded) while
+      # `schema['enum']` kept both, duplicated. Raise naming both keys
+      # before either happens.
+      if is_hash
+        seen = {}
+        keys.each do |k|
+          s = k.to_s
+          if seen.key?(s)
+            raise CompileError,
+                  "returns: field '#{field_name}' has `enum:` keys #{seen[s].inspect} and " \
+                  "#{k.inspect} that both stringify to '#{s}'. Rename one."
+          end
+          seen[s] = k
+        end
+      end
+      values = keys.map(&:to_s)
       if values.empty?
         raise CompileError, "returns: field '#{field_name}' has an empty `enum:`."
       end
       schema['enum'] = values
+
+      options =
+        if is_hash
+          enum.each_with_object({}) { |(k, v), h| h[k.to_s] = (v.nil? ? nil : v.to_s) }
+        else
+          values.each_with_object({}) { |k, h| h[k] = nil }
+        end
+      @decision_meta[field_name] = {
+        'enum_hash'       => is_hash,
+        'options'         => options,
+        'description'     => description,
+        'type'            => schema['type'],
+        'optional'        => optional,
+        'has_enum'        => true,
+        # enum: only ever applies to a scalar String (the check above
+        # raises before we get here otherwise) — never nested/array.
+        'nested_or_array' => false,
+      }
     end
 
     # Resolve a token to its name: real Class → Class#name; ConstRef →
@@ -1409,8 +1528,22 @@ module Cambium
 
       # Mode: :agentic enables multi-turn tool-use loop in generate.
       # Without it, generate is a single LLM call (default).
+      #
+      # #275 DEC-018: closed-enum check. Without it, a typo (`mode
+      # :Decision`) compiled silently as a non-decision gen — pre-existing
+      # for :agentic/:retro, but mode :decision made the consequence worse:
+      # a Hash `enum:` on the mistyped gen hit DEC-004's reverse-direction
+      # error ("only available in `mode :decision`"), actively misleading
+      # an author who believed they'd written exactly that.
+      MODES = %w[agentic retro decision].freeze
+
       def mode(m)
-        _cambium_defaults[:mode] = m.to_s
+        value = m.to_s
+        unless MODES.include?(value)
+          raise CompileError,
+                "mode: '#{value}' is not a valid mode. Valid modes: #{MODES.join(', ')}."
+        end
+        _cambium_defaults[:mode] = value
       end
 
       # System prompt: symbol resolves to app/systems/<name>.system.md, string is inline.
@@ -1457,7 +1590,13 @@ module Cambium
                   'returns: pass either a schema name (`returns :Foo`) or a ' \
                   'block (`returns do … end`), not both.'
           end
-          _cambium_defaults[:returnSchemaInline] = Cambium::ReturnSchemaCollector.build(&block)
+          # mode :decision (DEC-002): keep the collector instance too — a
+          # decision-mode gen derives its questions from it in compile.rb.
+          # `to_schema` still returns the byte-identical schema `.build`
+          # always returned, so `returnSchemaInline` is unaffected.
+          collector = Cambium::ReturnSchemaCollector.build_collector(&block)
+          _cambium_defaults[:returnSchemaInline] = collector.to_schema
+          _cambium_defaults[:returnSchemaCollector] = collector
         else
           if schema_const.nil?
             raise CompileError, 'returns: needs a schema name or a `do … end` block.'

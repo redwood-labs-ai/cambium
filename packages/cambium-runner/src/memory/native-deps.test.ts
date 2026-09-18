@@ -39,14 +39,18 @@ describe('betterSqlite3Available', () => {
     expect(ok).toBe(false);
   });
 
-  it('the real (uninjected) call path agrees with a plain dynamic import', async () => {
+  it('the real (uninjected) call path agrees with a plain dynamic import + construct', async () => {
     // No injected importer: exercises the exact code path every call
     // site in this repo uses. Whatever it reports must match trying the
     // same import directly — proves the default isn't hardcoded either way.
+    // Construct, not just import: better-sqlite3 loads its native binding
+    // lazily, so a binding built for another Node ABI imports fine and
+    // only throws here — exactly the case the probe must report false.
     const real = await betterSqlite3Available();
     let expected = true;
     try {
-      await import('better-sqlite3');
+      const { default: Database } = await import('better-sqlite3' as any) as any;
+      new Database(':memory:').close();
     } catch {
       expected = false;
     }
