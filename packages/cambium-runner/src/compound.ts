@@ -91,6 +91,11 @@ export async function runReview(
       prompt,
       max_tokens: compoundConfig?.max_tokens ?? DEFAULT_REVIEW_MAX_TOKENS,
       temperature: compoundConfig?.temperature ?? DEFAULT_REVIEW_TEMPERATURE,
+      // #299: inherit the gen's `effort` only when the review runs on the
+      // gen's own model — RED-176's rule at the repair site, applied here. A
+      // separately-declared review model was not chosen with the gen's effort
+      // in mind, and on a non-Anthropic one the field is a silent no-op.
+      ...(compoundConfig?.model ? {} : { effort: ir.effort }),
     });
   } catch (e: any) {
     // RED-325 Part 2: review is advisory — provider failure must not

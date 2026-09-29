@@ -176,6 +176,45 @@ function findValueMatch(
 }
 
 /**
+ * #274 Part 2: a value that states its own scale — `$13,769 million`,
+ * `$11,040M`, `$169.3M` — against a filing that prints the bare number under
+ * a scale header (`(in millions, except per share amounts)`,
+ * `Revenues ($ millions)`). The number is right and the model was being
+ * *more* explicit than the source; v1 flagged all of them. Across 10 real
+ * runs, 31 of 44 flagged values had their number in the source verbatim.
+ *
+ * The whole value must be `<number><scale>` — a currency mark, digits, and a
+ * scale word, nothing else. That deliberately excludes trailing prose
+ * (`$1,150 million to $1,200 million` — a range) and anything alphabetic
+ * (`AB-1234B`, where dropping a trailing `B` would match a DIFFERENT part
+ * number). Those stay failures; ranges and rewordings are a `fields:` or
+ * semantic-strategy problem, not a substring one.
+ *
+ * Deliberately NOT gated on the document declaring a matching scale. Real
+ * filings carry several — the run that motivated this had `($ millions)` and
+ * `(Dollars in thousands …)` in one document — so a document-wide scale check
+ * would pass a thousands value on a millions header while *looking* like it
+ * had verified magnitude. This fallback verifies presence, not magnitude, and
+ * says so in `P - grounded_in` § Limitations.
+ */
+const NUMBER_WITH_SCALE =
+  /^([$€£¥]?\s*[+-]?\d[\d,]*(?:\.\d+)?)\s*(?:thousands?|millions?|billions?|trillions?|mm|bn|[kmbt])$/i;
+
+function bareNumberOf(value: string): string | null {
+  const m = NUMBER_WITH_SCALE.exec(value.trim());
+  if (!m) return null;
+
+  const bare = m[1].trim();
+  // DEC-004's rationale, applied to what we are about to search for: a
+  // 1-2 digit bare number ("$1M" → "1") is an incidental substring of nearly
+  // any document, so the fallback would pass it on noise. The guard counts
+  // digits, not characters — "$1.5M" is 5 characters and 2 digits.
+  if (bare.replace(/\D/g, '').length < 3) return null;
+
+  return bare;
+}
+
+/**
  * Fuzzy check: does this value appear in the document?
  * Normalizes whitespace, does case-insensitive comparison, and handles
  * numeric formatting variations (e.g., "1,234" vs "1234").
@@ -190,6 +229,16 @@ function valueExistsInDocument(value: string, document: string): boolean {
   // Try without punctuation (commas, periods, dollar signs)
   const stripped = (s: string) => s.replace(/[,$€£¥.]/g, '');
   if (stripped(normalizedDoc).includes(stripped(normalizedValue))) return true;
+
+  // #274: last, and only for a pure `<number><scale>` value — retry on the
+  // bare number. Runs after both exact attempts, so a value the document
+  // states verbatim never reaches it and nothing that passed before changes.
+  const bare = bareNumberOf(value);
+  if (bare !== null) {
+    const normalizedBare = normalize(bare);
+    if (normalizedDoc.includes(normalizedBare)) return true;
+    if (stripped(normalizedDoc).includes(stripped(normalizedBare))) return true;
+  }
 
   return false;
 }

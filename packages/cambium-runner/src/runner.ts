@@ -12,12 +12,13 @@ const RUNNER_DIR = dirname(fileURLToPath(import.meta.url));
 import Ajv from 'ajv';
 import { ToolRegistry } from './tools/registry.js';
 import {
-  handleGenerate,
   handleAgenticGenerate,
-  handleDecisionGenerate,
-  handleValidate,
-  handleRepair,
   handleCorrect,
+  handleDecisionGenerate,
+  handleGenerate,
+  handleRepair,
+  handleValidate,
+  NO_JSON_REASK_DIRECTIVE,
 } from './step-handlers.js';
 import { extractSignals } from './signals.js';
 import { evaluateTriggers } from './triggers.js';
@@ -247,7 +248,25 @@ export function isTransientProviderError(err: unknown): boolean {
 // `<prompt>\n\n<cachedPrefix>` and no `cachedPrefix` field) without
 // standing up the full runGen pipeline.
 export function makeGenerateText(providerRegistry: ProviderRegistry, traceSteps: any[]) {
- return async function generateText(opts: { model: string; system: string; prompt: string; max_tokens?: number; temperature?: number; jsonSchema?: any; documents?: any[]; modelOptions?: { disable_thinking?: boolean }; fallbacks?: string[]; cachedPrefix?: string; }): Promise<GenerateResult & { modelUsed?: string }> {
+ return async function generateText(opts: {
+  model: string;
+  system: string;
+  prompt: string;
+  max_tokens?: number;
+  temperature?: number;
+  // #299: the steering control for Anthropic models that dropped sampling
+  // params. Declared here because it is FORWARDED below — the dispatcher
+  // omitting it is what made `effort` a no-op from 0.10 through 0.13: the
+  // call sites are typed against `GenerateTextFn`, which does declare it, and
+  // a narrower closure is structurally assignable to a wider signature, so
+  // nothing flagged the dropped field.
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  jsonSchema?: any;
+  documents?: any[];
+  modelOptions?: { disable_thinking?: boolean };
+  fallbacks?: string[];
+  cachedPrefix?: string;
+}): Promise<GenerateResult & { modelUsed?: string }> {
   const documents = opts.documents ?? [];
 
   // RED-323 / RED-421 (DEC-B / AUD-421-3): the native-document gate runs for
@@ -355,6 +374,13 @@ export function makeGenerateText(providerRegistry: ProviderRegistry, traceSteps:
         prompt: effectivePrompt,
         max_tokens: opts.max_tokens,
         temperature: opts.temperature,
+        // #299: forwarded unconditionally, exactly like `temperature`.
+        // Undeclared `effort` is undefined, `buildAnthropicMessagesRequest`
+        // gates on a truthy value, and `openaiCompatible` never reads the
+        // field — so every gen that does not declare it keeps a byte-identical
+        // request body. The Anthropic-only restriction is enforced at compile
+        // time (compile.rb), not here.
+        effort: opts.effort,
         jsonSchema: opts.jsonSchema,
         documents,
         modelOptions: { disable_thinking: disableThinking },
@@ -422,6 +448,9 @@ export function makeGenerateWithTools(providerRegistry: ProviderRegistry, traceS
   tools: any[];
   max_tokens?: number;
   temperature?: number;
+  // #299: same omission, same fix as generateText above — every agentic turn
+  // ran at the model's default effort.
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   documents?: any[];
   modelOptions?: { disable_thinking?: boolean };
   fallbacks?: string[];
@@ -528,6 +557,9 @@ export function makeGenerateWithTools(providerRegistry: ProviderRegistry, traceS
         tools: opts.tools,
         max_tokens: opts.max_tokens,
         temperature: opts.temperature,
+        // #299: see the generateText forward above for the byte-identity
+        // argument — it holds verbatim on this path.
+        effort: opts.effort,
         documents,
         modelOptions: { disable_thinking: disableThinking },
         cachedPrefix: passPrefix ? rawPrefix : undefined,
@@ -1687,6 +1719,10 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     // 1. Generate (single-call or agentic multi-turn)
     let raw: string;
     let parsed: any;
+    // #273: did the agentic loop's in-conversation re-ask actually fire? Read
+    // off the trace rows it would have pushed, so the terminal row's `outcome`
+    // can only ever claim what the trace itself shows.
+    let agenticReaskIssued = false;
 
     if (isReplay) {
       // RED-312 replay: skip Generate entirely (and, for agentic gens,
@@ -1728,6 +1764,10 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
         budgetTrack(ts);
       }
 
+      agenticReaskIssued = agenticResult.traceSteps.some(
+        (ts: any) => ts.type === 'ReaskForJson',
+      );
+
       raw = agenticResult.raw;
       parsed = agenticResult.parsed;
     } else if (ir.mode === 'decision') {
@@ -1760,9 +1800,26 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
     let ok = false;
     let errors: any[] = [];
     let prevErrorCount = Infinity;
+    // #273: one semantic re-ask per gen when Generate returned no JSON.
+    let noJsonReaskIssued = false;
+    // #273 follow-up: what produced the candidate this iteration is about to
+    // validate. A re-ask is not a repair — labelling its re-validation
+    // `ValidateAfterRepair` put a row in the trace whose name claims a
+    // `Repair` step that is provably absent (the no-data path never calls
+    // `handleRepair`). Reset to 'repair' at the repair site so a later
+    // genuine repair re-validates under its own name.
+    let lastCandidateFrom: 'generate' | 'repair' | 'reask' = 'generate';
 
     for (let attempt = 0; attempt < 1 + repairPolicy.maxAttempts; attempt++) {
-      const vResult = handleValidate(parsed, validate, attempt === 0 ? 'Validate' : 'ValidateAfterRepair');
+      const vResult = handleValidate(
+        parsed,
+        validate,
+        attempt === 0
+          ? 'Validate'
+          : lastCandidateFrom === 'reask'
+            ? 'ValidateAfterReask'
+            : 'ValidateAfterRepair',
+      );
 
       if (vResult.ok) {
         ok = true;
@@ -1792,6 +1849,73 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
 
       errors = vResult.errors ?? [];
       const errorCount = errors.length;
+
+      // #273: "no output" is not "wrong output". When the candidate does not
+      // exist there is nothing for structural repair to reshape — handing it
+      // `No data to validate` + the schema made the model INVENT the values:
+      // 3 of 88 real agentic runs shipped `ok: true` with fabricated tickers
+      // (AAPL → NVDA) because repair saw a schema and a task, never the tool
+      // results. Re-ask the gen's own model instead — same system, same
+      // cached prefix, gen model — with an explicit JSON directive. Agentic
+      // runs already re-asked inside handleAgenticGenerate; if the re-ask
+      // still came back empty the conversation is gone, so fail honestly
+      // rather than fabricate. One re-ask; still nothing → `validation` fail.
+      //
+      // Runs BEFORE stop-on-no-improvement. Both end the run the same way, so
+      // the ordering is about which row explains it: a re-ask that came back
+      // as prose twice has identical error counts, so the improvement check
+      // used to win the race and file the run as `RepairStopped`
+      // (`reason: "no_improvement"`) — naming a repair that never ran, and
+      // contradicting this loop's own documented terminal row. The no-data
+      // class is decided here, on its own terms; everything else falls
+      // through to the improvement check unchanged.
+      const isNoData = errors.some((e) => e.message === 'No data to validate');
+      // A decision gen never had a model-written candidate to re-ask — its
+      // "output" came from decide(). Its malformed-answer class keeps the
+      // pre-#273 tail (deterministic Repair row + validation fail) so the
+      // DEC-009b / DEC-011 pins stay byte-identical and generateText stays
+      // uncalled (decision-mode.test.ts).
+      if (isNoData && ir.mode !== 'decision') {
+        trace.steps.push(vResult);
+
+        if (!noJsonReaskIssued && attempt < repairPolicy.maxAttempts && ir.mode !== 'agentic') {
+          noJsonReaskIssued = true;
+          const reaskStarted = Date.now();
+          const reask = await handleGenerate(step, ir, schema, generateText, extractJsonObject, { documents, groundingTextByKey }, NO_JSON_REASK_DIRECTIVE);
+          trace.steps.push({ ...reask.result, type: 'ReaskForJson', ms: Date.now() - reaskStarted });
+          budgetTrack(reask.result);
+          raw = reask.raw;
+          parsed = reask.parsed;
+          // RED-174: same ceiling, same outcome next attempt — stop paying.
+          if (reask.result.meta?.output_ceiling?.hit) {
+            ceilingHit = reask.result.meta.output_ceiling;
+            break;
+          }
+          lastCandidateFrom = 'reask';
+          // Deliberately does NOT update `prevErrorCount`: no repair ran, so
+          // there is no prior attempt for the improvement check to compare
+          // against. A re-asked candidate that is still unparseable comes
+          // straight back here and terminates on `noJsonReaskIssued`.
+          continue; // re-validate the re-asked candidate next attempt
+        }
+        trace.steps.push({
+          type: 'ReaskForJson',
+          ok: false,
+          meta: {
+            reason: 'no_json',
+            // Agentic: normally the in-loop re-ask already ran and the loop
+            // ended — nothing left to re-ask against. It can also never have
+            // run (a ceiling hit skips it, RED-174), and the row must not
+            // claim a re-ask that no trace row backs. Non-agentic: one re-ask
+            // ran and came back without parseable JSON.
+            outcome: ir.mode === 'agentic'
+              ? (agenticReaskIssued ? 'reask_spent_agentic' : 'reask_not_issued_agentic')
+              : 'reask_failed',
+          },
+        });
+        ok = false;
+        break;
+      }
 
       // Stop-on-no-improvement: bail if errors aren't decreasing
       if (repairPolicy.stopOnNoImprovement && attempt > 0 && errorCount >= prevErrorCount) {
@@ -1830,6 +1954,7 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
       }
       raw = repair.raw;
       parsed = repair.parsed;
+      lastCandidateFrom = 'repair';
     }
 
     if (ceilingHit) {
@@ -1912,6 +2037,9 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
         let extraRaw = extraGen.raw;
         let extraParsed = extraGen.parsed;
 
+        // #273: one re-ask per consensus pass (see primary loop below).
+        let extraReaskIssued = false;
+
         // Run the same validate + repair loop as the primary generate
         for (let attempt = 0; attempt < 1 + maxRepairAttempts; attempt++) {
           const extraV = handleValidate(extraParsed, validate,
@@ -1920,6 +2048,28 @@ export async function runGen(opts: RunGenOptions): Promise<RunGenResult> {
           if (extraV.ok) {
             if (attempt > 0) trace.steps.push(extraV);
             allOutputs.push(extraParsed);
+            break;
+          }
+
+          // #273: same hazard as the primary loop — a pass that produced no
+          // JSON has no candidate, and structural repair would invent one.
+          // Re-ask this pass's gen once (same step/schema/prefix, one extra
+          // directive) before validating its answer next attempt.
+          const extraIsNoData = extraV.errors?.some((e: any) => e.message === 'No data to validate');
+          if (extraIsNoData) {
+            trace.steps.push(extraV);
+            if (!extraReaskIssued && attempt < maxRepairAttempts) {
+              extraReaskIssued = true;
+              const reaskStarted = Date.now();
+              const extraReask = await handleGenerate(step, ir, schema, generateText, extractJsonObject, { documents, groundingTextByKey }, NO_JSON_REASK_DIRECTIVE);
+              trace.steps.push({ ...extraReask.result, type: 'ReaskForJson', id: `${passId}_reask`, ms: Date.now() - reaskStarted });
+              budgetTrack({ ...extraReask.result, type: 'ReaskForJson', id: `${passId}_reask`, ms: Date.now() - reaskStarted });
+              extraRaw = extraReask.raw;
+              extraParsed = extraReask.parsed;
+              continue;
+            }
+            // Re-ask spent or attempts exhausted — this pass produced
+            // nothing; drop it rather than feed invented values to consensus.
             break;
           }
 

@@ -505,6 +505,13 @@ export async function handleGenerate(
    *  working without threading the extraction — in that case we run
    *  it inline here. */
   docInput?: { documents: DocumentBlock[]; groundingTextByKey: Record<string, string> },
+  /** #273: text appended to the uncached prompt tail — the semantic
+   *  re-ask directive rides here so the cacheable prefix stays
+   *  byte-identical to the original Generate call (prompt-cache keys are
+   *  content hashes; the directive must not move the region). On the
+   *  legacy path it trails the whole prompt so the model sees the ask
+   *  AFTER task + documents. Absent = byte-identical normal Generate. */
+  extraTail?: string,
 ): Promise<{ raw: string; parsed: any; result: StepResult }> {
   const { documents, groundingTextByKey } = docInput ?? await extractDocuments(ir);
 
@@ -567,7 +574,21 @@ export async function handleGenerate(
   // this fallback ordering is what every non-Anthropic (or cache-disabled
   // Anthropic) call sees, so a grounded gen running against a non-cache
   // provider is unchanged.
-  const legacyPrompt = `${promptText}\n\n${cacheablePrefix}`;
+  //
+  // #273: the semantic re-ask directive (`extraTail`) rides the uncached
+  // tail on both paths — on the cached path it extends the user text past
+  // the cacheable prefix, on the legacy path it trails everything. Either
+  // way the prefix bytes stay byte-identical to the original Generate so
+  // the re-ask reads the warm cache instead of paying a cold miss, and the
+  // model sees the "answer in JSON now" ask as the last thing before
+  // generation. With `extraTail` undefined both lines are byte-identical
+  // to the pre-#273 code — ternary, not `.filter(Boolean).join`, so an
+  // absent tail reproduces the old template literal byte-for-byte
+  // (AUD-005 pins an empty `promptText` leading `\n\n`).
+  const cachedPrompt = extraTail ? `${promptText}\n\n${extraTail}` : promptText;
+  const legacyPrompt = extraTail
+    ? `${promptText}\n\n${cacheablePrefix}\n\n${extraTail}`
+    : `${promptText}\n\n${cacheablePrefix}`;
 
   const outMax = Number(ir.model.max_tokens ?? 1200);
   const started = Date.now();
@@ -575,7 +596,7 @@ export async function handleGenerate(
   const genResult = await generateText({
     model: ir.model.id,
     system,
-    prompt: useCachedPrefix ? promptText : legacyPrompt,
+    prompt: useCachedPrefix ? cachedPrompt : legacyPrompt,
     max_tokens: outMax,
     temperature: ir.model.temperature,
     effort: ir.effort,
@@ -1375,6 +1396,15 @@ export async function handleToolCall(
 
 // ── Agentic Generate (multi-turn tool-use loop) ──────────────────────
 
+// #273: shared "answer in JSON" directive, used by the in-loop agentic
+// re-ask and by the validate-loop semantic re-ask in runner.ts. One text,
+// two dispatch points — the model must see the same ask whichever way the
+// run noticed the missing JSON.
+export const NO_JSON_REASK_DIRECTIVE = 'Your last message was not valid JSON and cannot be parsed. ' +
+  'Respond again with ONLY the final JSON object for the task above — ' +
+  'no prose, no markdown fences, no commentary. Base every value on ' +
+  'the tool results you actually received; do not invent values.';
+
 type Message = { role: string; content: string | null; tool_calls?: any[]; tool_call_id?: string };
 type ToolCallMsg = { id: string; type: 'function'; function: { name: string; arguments: string } };
 
@@ -1481,10 +1511,24 @@ export async function handleAgenticGenerate(
   // dozens of times against a per-tool cap that's never going to change.
   let budgetExhausted = false;
 
+  // #273: one semantic re-ask per gen when Generate returned no JSON.
+  let noJsonReaskIssued = false;
+
   const log = (msg: string) => process.stderr.write(`  ${msg}\n`);
   log(`⟳ Agentic loop started (max ${maxToolCalls} tool calls)`);
 
-  for (let turn = 0; turn < maxToolCalls + 1; turn++) {
+  // #273: turns, not tool calls. The tool budget is enforced by `forceFinal`
+  // (`totalToolCalls >= maxToolCalls`), so this limit only bounds iterations —
+  // and the no-JSON re-ask needs an iteration of its own. Without a mutable
+  // limit the re-ask is unreachable in exactly the run shape that needs it
+  // most: one tool call per turn walks `totalToolCalls` up in lockstep with
+  // `turn`, so the forced-final turn IS the last iteration, and a prose answer
+  // there had nowhere to be re-asked. The re-ask raises this by one, once (it
+  // fires at most once per run — `noJsonReaskIssued`), and buys no extra tool
+  // calls: `forceFinal` is already true on the turn it buys.
+  let turnLimit = maxToolCalls + 1;
+
+  for (let turn = 0; turn < turnLimit; turn++) {
     const turnStarted = Date.now();
 
     // On the last allowed turn (or after a budget violation), omit tools to
@@ -1494,10 +1538,24 @@ export async function handleAgenticGenerate(
     if (forceFinal && totalToolCalls > 0) {
       const reason = budgetExhausted ? 'budget exhausted' : 'tool call limit reached';
       log(`⟳ Turn ${turn + 1}: forcing final output (${reason})`);
-      messages.push({
-        role: 'user',
-        content: 'You have gathered enough information. STOP calling tools. Produce your final JSON output now. Output MUST be JSON only, starting with { and ending with }.',
-      });
+      // #273: when this turn follows a no-JSON re-ask, the directive is
+      // already sitting in the trailing user message — merge it rather than
+      // stacking a second user turn on top. Not an API constraint: the
+      // Anthropic Messages API accepts consecutive same-role messages and
+      // folds them into one turn. It's a prompt-quality call — the model
+      // reads one coherent ask ("answer in JSON, from the tool results" +
+      // "stop calling tools, final output now") instead of two asks that
+      // half-conflict about what to do next. Only merge into a plain user
+      // message: the tool-result messages also have role 'user' but carry
+      // `tool_call_id` + JSON payloads that must stay byte-exact for the
+      // provider's tool-use contract.
+      const gathered = 'You have gathered enough information. STOP calling tools. Produce your final JSON output now. Output MUST be JSON only, starting with { and ending with }.';
+      const last = messages[messages.length - 1];
+      if (noJsonReaskIssued && last && last.role === 'user' && !last.tool_call_id) {
+        last.content = `${last.content}\n\n${gathered}`;
+      } else {
+        messages.push({ role: 'user', content: gathered });
+      }
     } else {
       log(`⟳ Turn ${turn + 1}: calling model...`);
     }
@@ -1682,6 +1740,42 @@ export async function handleAgenticGenerate(
     if (finalCeiling) {
       finalParsed = undefined;
       log(`  ✗ Output ceiling reached (${finalCeiling.ceiling} tokens, ${finalCeiling.source})`);
+    }
+
+    // #273: the model answered in prose instead of JSON. This conversation
+    // is the only place this run's tool results live — a context-free
+    // structural repair downstream cannot know what the tools returned, and
+    // did not know it: 3 of 88 real agentic runs shipped `ok: true` with
+    // fabricated values invented from the schema alone (AAPL → NVDA). Re-ask
+    // IN the conversation, once: the tool transcripts stay in `messages`, so
+    // the re-ask is semantic (task + context + tool results), not invented.
+    // One re-ask per run; ceiling hits stay terminal (RED-174); a still-
+    // unparseable answer falls through to the AgenticFinal row below and
+    // fails the run — structural repair never sees notes-land again.
+    //
+    // No `turn` guard: the re-ask raises `turnLimit` itself (see its
+    // declaration), so the turn it needs always exists. Guarding on
+    // `turn < maxToolCalls` instead made the re-ask unreachable for any run
+    // that spent its tool budget one call per turn — the common sequential
+    // shape, and the one whose prose answer is most worth rescuing.
+    if (finalParsed === undefined && !finalCeiling && !noJsonReaskIssued) {
+      log(`⟳ Turn ${turn + 1}: no JSON in final output — re-asking (once)`);
+      traceSteps.push({
+        type: 'ReaskForJson',
+        ms: Date.now() - turnStarted,
+        ok: true,
+        meta: {
+          turn: turn + 1,
+          reason: 'no_json',
+          raw_preview: finalRaw.slice(0, 200),
+          usage: response.usage,
+        },
+      });
+      messages.push({ role: 'assistant', content: finalRaw });
+      messages.push({ role: 'user', content: NO_JSON_REASK_DIRECTIVE });
+      noJsonReaskIssued = true;
+      turnLimit += 1;
+      continue;
     }
 
     traceSteps.push({

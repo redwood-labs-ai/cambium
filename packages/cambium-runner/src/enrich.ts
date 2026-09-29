@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import Ajv from 'ajv';
 import type { GenerateTextFn, ExtractJsonFn, TokenUsage } from './step-handlers.js';
-import { handleGenerate, handleValidate, handleRepair } from './step-handlers.js';
+import { handleGenerate, handleValidate, handleRepair, NO_JSON_REASK_DIRECTIVE } from './step-handlers.js';
 import { isDocumentEntry } from './documents.js';
 import { resolveCompileRb } from './compile-rb.js';
 
@@ -233,6 +233,30 @@ export async function runEnrichment(
     }
 
     traceSteps.push(vResult);
+
+    // #273: same "no output ≠ wrong output" rule as the main loop — a
+    // sub-agent that answered in prose has no candidate, and structural
+    // repair would invent one from the schema alone. Re-ask once, then
+    // fail the enrichment honestly.
+    if (vResult.errors?.some((e: any) => e.message === 'No data to validate')) {
+      if (attempt < maxRepairAttempts) {
+        const reaskStarted = Date.now();
+        const reask = await handleGenerate(genStep, subIr, subSchema, generateText, extractJson, undefined, NO_JSON_REASK_DIRECTIVE);
+        traceSteps.push({ ...reask.result, type: 'ReaskForJson', id: `enrich_${enrichment.field}_reask`, ms: Date.now() - reaskStarted });
+        raw = reask.raw;
+        parsed = reask.parsed;
+        continue;
+      }
+      traceSteps.push({
+        type: 'ReaskForJson',
+        ok: false,
+        id: `enrich_${enrichment.field}_reask`,
+        meta: { reason: 'no_json', outcome: 'reask_failed' },
+      });
+      ok = false;
+      break;
+    }
+
     if (attempt >= maxRepairAttempts) break;
 
     // RED-176: the sub-agent's repair pass is structural (its own schema), and

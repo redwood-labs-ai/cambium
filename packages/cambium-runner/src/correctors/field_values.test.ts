@@ -215,4 +215,90 @@ describe('field-values corrector', () => {
       expect(fv.passed[0].matched_via).toBe('derived');
     });
   });
+
+  describe('scale-stated numbers (#274 Part 2)', () => {
+    // The three rows from #274's evidence table: the model stated the scale,
+    // the filing declared it in a header and printed the number bare.
+    const filing = `
+ACME CORP CONSOLIDATED STATEMENTS OF OPERATIONS
+(in millions, except per share amounts)
+
+Revenue $13,769
+Net revenues $11,040
+
+Segment detail — Revenues ($ millions)
+Cloud 169.3
+`;
+
+    it('accepts a value that states the scale the document declares in a header', () => {
+      const result = fieldValues(
+        { revenue: '$13,769 million', net: '$11,040M', cloud: '$169.3M' },
+        { document: filing },
+      );
+      const fv = result.meta?.fieldValuesResult;
+      expect(fv.allValid).toBe(true);
+      expect(fv.passed).toHaveLength(3);
+      expect(result.issues.filter((i: any) => i.severity === 'error')).toHaveLength(0);
+    });
+
+    it('still fails a scale-stated number that is absent (the check keeps its teeth)', () => {
+      const result = fieldValues({ revenue: '$99,999 million' }, { document: filing });
+      const fv = result.meta?.fieldValuesResult;
+      expect(fv.allValid).toBe(false);
+      expect(fv.failed).toHaveLength(1);
+    });
+
+    it('does not relax a range — out of scope for a substring matcher (#274)', () => {
+      // Row 4 of the evidence table. `fields:` or the semantic strategy is the
+      // answer here; silently half-matching one endpoint would be worse.
+      const result = fieldValues(
+        { guidance: '$1,150 million to $1,200 million' },
+        { document: 'Guidance: between $1,150 million and $1,200 million' },
+      );
+      expect(result.meta?.fieldValuesResult.allValid).toBe(false);
+    });
+
+    it('does not relax a 1-2 digit number — "$1M" would match on noise', () => {
+      const result = fieldValues(
+        { small: '$1M', tiny: '$12M' },
+        { document: 'Section 1 of 12 pages. Revenue was strong.' },
+      );
+      const fv = result.meta?.fieldValuesResult;
+      expect(fv.allValid).toBe(false);
+      expect(fv.failed).toHaveLength(2);
+    });
+
+    it('does not strip a trailing letter from an alphanumeric identifier', () => {
+      // Dropping the `B` would match part number AB-1234A — a different part.
+      const result = fieldValues(
+        { part: 'AB-1234B' },
+        { document: 'Bill of materials: AB-1234A, qty 3' },
+      );
+      expect(result.meta?.fieldValuesResult.allValid).toBe(false);
+    });
+
+    it('relaxes against the derived view too (#169 any-of is preserved)', () => {
+      const result = fieldValues(
+        { revenue: '$13,769 million' },
+        {
+          document: '| Revenue | **$13,769** |',
+          derivedDocument: 'Revenue $13,769',
+        },
+      );
+      const fv = result.meta?.fieldValuesResult;
+      expect(fv.allValid).toBe(true);
+      expect(fv.passed[0].matched_via).toBe('document');
+    });
+
+    it('a verbatim scale-stated value still reports a plain exact match', () => {
+      // The fallback runs last, so nothing that passed before #274 changes.
+      const result = fieldValues(
+        { revenue: '$13,769 million' },
+        { document: 'Revenue of $13,769 million for the year' },
+      );
+      const fv = result.meta?.fieldValuesResult;
+      expect(fv.allValid).toBe(true);
+      expect(fv.passed[0].matched_via).toBe('document');
+    });
+  });
 });

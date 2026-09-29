@@ -8,6 +8,140 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _Nothing yet._
 
+## [0.14.0] — 2026-09-29 — The Receipt
+
+Three of eighty-eight real agentic runs shipped `ok: true` with a ticker the source document
+never mentioned. AAPL had become NVDA. Nothing had failed: the gen finished its tool work,
+wrote the answer up in prose instead of JSON, and the structural repair pass — which sees a
+schema and a task and nothing else — filled the fields in. There was no candidate to reshape,
+so it invented one. The run recorded a success.
+
+No output is not wrong output, and the two need different answers. A gen that returns no
+parseable JSON now re-asks its own model, inside the same conversation, with the tool
+transcripts still in front of it; if that second ask also comes back without JSON, the run
+fails and says so. Structural repair keeps the job it can actually do — reshaping a candidate
+that exists.
+
+Fixing that exposed two more places where a run described work it had not done. A run whose
+re-ask never fired still reported that it had, because the terminal row read an intent rather
+than the rows on disk. A re-asked candidate re-validated as `ValidateAfterRepair` in runs that
+contain no `Repair` row at all. Both now name what happened: `ReaskForJson` and
+`ValidateAfterReask` are the new rows, and the terminal outcome is read off the rows actually
+present.
+
+The same shape turned up twice more, away from the repair loop. The field-values verifier was
+failing `$13,769 million` against a filing that prints `Revenue $13,769` under a header reading
+"(in millions)" — across ten runs, thirty-one of forty-four flagged values had their number in
+the source verbatim, and since #175 a false positive costs the whole run rather than one
+quietly deleted value. And `effort` — an Anthropic steering control that has been in the DSL
+since 0.9.0 — compiled into the IR, was read by every step handler, was honored by the request
+builder, and was dropped by the one dispatcher between them. Every gen that declared it ran at
+the model's default.
+
+None of these produced an error. Each produced a confident answer about work that had not been
+done, which is the harder failure to see and the reason this release is named for the record
+rather than the result.
+
+### Added
+
+- **`ReaskForJson` trace step (#273).** One row per no-JSON re-ask, carrying `reason: "no_json"`,
+  `raw_preview`, `usage`, and `turn` (agentic) or `attempt`. The run's last `ReaskForJson` row
+  doubles as the honest-fail marker (`ok: false`) — that run ends `validation` with zero `Repair`
+  rows. Its `outcome` is read off the rows actually present: `reask_failed`,
+  `reask_spent_agentic`, or `reask_not_issued_agentic` when a ceiling hit skipped it, so the row
+  can never claim a re-ask nothing backs.
+- **`ValidateAfterReask` trace step (#273).** AJV re-validation of a candidate produced by the
+  re-ask rather than by a repair. Same shape as `ValidateAfterRepair`; only the provenance
+  differs. It exists because the no-data path never calls `handleRepair`, so a row named "after
+  repair" would name a step that is provably absent.
+
+Both are additive on trace vocabulary (COMPATIBILITY.md surface 4) and are why this release is a
+MINOR rather than a patch. A consumer that switches on step type sees two names it did not see
+before; one that reads rows it recognizes and ignores the rest is unaffected.
+
+### Changed
+
+- CLI and runner bump to 0.14.0 in lockstep; the CLI's exact pin on
+  `@redwood-labs/cambium-runner` moves with it. `cambium-client` (Python) is unchanged.
+
+### Fixed
+
+- **A gen that returns no JSON is re-asked, not fabricated around (#273).** When `Generate`
+  answered in prose there was no candidate for structural repair to reshape, and repair — seeing
+  only a schema and a task — invented values. The agentic loop now re-asks inside the
+  conversation, so the tool transcripts stay model-visible, and merges the directive with the
+  force-final ask rather than stacking a second user turn. The validate/repair loop re-asks the
+  gen's own model once on "No data to validate", with the same system prompt and cacheable
+  prefix and the directive on the uncached tail, so the cache region stays byte-identical.
+  Consensus passes and `enrich` sub-gens follow the same rule: honest failure over invention.
+  `mode :decision` gens keep the pre-#273 deterministic tail (DEC-009b / DEC-011 pins).
+- **The agentic re-ask now reaches the run it was written for (#273).** `forceFinal` fires at
+  `totalToolCalls >= maxToolCalls`, so a run spending its budget one tool call per turn reaches
+  the forced-final turn on the loop's *last* iteration — exactly where the `turn < maxToolCalls`
+  guard is false. The model did all the tool work, wrote it up in prose, and the run died with a
+  trace claiming a re-ask that never happened. Iterations are now bounded by a mutable
+  `turnLimit` that the re-ask raises by one, once; it buys no extra tool calls, since
+  `forceFinal` is already true on the turn it buys.
+- **`stop_on_no_improvement` no longer files a no-data run as a repair (#273).** Two prose
+  answers carry identical error counts, so the improvement check won the race and filed the run
+  as `RepairStopped(no_improvement)` — naming a repair that never ran and contradicting the
+  loop's own documented terminal row. The no-data class is decided first, on its own terms;
+  everything else falls through unchanged.
+- **The field-values verifier accepts scale-stated numbers (#274).** `$13,769 million` failed
+  against a filing printing `Revenue $13,769` under "(in millions, except per share amounts)" —
+  the number was right and the model was being more explicit than its source. When the whole
+  value is `<currency?><number><scale>` (thousand/K, million/M/mm, billion/B/bn, trillion/T) and
+  both exact attempts miss, the matcher retries on the bare number. Narrow by construction:
+  ranges and alphanumerics are untouched, the bare number needs three or more digits, and the
+  retry runs last, so nothing that passed before changes behavior or its reported `matched_via`.
+  Deliberately not gated on the document declaring a matching scale — one filing commonly carries
+  several, and a document-wide check would pass a thousands value under a millions header while
+  looking like it had verified magnitude. This checks presence, not magnitude.
+- **`effort` now reaches the model (#299).** A gen could declare `effort "high"`, watch it
+  compile into the IR, and still run at the model's default effort. Every step handler
+  passed the value correctly; the runner-level dispatcher between them accepted it and
+  dropped it, on both the single-shot and agentic paths. It type-checked because the call
+  sites are typed against `GenerateTextFn` — which does declare `effort` — and a narrower
+  closure is structurally assignable to a wider signature, so nothing flagged the missing
+  field. Coverage existed on the compile side (golden IR) and on the provider side
+  (request-body builder) and nowhere across the seam that was broken. `effort` has never
+  worked end to end: 0.9.0 shipped it crashing the compiler, 0.10.0 fixed the crash and
+  left it silently inert through 0.13.0.
+  `constrain :compound` review now inherits the gen's `effort` too, but only when it runs
+  on the gen's own model — a separately declared review model keeps provider defaults,
+  the rule the `repair` slot already followed (RED-176).
+  No IR, trace, or request-body change for any gen that does not declare `effort`.
+
+### Upgrade from 0.13.0
+
+Nothing in the DSL, the IR, or the serve wire requires a change, and every gen compiles
+byte-identically. No `error.kind` moved. Three behaviors differ for existing gens, plus one note
+for anything that consumes traces.
+
+**A gen that returns no parseable JSON now behaves differently, and it costs one extra model
+call (#273).** Before, the run went to structural repair and often shipped a schema-valid result
+built from nothing. Now it re-asks the gen's own model once, then fails honestly if that also
+returns no JSON. If you have runs that were passing on fabricated output, they will start
+failing — that is the fix, not a regression. Budget accordingly: one additional call on the
+affected path, and agentic runs may take one more turn (it buys no extra tool calls).
+
+**Gens with `grounded_in ... verify: :field_values` may now pass where they failed (#274).** A
+value written as `$13,769 million` against a source printing `13,769` under a millions header is
+no longer a false positive. If you were working around this by loosening the verifier or
+post-editing values, remove the workaround.
+
+**Every gen that declares `effort` will change behavior (#299).** `effort` has never reached the
+provider, so those gens have been running at the model's default, which is `high`. A gen
+declaring `effort :high` is unaffected. One declaring `:low` or `:medium` gets cheaper and
+faster. One declaring `:xhigh` or `:max` gets slower and more expensive — and better — because
+it will finally run at what it asked for. Expect a one-time prompt-cache miss on the first run of
+each affected gen: changing effort invalidates the messages cache, so a grounded gen re-bills its
+document at cache-write cost once.
+
+**Trace consumers see two new step types (#273).** `ReaskForJson` and `ValidateAfterReask`.
+Additive — nothing was renamed or removed — but a consumer that exhaustively switches on step
+type needs the two new names. One that ignores unrecognized rows needs nothing.
+
 ## [0.13.0] — 2026-09-18 — The Verdict
 
 A palette gen declared two correctors, `hex_normalize` and then `contrast_floor`. A
