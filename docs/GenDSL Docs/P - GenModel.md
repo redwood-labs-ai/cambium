@@ -64,6 +64,20 @@ effort "high"
   effort-model a co-declared `temperature` is silently dropped (it is inert on that model
   regardless of `effort`); on a sampling-model `effort` is never emitted. Declaring both
   is legal but only one takes effect per model generation.
+- **Which calls in a run carry it (#299).** `effort` is a property of the gen's model, so
+  it travels with every call that runs *on that model*: the `Generate` step, each
+  `mode :agentic` turn, a repair pass with no `repair` slot declared, and the
+  `constrain :compound` review when no separate review model is configured. It is
+  deliberately **not** sent to a model the gen didn't pick: a declared `repair` slot model
+  (RED-176 — the slot refuses `effort` at parse time and doesn't inherit the gen's), a
+  `constrain :compound` review with its own `model:`, or a non-Anthropic entry in a
+  `model` fallback chain (forwarded, but inert — `openaiCompatible` never reads it). The
+  fan-out cache prewarm omits it because `output_config` is not part of the prompt and so
+  cannot move the cache key, and `mode :decision` refuses `effort` at parse time.
+  Before #299 the answer was "none of them": the runner-level dispatcher accepted `effort`
+  from every step handler and never forwarded it to the provider, so from 0.10.0 through
+  0.13.0 a declared `effort` compiled into the IR and then silently vanished at the
+  provider boundary.
 
 ## `exclude_from_prefix` (#182)
 
@@ -161,7 +175,7 @@ end
 - Unknown model provider or model not available.
 - Return schema not found (caught at compile time by RED-210).
 - Memory-using gen without `better-sqlite3`/`sqlite-vec` installed → clear plan-time error.
-- `effort` with a value outside `low`/`medium`/`high`/`max`, or on a non-`anthropic:` model → compile error (RED-325).
+- `effort` with a value outside `low`/`medium`/`high`/`xhigh`/`max`, or on a non-`anthropic:` model → compile error (RED-325).
 - `exclude_from_prefix` naming the `grounded_in` source → compile error (#182). The grounding document is the largest stable payload in the prefix and the entire reason the prefix exists; excluding it would silently destroy the caching the gen was tuned for.
 - `exclude_from_prefix` naming a `_`-prefixed key → compile error (#182). Those keys never reach the prompt at all, so the declaration is a no-op that reads as if it did something.
 - `exclude_from_prefix` with a key outside `/^[a-z][a-z0-9_]*$/` → compile error (#182).

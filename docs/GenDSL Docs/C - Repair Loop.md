@@ -13,6 +13,59 @@ Turn "LLM outputs are flaky" into a deterministic operational behavior.
 - On a semantic failure (review, consensus disagreement, corrector feedback, grounding), the same
   three plus the task text and the source document — see § What repair sees, per failure class.
 - Cap attempts (default 2).
+- **No candidate is not a wrong candidate (#273).** When the Generate output carries no parseable
+  JSON at all (`No data to validate`), there is nothing for structural repair to "edit invalid
+  fields" in — the repair prompt holds only schema + task + errors, never the tool results or the
+  drafted answer, so the model INVENTS values to fill the shape (3 of 88 real agentic runs shipped
+  `ok: true` with fabricated tickers; the drafted answer was prose no step ever read). The loop
+  re-asks the GEN's own model once — an in-conversation turn for `mode :agentic` (§ Re-ask for
+  missing JSON), a context-full semantic re-ask for single mode — re-validates the re-asked
+  candidate, and on still nothing fails the run honestly (`validation`, zero `Repair` rows).
+  Structural repair now only ever sees an existing-but-invalid candidate.
+
+## Re-ask for missing JSON (#273)
+
+Two dispatch points, one shared directive (`NO_JSON_REASK_DIRECTIVE`: "answer in JSON now, base
+every value on the tool results you actually received; do not invent values"):
+
+- **Agentic**: the re-ask is pushed INTO the live conversation — the model's prose becomes an
+  assistant turn, the directive a user turn, and the loop `continue`s. Tool transcripts (role
+  `tool` messages) stay in history, so the re-ask is grounded in what the tools actually returned.
+  One re-ask per run; a still-unparseable answer lands on the `AgenticFinal` row (`ok: false`) and
+  the run fails `validation`. A ceiling hit stays terminal (RED-174) — re-ask is skipped, the run
+  fails `output_ceiling`. The re-ask **buys a turn of its own** (it raises the loop's turn limit by
+  one, once) and never buys a tool call — the tool budget is enforced separately, by `forceFinal`.
+  It has to: a run that spends its budget one tool call per turn reaches the forced-final turn on
+  the loop's LAST iteration, so a re-ask bounded by the tool budget could not fire in precisely the
+  shape most worth rescuing — the model did all the tool work, then wrote it up in prose. When the
+  re-ask was spent and the loop then reaches the force-final turn, the "STOP calling tools" text
+  MERGES into the trailing directive turn. That merge is a prompt-quality choice, not an API
+  constraint (the Anthropic Messages API accepts consecutive same-role messages and folds them into
+  one turn): one coherent ask beats two that half-conflict about what to do next.
+- **Single / consensus extra-pass / enrich sub-gen**: the validate loop re-asks through
+  `handleGenerate` with `extraTail` = the directive. The directive rides the UNCACHED tail — the
+  cacheable prefix stays byte-identical to the original Generate, so the re-ask reads the warm
+  prompt-cache entry instead of re-billing the document — and the model still sees task + documents
+  ahead of the ask. One re-ask per gen (per extra pass / per sub-gen); then fail.
+
+The no-data class is decided **before** stop-on-no-improvement. Both end the run identically, so
+the ordering is purely about which row explains it: two prose answers carry identical error counts,
+so the improvement check would otherwise win the race and file the run as `RepairStopped`
+(`reason: "no_improvement"`) — naming a repair that never ran. Everything that is not the no-data
+class falls through to the improvement check unchanged.
+
+Where this meets the trace: a `ReaskForJson` row records each re-ask, and a re-asked candidate
+re-validates as `ValidateAfterReask` rather than `ValidateAfterRepair` — these runs have no
+`Repair` row for such a name to refer to (see
+[[C - Trace (observability)]]); the terminal honest-fail row names the class — `reask_failed`,
+`reask_spent_agentic` when the in-loop re-ask already ran, or `reask_not_issued_agentic` when it
+never did (a ceiling hit skips it). The outcome is read off the re-ask rows actually in the trace,
+so it can never claim a re-ask that nothing backs.
+
+`mode :decision` is exempt: its candidate came from `decide()`, not from a model turn, so there is
+nothing to re-ask — the pre-#273 tail (deterministic `Repair` row + `validation` fail) stands, and
+`generateText` stays uncalled (DEC-009b pins).
+
 
 ## What repair sees, per failure class (RED-175)
 `handleRepair` takes an optional source bundle — `{ documents, groundingTextByKey, task }` — and only
@@ -20,7 +73,7 @@ the sites whose complaint is about *meaning* pass it:
 
 | Site | Complaint | Model that runs it | Source in the request? |
 |---|---|---|---|
-| `Validate` (`ValidateAfterRepair`), `ValidateConsensusPass`, `enrich` sub-gen | shape (AJV) | `repair` slot if declared | no — context-free by design |
+| `Validate` (`ValidateAfterRepair`), `ValidateConsensusPass`, `enrich` sub-gen | shape (AJV) — existing-but-invalid candidate only; *no candidate at all* is the #273 re-ask path (§ Re-ask for missing JSON), not repair | `repair` slot if declared | no — context-free by design |
 | Review | meaning | gen's model | yes |
 | Consensus disagreement | meaning | gen's model | yes |
 | Corrector feedback | meaning | gen's model | yes |
@@ -148,6 +201,7 @@ Where this meets the trace: `Repair.meta.model_used` names the model that ran an
 - Cannot repair into a valid instance → hard fail with trace.
 - Corrector `max_attempts` exhausted with errors still pending → `CorrectAcceptedWithErrors` step emitted; run continues with schema-valid-but-unhealed output (RED-298).
 - Repair hits its own ceiling → `output_ceiling` on the `Repair` step, loop stops, run fails as `output_ceiling` (not `validation`). The step and the error name the repair model / repair slot, not the gen (RED-176 + RED-174).
+- No JSON at all → one semantic re-ask (§ Re-ask for missing JSON), then honest `validation` fail with zero `Repair` rows and a terminal `ReaskForJson` row naming the class (#273). No fabricated candidate can reach the caller — the pre-#273 behavior was `ok: true` with values the model invented from the schema alone.
 
 ## See also
 - [[P - returns]]
