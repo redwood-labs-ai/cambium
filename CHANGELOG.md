@@ -8,6 +8,26 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _Nothing yet._
 
+## [0.14.1] — 2026-10-02
+
+`npm audit` flagged the pinned `undici@8.10.0` with three HIGH-severity advisories two months
+after it landed. None of the three turn out to be reachable through how Cambium actually calls
+undici — but a direct dependency sitting on every tool's egress path doesn't get to wait for the
+next minor to find out which CVEs matter.
+
+### Security
+
+- **`undici` 8.10.0 → 8.11.2 — three HIGH advisories, none reachable through Cambium's own usage.** [GHSA-rfgv-xxqx-mfg5](https://github.com/advisories/GHSA-rfgv-xxqx-mfg5) (DoS via unrequested WebSocket subprotocol), [GHSA-w293-vg96-wgc3](https://github.com/advisories/GHSA-w293-vg96-wgc3) (TLS certificate validation bypass via dropped connect options in `BalancedPool`), and [GHSA-vp8m-p9jh-q5pm](https://github.com/advisories/GHSA-vp8m-p9jh-q5pm) (cross-origin cache poisoning via missing origin isolation in interceptors) all require a surface `network-guard.ts#guardedFetch` doesn't touch: it dispatches through a plain `undici.Agent` + `fetch`, never `BalancedPool`, an interceptor chain, or a WebSocket. Fixed regardless, along with four MODERATE and two LOW findings in the same `<8.10.2` range (WebSocket permessage-deflate decompression DoS, orphaned `RetryHandler` response body, response splitting via retry interceptor, cross-user cookie disclosure, oversized chunked-response truncation, unsafe-method cache replay) — none of those reach Cambium's usage either, for the same reason. Direct, exact-pinned dependency (`packages/cambium-runner/package.json`), so remediation is a version bump with no `overrides` entry. 8.11.2 rather than the advisories' minimum 8.10.2: latest 8.x, 8 days old at the time of the bump — clear of the 7-day `minimum-release-age` gate (`npm run audit:ages`: 181/181 pass). ([#305](https://source.deerlarch.net/sbkeider/cambium/issues/305))
+
+### Changed
+
+- **`@redwood-labs/cambium`** and **`@redwood-labs/cambium-runner`** bump to `0.14.1`.
+
+### Upgrade from 0.14.0
+
+Nothing in the DSL, the IR, or the serve wire changed. Re-install to pick up the patched
+`undici`; no gen, pipeline, or app code needs to change.
+
 ## [0.14.0] — 2026-09-29 — The Receipt
 
 Three of eighty-eight real agentic runs shipped `ok: true` with a ticker the source document
